@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <title>Clonyfy — Clone any website with AI in seconds.</title>
+  <defs>
+    <radialGradient id="glow" cx="1" cy="0" r="1.1">
+      <stop stop-color="#303030" />
+      <stop offset="1" stop-color="#0a0a0a" />
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#glow)" />
+  <rect x="32.5" y="32.5" width="1135" height="565" rx="24" stroke="#393939" />
+  <g stroke="#fafafa" stroke-width="4.5">
+    <rect x="76" y="76" width="28" height="28" rx="7" />
+    <rect x="88" y="88" width="28" height="28" rx="7" />
+  </g>
+  <g fill="#fafafa" font-family="Arial, Helvetica, sans-serif">
+    <text x="134" y="110" font-size="36" font-weight="600" letter-spacing="-1">Clonyfy</text>
+    <text x="76" y="265" font-size="80" font-weight="600" letter-spacing="-3">Clone any website</text>
+    <text x="76" y="357" font-size="80" font-weight="600" letter-spacing="-3">with AI in seconds.</text>
+    <text x="80" y="418" font-size="25" fill="#aaa">Paste a URL. Make it yours. Ship it.</text>
+    <text x="80" y="541" font-size="21" fill="#aaa">clonyfy.com</text>
+  </g>
+  <g stroke="#fafafa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M1060 532h48m-15-15 15 15-15 15" />
+  </g>
+</svg>
