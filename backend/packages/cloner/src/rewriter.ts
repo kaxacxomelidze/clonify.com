@@ -5,10 +5,18 @@ import { logger } from './logger.js';
 import type { PageRecord, AssetEntry } from './types.js';
 
 function normalizeAssetLookupUrl(value: string): string {
-  return String(value || '')
+  let s = String(value || '')
     .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
+    .replace(/&#x2F;/gi, '/')
+    .replace(/\\u002[fF]/g, '/')
+    .replace(/\\\//g, '/')
     .trim();
+  // HTML/JSON often double-encodes path segments (%252F → %2F).
+  try {
+    if (/%25[0-9a-f]{2}/i.test(s)) s = decodeURIComponent(s);
+  } catch { /* keep raw */ }
+  return s;
 }
 
 /**
@@ -33,6 +41,34 @@ function preferLiveMediaEnabled(): boolean {
   return prefer === '1' || prefer === 'true';
 }
 
+/** Strip common CDN resize/transform query keys so variant URLs share one map entry. */
+function stripCdnTransformParams(href: string): string[] {
+  const out: string[] = [];
+  try {
+    const u = new URL(href);
+    const bare = new URL(u.href);
+    for (const key of [
+      'width', 'height', 'w', 'h', 'crop', 'quality', 'q', 'auto', 'fit', 'format', 'fm',
+      'dpr', 'sharp', 'blur', 'sat', 'url',
+    ]) {
+      bare.searchParams.delete(key);
+    }
+    out.push(bare.href, bare.pathname, bare.pathname + bare.search);
+    // Next.js /_next/image?url=… — also index the inner asset URL pathname.
+    if (/\/_next\/image$/i.test(u.pathname) || /\/cdn-cgi\/image\//i.test(u.pathname)) {
+      const inner = u.searchParams.get('url');
+      if (inner) {
+        try {
+          const decoded = decodeURIComponent(inner);
+          const innerUrl = new URL(decoded, u.origin);
+          out.push(innerUrl.href, innerUrl.pathname, innerUrl.pathname + innerUrl.search);
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
 function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
   const m = new Map<string, string>();
   for (const a of assets) {
@@ -49,16 +85,14 @@ function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
       variants.add(`${u.pathname}${u.search}${u.hash}`);
       variants.add(`${u.pathname}${u.search}`);
       variants.add(u.pathname);
-      // Shopify CDN serves the same file under many width/quality query variants.
-      if (/cdn\.shopify\.com$/i.test(u.hostname) || /shopifycdn|shopifycloud|myshopify/i.test(u.hostname)) {
+      try {
+        variants.add(decodeURIComponent(u.pathname));
+      } catch { /* ignore */ }
+      for (const v of stripCdnTransformParams(u.href)) variants.add(v);
+      // Shopify / generic CDNs: same file under many width/quality query variants.
+      if (/cdn\.shopify\.com$/i.test(u.hostname) || /shopifycdn|shopifycloud|myshopify/i.test(u.hostname)
+        || /cloudinary|imgix|imagekit|cloudfront|akamai|fastly/i.test(u.hostname)) {
         variants.add(u.pathname);
-        const bare = new URL(u.href);
-        bare.searchParams.delete('width');
-        bare.searchParams.delete('height');
-        bare.searchParams.delete('crop');
-        bare.searchParams.delete('quality');
-        variants.add(bare.href);
-        variants.add(bare.pathname);
       }
     } catch { /* asset URL should be absolute, but keep rewriting tolerant */ }
 
@@ -67,6 +101,40 @@ function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
     }
   }
   return m;
+}
+
+function lookupAssetPath(assetMap: Map<string, string>, value: string, baseUrl: string): string | null {
+  if (!value) return null;
+  const decoded = normalizeAssetLookupUrl(value);
+  const clean = decoded.split('?')[0].split('#')[0];
+
+  if (assetMap.has(value)) return assetMap.get(value)!;
+  if (assetMap.has(decoded)) return assetMap.get(decoded)!;
+  if (assetMap.has(clean)) return assetMap.get(clean)!;
+
+  try {
+    const abs = new URL(decoded, baseUrl).href;
+    const absClean = abs.split('?')[0].split('#')[0];
+    if (assetMap.has(abs)) return assetMap.get(abs)!;
+    if (assetMap.has(absClean)) return assetMap.get(absClean)!;
+    for (const v of stripCdnTransformParams(abs)) {
+      if (assetMap.has(v)) return assetMap.get(v)!;
+    }
+    const pathname = new URL(abs).pathname;
+    if (assetMap.has(pathname)) return assetMap.get(pathname)!;
+    try {
+      const decodedPath = decodeURIComponent(pathname);
+      if (assetMap.has(decodedPath)) return assetMap.get(decodedPath)!;
+    } catch { /* ignore */ }
+    for (const [key, localPath] of assetMap) {
+      try {
+        if (new URL(normalizeAssetLookupUrl(key), abs).pathname === pathname) return localPath;
+      } catch {
+        if (key.endsWith(pathname)) return localPath;
+      }
+    }
+  } catch { /* not a URL */ }
+  return null;
 }
 
 function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: string): string {
@@ -78,33 +146,15 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
     return decoded;
   }
 
-  const clean = decoded.split('?')[0].split('#')[0];
+  const mapped = lookupAssetPath(assetMap, value, baseUrl);
+  if (mapped) return mapped;
 
-  // Direct lookup (absolute URL already in map) — prefer local /_assets always.
-  if (assetMap.has(value)) return assetMap.get(value)!;
-  if (assetMap.has(decoded)) return assetMap.get(decoded)!;
-  if (assetMap.has(clean)) return assetMap.get(clean)!;
-
-  // Resolve root-relative and document-relative paths against origin, then look up
+  // Same-origin but not captured as asset — convert to relative path so links still work
   try {
     const abs = new URL(decoded, baseUrl).href;
     if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
       return abs;
     }
-    const absClean = abs.split('?')[0].split('#')[0];
-    if (assetMap.has(abs)) return assetMap.get(abs)!;
-    if (assetMap.has(absClean)) return assetMap.get(absClean)!;
-    // CDN images often differ only by width/quality query params — match by pathname.
-    const pathname = new URL(abs).pathname;
-    if (assetMap.has(pathname)) return assetMap.get(pathname)!;
-    for (const [key, localPath] of assetMap) {
-      try {
-        if (new URL(normalizeAssetLookupUrl(key), abs).pathname === pathname) return localPath;
-      } catch {
-        if (key.endsWith(pathname)) return localPath;
-      }
-    }
-    // Same-origin but not captured as asset — convert to relative path so links still work
     const u = new URL(abs);
     if (u.origin === new URL(baseUrl).origin) {
       if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) return abs;
@@ -151,25 +201,7 @@ const IMAGE_URL_ATTRS = new Set([
 ]);
 
 function assetMapHasUrl(assetMap: Map<string, string>, value: string, baseUrl: string): boolean {
-  const decoded = normalizeAssetLookupUrl(value);
-  if (assetMap.has(value) || assetMap.has(decoded)) return true;
-  const clean = decoded.split('?')[0].split('#')[0];
-  if (assetMap.has(clean)) return true;
-  try {
-    const abs = new URL(decoded, baseUrl).href;
-    const absClean = abs.split('?')[0].split('#')[0];
-    if (assetMap.has(abs) || assetMap.has(absClean)) return true;
-    const pathname = new URL(abs).pathname;
-    if (assetMap.has(pathname)) return true;
-    for (const key of assetMap.keys()) {
-      try {
-        if (new URL(normalizeAssetLookupUrl(key), abs).pathname === pathname) return true;
-      } catch {
-        if (key.endsWith(pathname)) return true;
-      }
-    }
-  } catch { /* not a URL */ }
-  return false;
+  return lookupAssetPath(assetMap, value, baseUrl) != null;
 }
 
 /**

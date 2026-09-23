@@ -206,6 +206,32 @@ describe('rewriteHtml — asset URL rewriting', () => {
     expect(out).not.toContain('cdn.shopify.com');
   });
 
+  it('rewrites imgix/cloudinary width variants to the captured local file', () => {
+    const html = `<html><head></head><body><img src="https://acme.imgix.net/hero.jpg?w=400&amp;q=80"></body></html>`;
+    const out = rewriteHtml(record({
+      html,
+      assets: [{
+        originalUrl: 'https://acme.imgix.net/hero.jpg?w=1200&q=90',
+        localPath: '/_assets/hero-imgix.jpg',
+      }],
+    }), ORIGIN);
+    expect(out).toContain('/_assets/hero-imgix.jpg');
+    expect(out).not.toContain('imgix.net');
+  });
+
+  it('rewrites &amp;-encoded CDN URLs to the captured asset', () => {
+    const html = `<html><head></head><body><img src="https://res.cloudinary.com/demo/image/upload/sample.jpg?w=600&amp;q=auto"></body></html>`;
+    const out = rewriteHtml(record({
+      html,
+      assets: [{
+        originalUrl: 'https://res.cloudinary.com/demo/image/upload/sample.jpg?w=1200&q=auto',
+        localPath: '/_assets/cloudinary-sample.jpg',
+      }],
+    }), ORIGIN);
+    expect(out).toContain('/_assets/cloudinary-sample.jpg');
+    expect(out).not.toContain('cloudinary.com');
+  });
+
   it('rewrites third-party CDN images and fonts to /_assets when captured', () => {
     const html = `<html><head><link rel="stylesheet" href="https://b.examplecdn.com/fonts.css"><style>@font-face{src:url('https://b.examplecdn.com/icon.woff2')}</style></head><body><img src="https://images.examplecdn.com/hero.jpg?w=860"></body></html>`;
     const out = rewriteHtml(record({

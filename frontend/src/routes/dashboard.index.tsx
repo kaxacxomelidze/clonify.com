@@ -22,6 +22,7 @@ import {
   pagePreviewUrl,
   triggerBrowserDownload,
 } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
 
 export const Route = createFileRoute("/dashboard/")({
   head: () => ({
@@ -66,6 +67,7 @@ type Run = {
   pages: number;
   depth: number;
   respectRobots: boolean;
+  fullSite?: boolean;
   outDir?: string;
   assets?: number;
   routes?: number;
@@ -75,10 +77,12 @@ type Run = {
 
 function ClonePage() {
   const { addJob, refreshJobs } = useDashboardWorkspace();
+  const { user, usage } = useAuth();
   const [url, setUrl] = useState("");
   const [maxPages, setMaxPages] = useState(8);
   const [depth, setDepth] = useState(2);
   const [respectRobots, setRespectRobots] = useState(true);
+  const [maxMode, setMaxMode] = useState(false);
   const [phase, setPhase] = useState<"idle" | "running" | "done" | "error">("idle");
   const [progress, setProgress] = useState(0);
   const [run, setRun] = useState<Run | null>(null);
@@ -90,6 +94,9 @@ function ClonePage() {
   const [exportBusy, setExportBusy] = useState("");
   const busy = phase === "running";
   const stage = STAGES.reduce((active, item, index) => (progress >= item.at ? index : active), 0);
+  const fullSiteAllowed =
+    user?.planLimits?.fullSiteAllowed === true || usage?.limits?.fullSiteAllowed === true;
+  const useMax = fullSiteAllowed && maxMode;
 
   useEffect(() => {
     try {
@@ -104,9 +111,14 @@ function ClonePage() {
   }, []);
 
   useEffect(() => {
+    if (!fullSiteAllowed && maxMode) setMaxMode(false);
+  }, [fullSiteAllowed, maxMode]);
+
+  useEffect(() => {
     if (phase !== "running" || !run?.id) return;
     const jobId = run.id;
-    const targetPages = Math.max(1, run.pages || maxPages);
+    const fullSiteRun = !!run.fullSite;
+    const targetPages = Math.max(1, fullSiteRun ? 50 : run.pages || maxPages);
     let cancelled = false;
     let logsFrom = 0;
     const allLogs: string[] = [];
@@ -129,7 +141,9 @@ function ClonePage() {
               ? progress
               : status === "saving"
                 ? Math.max(progress, 92)
-                : Math.min(90, Math.round((pages / targetPages) * 85) + 5);
+                : fullSiteRun
+                  ? Math.min(90, Math.round(8 + Math.min(pages, 200) * 0.4))
+                  : Math.min(90, Math.round((pages / targetPages) * 85) + 5);
         setProgress(pct);
         setRun((current) => {
           if (!current || current.id !== jobId) return current;
@@ -139,6 +153,7 @@ function ClonePage() {
             assets: Number(job.assets) || current.assets || 0,
             routes: Number(job.apiRoutes) || current.routes || 0,
             status,
+            fullSite: current.fullSite || !!job.fullSite,
           };
           if (job.outDir) next.outDir = job.outDir;
           if (job.startedAt) next.startedAt = job.startedAt;
@@ -207,7 +222,7 @@ function ClonePage() {
     };
     // progress intentionally omitted from deps — used only for saving floor
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, run?.id, run?.domain, run?.pages, maxPages, addJob, refreshJobs]);
+  }, [phase, run?.id, run?.domain, run?.pages, run?.fullSite, maxPages, addJob, refreshJobs]);
 
   async function start(source = url) {
     if (busy) return;
@@ -227,12 +242,13 @@ function ClonePage() {
       )
         throw new Error("url");
       if (
-        !Number.isInteger(maxPages) ||
-        maxPages < 1 ||
-        maxPages > 60 ||
-        !Number.isInteger(depth) ||
-        depth < 1 ||
-        depth > 5
+        !useMax &&
+        (!Number.isInteger(maxPages) ||
+          maxPages < 1 ||
+          maxPages > 60 ||
+          !Number.isInteger(depth) ||
+          depth < 1 ||
+          depth > 5)
       ) {
         setError("Choose 1–60 pages and a crawl depth of 1–5.");
         return;
@@ -241,16 +257,19 @@ function ClonePage() {
       const { startClone } = await import("@/lib/api");
       const job = await startClone({
         url: parsed.href,
-        maxPages,
-        depth,
+        maxPages: useMax ? 1 : maxPages,
+        depth: useMax ? 1 : depth,
         ignoreRobots: !respectRobots,
+        fullSite: useMax,
       });
       setRun({
         id: job.id,
         domain: job.hostname || parsed.host,
-        pages: job.maxPages || maxPages,
-        depth,
+        // For Max, show captured count (starts at 0). Otherwise keep page budget for progress %.
+        pages: useMax ? 0 : job.maxPages || maxPages,
+        depth: job.depth || depth,
         respectRobots,
+        fullSite: !!(job.fullSite || useMax),
         ...(job.outDir ? { outDir: job.outDir } : {}),
         ...(job.startedAt ? { startedAt: job.startedAt } : {}),
         assets: 0,
@@ -271,7 +290,11 @@ function ClonePage() {
       };
       if (job.outDir) runningJob.outDir = job.outDir;
       addJob(runningJob);
-      setNotice("Clone started on the Backend. You can close this tab — the job keeps running.");
+      setNotice(
+        useMax
+          ? "Full-site Max clone started. This can take much longer than a normal capture."
+          : "Clone started on the Backend. You can close this tab — the job keeps running.",
+      );
     } catch (err) {
       if (err instanceof Error && err.message === "url") {
         setError("Enter a website address such as https://example.com.");
@@ -350,7 +373,9 @@ function ClonePage() {
           className="mt-6 flex flex-wrap items-center gap-6 disabled:opacity-60"
         >
           <legend className="sr-only">Capture settings</legend>
-          <label className="flex items-center gap-3 text-sm text-muted-foreground">
+          <label
+            className={`flex items-center gap-3 text-sm text-muted-foreground ${useMax ? "opacity-50" : ""}`}
+          >
             Max pages
             <input
               aria-label="Max pages"
@@ -358,11 +383,14 @@ function ClonePage() {
               min={1}
               max={60}
               value={maxPages}
+              disabled={useMax}
               onChange={(event) => setMaxPages(Number(event.target.value))}
-              className="w-20 rounded-xl border border-border bg-transparent p-3 text-foreground"
+              className="w-20 rounded-xl border border-border bg-transparent p-3 text-foreground disabled:cursor-not-allowed"
             />
           </label>
-          <label className="flex items-center gap-3 text-sm text-muted-foreground">
+          <label
+            className={`flex items-center gap-3 text-sm text-muted-foreground ${useMax ? "opacity-50" : ""}`}
+          >
             Depth
             <input
               aria-label="Depth"
@@ -370,8 +398,9 @@ function ClonePage() {
               min={1}
               max={5}
               value={depth}
+              disabled={useMax}
               onChange={(event) => setDepth(Number(event.target.value))}
-              className="w-20 rounded-xl border border-border bg-transparent p-3 text-foreground"
+              className="w-20 rounded-xl border border-border bg-transparent p-3 text-foreground disabled:cursor-not-allowed"
             />
           </label>
           <label className="flex min-h-11 items-center gap-3 text-sm">
@@ -383,7 +412,28 @@ function ClonePage() {
             />
             Respect robots.txt
           </label>
+          {fullSiteAllowed && (
+            <label
+              className="flex min-h-11 items-center gap-3 text-sm"
+              title="Clone every discoverable same-origin page at maximum depth (Scale)"
+            >
+              <input
+                type="checkbox"
+                checked={maxMode}
+                onChange={(event) => setMaxMode(event.target.checked)}
+                className="h-4 w-4 accent-white"
+                {...(useMax ? { "aria-describedby": "clone-max-hint" } : {})}
+              />
+              Max
+            </label>
+          )}
         </fieldset>
+        {useMax && (
+          <p id="clone-max-hint" className="mt-3 text-xs leading-relaxed text-muted-foreground">
+            Max mode clones the full site (all discoverable pages, maximum depth). Page and depth
+            limits above are ignored.
+          </p>
+        )}
         {error && (
           <p id="clone-error" role="alert" className="mt-4 text-sm text-destructive">
             {error}
@@ -501,7 +551,14 @@ function ClonePage() {
                 ["Pages captured", run.pages || 0],
                 ["Assets collected", run.assets || 0],
                 ["API routes", run.routes || 0],
-                ["Robots preference", run.respectRobots ? "Respect" : "Ignore"],
+                [
+                  "Capture mode",
+                  run.fullSite
+                    ? "Max (full site)"
+                    : run.respectRobots
+                      ? "Respect robots"
+                      : "Ignore robots",
+                ],
               ].map(([label, value]) => (
                 <div key={label} className="surface rounded-2xl p-4">
                   <p className="text-xs text-muted-foreground">{label}</p>

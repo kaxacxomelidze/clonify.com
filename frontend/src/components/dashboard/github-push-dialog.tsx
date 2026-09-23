@@ -2,7 +2,13 @@ import { useState } from "react";
 import { Github } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { ApiError, ensureApiAwake, fetchGitHubBranches, pushToGitHub } from "@/lib/api";
+import {
+  ApiError,
+  connectGitHub,
+  ensureApiAwake,
+  fetchGitHubBranches,
+  pushToGitHub,
+} from "@/lib/api";
 
 const TOKEN_SESSION_KEY = "clonyfy-github-token-session";
 
@@ -23,6 +29,14 @@ function writeSessionToken(token: string) {
   }
 }
 
+type GhRepo = {
+  fullName: string;
+  defaultBranch: string;
+  private: boolean;
+  htmlUrl: string;
+  pushedAt?: string;
+};
+
 export function GitHubPushDialog({
   open,
   onOpenChange,
@@ -38,11 +52,46 @@ export function GitHubPushDialog({
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("main");
   const [branches, setBranches] = useState<string[]>([]);
+  const [repos, setRepos] = useState<GhRepo[]>([]);
+  const [ghUser, setGhUser] = useState("");
   const [commitMessage, setCommitMessage] = useState(
     () => `Import Clonyfy clone${domain ? ` (${domain})` : ""}`,
   );
   const [busy, setBusy] = useState("");
   const [hint, setHint] = useState("");
+
+  const connect = async () => {
+    if (!token.trim() || token.trim().length < 20) {
+      toast.error("Paste a GitHub personal access token with repo scope.");
+      return;
+    }
+    setBusy("connect");
+    setHint("Validating token with GitHub…");
+    try {
+      await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
+      const data = await connectGitHub(token.trim());
+      writeSessionToken(token.trim());
+      setGhUser(data.user?.login || "");
+      setRepos(data.repos || []);
+      if (data.repos?.length && !repo) {
+        const first = data.repos[0]!;
+        setRepo(first.fullName);
+        setBranch(first.defaultBranch || "main");
+      }
+      toast.success(
+        data.user?.login
+          ? `Connected as @${data.user.login} (${data.repos?.length || 0} repos).`
+          : "GitHub token accepted.",
+      );
+      setHint("");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not connect to GitHub.";
+      toast.error(message);
+      setHint(message);
+    } finally {
+      setBusy("");
+    }
+  };
 
   const loadBranches = async () => {
     if (!token.trim() || !repo.trim()) {
@@ -77,7 +126,9 @@ export function GitHubPushDialog({
       return;
     }
     setBusy("push");
-    setHint("Checking GitHub repo, then uploading clone files…");
+    setHint(
+      "Checking GitHub repo, then uploading clone files. Large clones can take several minutes — keep this tab open.",
+    );
     try {
       await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
       const payload: {
@@ -107,7 +158,10 @@ export function GitHubPushDialog({
       if (openUrl) window.open(openUrl, "_blank", "noopener,noreferrer");
       onOpenChange(false);
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : "GitHub push failed.";
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : "GitHub push failed. Check the token scope and try again.";
       toast.error(message);
       setHint(message);
     } finally {
@@ -140,14 +194,32 @@ export function GitHubPushDialog({
               placeholder="ghp_…"
             />
           </label>
+          <button
+            type="button"
+            className="dashboard-button"
+            onClick={() => void connect()}
+            disabled={busy === "connect"}
+          >
+            {busy === "connect"
+              ? "Connecting…"
+              : ghUser
+                ? `Reconnect (@${ghUser})`
+                : "Validate token"}
+          </button>
           <label className="block text-sm">
             Repository
             <input
               value={repo}
               onChange={(e) => setRepo(e.target.value)}
+              list="clonyfy-gh-repos"
               className="mt-2 w-full rounded-xl border border-border bg-background p-3"
               placeholder="owner/repo"
             />
+            <datalist id="clonyfy-gh-repos">
+              {repos.map((item) => (
+                <option key={item.fullName} value={item.fullName} />
+              ))}
+            </datalist>
           </label>
           <div className="flex flex-wrap items-end gap-2">
             <label className="block min-w-[10rem] flex-1 text-sm">

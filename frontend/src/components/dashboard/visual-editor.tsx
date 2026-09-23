@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { ImagePlus, Save } from "lucide-react";
 import { toast } from "sonner";
 import {
   ApiError,
   consumeUsage,
+  ensureApiAwake,
   fetchClonePages,
   fetchPageHtml,
   importAsset,
@@ -19,6 +21,16 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+/** Strip editor-only chrome before save (backend also sanitizes). */
+function htmlForSave(doc: Document): string {
+  const clone = doc.documentElement.cloneNode(true) as HTMLElement;
+  clone.querySelector("#clonyfy-editor-style")?.remove();
+  clone.querySelectorAll("[contenteditable]").forEach((el) => el.removeAttribute("contenteditable"));
+  clone.querySelectorAll(".clonyfy-edit-target").forEach((el) => el.classList.remove("clonyfy-edit-target"));
+  clone.querySelectorAll(".clonyfy-edit-selected").forEach((el) => el.classList.remove("clonyfy-edit-selected"));
+  return "<!DOCTYPE html>\n" + clone.outerHTML;
+}
+
 export function VisualEditor({
   outDir,
   initialRoute = "/",
@@ -26,9 +38,12 @@ export function VisualEditor({
   outDir: string;
   initialRoute?: string;
 }) {
+  const navigate = useNavigate();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const selectedImgRef = useRef<HTMLImageElement | null>(null);
+  const loadGenRef = useRef(0);
+  const editQuotaChargedRef = useRef(false);
   const [routes, setRoutes] = useState<string[]>([]);
   const [route, setRoute] = useState(initialRoute);
   const [html, setHtml] = useState("");
@@ -36,40 +51,62 @@ export function VisualEditor({
   const [busy, setBusy] = useState("");
   const [dirty, setDirty] = useState(false);
 
+  const syncRouteInUrl = useCallback(
+    (nextRoute: string) => {
+      void navigate({
+        to: "/dashboard/editor",
+        search: { outDir, route: nextRoute },
+        replace: true,
+      });
+    },
+    [navigate, outDir],
+  );
+
   const load = useCallback(
     async (nextRoute: string) => {
+      const gen = ++loadGenRef.current;
       setLoading(true);
       try {
+        await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
         const pageHtml = await fetchPageHtml(outDir, nextRoute, "editor");
+        if (gen !== loadGenRef.current) return;
         setHtml(pageHtml);
         setDirty(false);
-        try {
-          await consumeUsage("edit", outDir);
-        } catch (err) {
-          if (err instanceof ApiError && err.status === 429) {
-            toast.error(err.message);
+        selectedImgRef.current = null;
+        if (!editQuotaChargedRef.current) {
+          editQuotaChargedRef.current = true;
+          try {
+            await consumeUsage("edit", outDir);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 429) {
+              toast.error(err.message);
+            }
           }
         }
       } catch (err) {
+        if (gen !== loadGenRef.current) return;
         toast.error(err instanceof ApiError ? err.message : "Could not load page for editing.");
         setHtml("");
       } finally {
-        setLoading(false);
+        if (gen === loadGenRef.current) setLoading(false);
       }
     },
     [outDir],
   );
 
   useEffect(() => {
+    editQuotaChargedRef.current = false;
     let cancelled = false;
     (async () => {
       try {
+        await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
         const list = await fetchClonePages(outDir);
         if (cancelled) return;
         const normalized = list.length ? list : ["/"];
         setRoutes(normalized);
         const start = normalized.includes(initialRoute) ? initialRoute : normalized[0] || "/";
         setRoute(start);
+        syncRouteInUrl(start);
         await load(start);
       } catch (err) {
         if (!cancelled) {
@@ -80,8 +117,19 @@ export function VisualEditor({
     })();
     return () => {
       cancelled = true;
+      loadGenRef.current += 1;
     };
-  }, [outDir, initialRoute, load]);
+  }, [outDir, initialRoute, load, syncRouteInUrl]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -94,6 +142,10 @@ export function VisualEditor({
         img.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
+          doc.querySelectorAll("img.clonyfy-edit-selected").forEach((el) => {
+            el.classList.remove("clonyfy-edit-selected");
+          });
+          img.classList.add("clonyfy-edit-selected");
           selectedImgRef.current = img;
           toast.message("Image selected — use Replace image to swap it.");
         });
@@ -107,6 +159,7 @@ export function VisualEditor({
   const onRouteChange = async (next: string) => {
     if (dirty && !window.confirm("Discard unsaved edits on this page?")) return;
     setRoute(next);
+    syncRouteInUrl(next);
     await load(next);
   };
 
@@ -118,8 +171,8 @@ export function VisualEditor({
     }
     setBusy("save");
     try {
-      const outer = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
-      await savePage(outDir, route, outer);
+      await ensureApiAwake({ attempts: 3, timeoutMs: 10_000 }).catch(() => {});
+      await savePage(outDir, route, htmlForSave(doc));
       setDirty(false);
       toast.success("Page saved.");
     } catch (err) {
@@ -138,10 +191,13 @@ export function VisualEditor({
     }
     setBusy("asset");
     try {
+      await ensureApiAwake({ attempts: 3, timeoutMs: 10_000 }).catch(() => {});
       const dataUrl = await fileToDataUrl(file);
       const uploaded = await importAsset(outDir, dataUrl, file.name);
-      img.setAttribute("src", uploaded.previewUrl || uploaded.path);
+      img.setAttribute("src", uploaded.path);
       img.removeAttribute("srcset");
+      img.removeAttribute("data-src");
+      img.removeAttribute("data-srcset");
       setDirty(true);
       toast.success("Image replaced — save to keep the change.");
     } catch (err) {
@@ -199,6 +255,7 @@ export function VisualEditor({
       <p className="text-xs text-muted-foreground">
         Click text to edit. Click an image, then Replace image. Save writes to the Backend via
         /api/save-page.
+        {dirty ? " Unsaved changes." : ""}
       </p>
       <div className="overflow-hidden rounded-2xl border border-border bg-background">
         {loading ? (

@@ -198,6 +198,16 @@ export async function apiFetch<T = unknown>(path: string, options: ApiFetchOptio
             : res.status === 502 || res.status === 503 || res.status === 504
               ? wakeUpMessage()
               : `HTTP ${res.status}`;
+        if (auth && res.status === 401) {
+          setAuthToken(null);
+          throw new ApiError(
+            message.includes("authenticated") || message.includes("Sign in")
+              ? "Session expired — sign in again."
+              : message || "Session expired — sign in again.",
+            401,
+            data,
+          );
+        }
         const err = new ApiError(message, res.status, data);
         if (attempt < retries && (res.status === 502 || res.status === 503 || res.status === 504)) {
           attempt++;
@@ -346,6 +356,8 @@ export async function startClone(input: {
   maxPages: number;
   depth: number;
   ignoreRobots?: boolean;
+  /** Scale plan: crawl all discoverable same-origin pages (server applies full-site budget). */
+  fullSite?: boolean;
 }) {
   await ensureApiAwake({ attempts: 8, timeoutMs: 12_000 }).catch(() => {});
   return apiFetch<CloneJobResponse>("/api/clone", {
@@ -355,6 +367,7 @@ export async function startClone(input: {
       maxPages: input.maxPages,
       depth: input.depth,
       ignoreRobots: !!input.ignoreRobots,
+      ...(input.fullSite ? { fullSite: true } : {}),
     },
     timeoutMs: 120_000,
     retries: 2,
@@ -440,24 +453,43 @@ export async function fetchClonePages(outDir: string) {
 }
 
 export async function fetchPageHtml(outDir: string, route = "/", mode?: "editor") {
+  await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
   const token = getAuthToken();
   const params = new URLSearchParams({ outDir, route });
   if (mode) params.set("mode", mode);
-  const res = await fetch(`${getApiBaseUrl()}/api/page?${params.toString()}`, {
-    headers: token ? { "X-Auth-Token": token } : {},
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      const data = JSON.parse(text) as { error?: string };
-      if (data.error) message = data.error;
-    } catch {
-      if (text) message = text.slice(0, 200);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90_000);
+  try {
+    const res = await fetch(`${getApiBaseUrl()}/api/page?${params.toString()}`, {
+      headers: token ? { "X-Auth-Token": token } : {},
+      signal: controller.signal,
+      credentials: "omit",
+      cache: "no-store",
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try {
+        const data = JSON.parse(text) as { error?: string };
+        if (data.error) message = data.error;
+      } catch {
+        if (text) message = text.slice(0, 200);
+      }
+      throw new ApiError(message, res.status);
     }
-    throw new ApiError(message, res.status);
+    return text;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError("Loading the page timed out. Wait for the Backend and try again.", 504);
+    }
+    if (isTransientNetworkError(err)) {
+      throw new ApiError("Could not reach the Backend to load this page.", 503, { cause: String(err) });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return text;
 }
 
 export async function savePage(outDir: string, route: string, html: string) {
@@ -506,7 +538,7 @@ async function downloadAuthedBlob(
   url: string,
   fallbackName: string,
   options?: { timeoutMs?: number },
-): Promise<{ blob: Blob; filename: string }> {
+): Promise<{ blob: Blob; filename: string; skipped?: number; truncated?: number; pages?: number }> {
   const timeoutMs = options?.timeoutMs ?? 120_000;
   await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
   const token = getAuthToken();
@@ -522,9 +554,17 @@ async function downloadAuthedBlob(
     const contentType = String(res.headers.get("content-type") || "");
     if (contentType.includes("application/json")) {
       const data = (await res.json()) as { error?: string };
-      throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
+      if (res.status === 401) setAuthToken(null);
+      throw new ApiError(
+        res.status === 401
+          ? "Session expired — sign in again."
+          : data.error || `HTTP ${res.status}`,
+        res.status,
+        data,
+      );
     }
     if (!res.ok) {
+      if (res.status === 401) setAuthToken(null);
       const text = await res.text().catch(() => "");
       let message = `HTTP ${res.status}`;
       try {
@@ -535,11 +575,21 @@ async function downloadAuthedBlob(
           message = "Figma export timed out or the Backend restarted. Try Export for Figma Desktop, or retry once.";
         }
       }
+      if (res.status === 401) message = "Session expired — sign in again.";
       throw new ApiError(message, res.status);
     }
     const disposition = res.headers.get("content-disposition") || "";
     const match = disposition.match(/filename="?([^"]+)"?/i);
-    return { blob: await res.blob(), filename: match?.[1] || fallbackName };
+    const skipped = Number(res.headers.get("X-Clonyfy-Figma-Skipped") || 0);
+    const truncated = Number(res.headers.get("X-Clonyfy-Figma-Truncated") || 0);
+    const pages = Number(res.headers.get("X-Clonyfy-Figma-Pages") || 0);
+    return {
+      blob: await res.blob(),
+      filename: match?.[1] || fallbackName,
+      ...(skipped ? { skipped } : {}),
+      ...(truncated ? { truncated } : {}),
+      ...(pages ? { pages } : {}),
+    };
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (err instanceof DOMException && err.name === "AbortError") {
@@ -562,11 +612,11 @@ async function downloadAuthedBlob(
 }
 
 export async function downloadFigmaSvgBlob(outDir: string, route = "/") {
-  return downloadAuthedBlob(downloadFigmaSvgUrl(outDir, route), "page.svg", { timeoutMs: 110_000 });
+  return downloadAuthedBlob(downloadFigmaSvgUrl(outDir, route), "page.svg", { timeoutMs: 130_000 });
 }
 
 export async function downloadFigmaZipBlob(outDir: string) {
-  return downloadAuthedBlob(downloadFigmaZipUrl(outDir), "clone-figma.zip", { timeoutMs: 180_000 });
+  return downloadAuthedBlob(downloadFigmaZipUrl(outDir), "clone-figma.zip", { timeoutMs: 240_000 });
 }
 
 export type FigmaScene = {
@@ -595,7 +645,7 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
   const token = getAuthToken();
   const params = new URLSearchParams({ outDir, route });
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 110_000);
+  const timer = setTimeout(() => controller.abort(), 130_000);
   try {
     const res = await fetch(`${getApiBaseUrl()}/api/figma/scene?${params.toString()}`, {
       headers: token ? { "X-Auth-Token": token } : {},
@@ -617,11 +667,14 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
       parts?: Array<{ url: string; index: number }>;
     } | null;
     if (!res.ok || !data || data.error) {
+      if (res.status === 401) setAuthToken(null);
       throw new ApiError(
-        data?.error ||
-          (res.status === 502 || res.status === 503 || res.status === 504
-            ? "Figma Desktop export timed out or the Backend restarted. Try again."
-            : `HTTP ${res.status}`),
+        res.status === 401
+          ? "Session expired — sign in again."
+          : data?.error ||
+            (res.status === 502 || res.status === 503 || res.status === 504
+              ? "Figma Desktop export timed out or the Backend restarted. Try again."
+              : `HTTP ${res.status}`),
         res.status,
         data,
       );
