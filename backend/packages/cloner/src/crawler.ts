@@ -34,6 +34,11 @@ const NON_PAGE_EXTS = new Set([
 ]);
 const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
 const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 150_000;
+/** Scale Max / full-site: give non-home pages more time before static salvage. */
+const FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
+  PAGE_CAPTURE_TIMEOUT,
+  parseInt(process.env.CLONYFY_FULL_SITE_PAGE_TIMEOUT_MS || '210000', 10) || 210_000,
+);
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
 const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 10_000 : 10_000;
@@ -112,9 +117,39 @@ function hashUrl(url: string): string {
 }
 
 export const SITEMAP_SEED_CAP = IS_SERVERLESS ? 20 : 80;
+/** Scale Max: seed far more sitemap URLs into the remaining page budget. */
+export const FULL_SITE_SITEMAP_SEED_CAP = Math.max(
+  SITEMAP_SEED_CAP,
+  parseInt(process.env.CLONYFY_FULL_SITE_SITEMAP_CAP || (IS_SERVERLESS ? '40' : '2000'), 10)
+    || (IS_SERVERLESS ? 40 : 2000),
+);
 export const START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS
   ? (IS_FAST_CLONE ? 90_000 : 150_000)
   : 300_000;
+
+/** Sitemap seed ceiling for this crawl (full-site raises the hard cap). */
+export function sitemapSeedCap(fullSite = false, remainingBudget = Infinity): number {
+  if (fullSite) {
+    const base = FULL_SITE_SITEMAP_SEED_CAP;
+    if (!Number.isFinite(remainingBudget)) return base;
+    return Math.max(0, Math.min(base, Math.floor(remainingBudget)));
+  }
+  // Non-full-site: seed up to remaining page budget (priority still demotes /legal/*).
+  if (!Number.isFinite(remainingBudget)) return SITEMAP_SEED_CAP;
+  return Math.max(0, Math.floor(remainingBudget));
+}
+
+/** Whether a failed Playwright capture should fall back to static HTML. */
+export function shouldStaticSalvageOnFailure(
+  isStartUrl: boolean,
+  fullSite = false,
+  serverless = IS_SERVERLESS,
+  fastClone = IS_FAST_CLONE,
+): boolean {
+  // Start URL + hosted/fast profiles always salvage. Full-site salvages every page
+  // so Max mode does not silently drop timed-out inner routes.
+  return isStartUrl || fullSite || serverless || fastClone;
+}
 
 const LOW_PRIORITY_PATH_RE = /^\/(legal|privacy|terms|cookie|gdpr|compliance|policy|policies|disclaimer|imprint|sitemap)(\/|$)/i;
 
@@ -583,8 +618,12 @@ async function crawlStatic(
 
   enqueueStatic(opts.url, 0);
   logger.info('  Checking sitemap...');
-  const sitemapUrls = prioritizeSitemapUrls(await fetchSitemap(origin), opts.url);
   const remaining = Math.max(0, opts.maxPages - visited.size);
+  const sitemapUrls = prioritizeSitemapUrls(
+    await fetchSitemap(origin),
+    opts.url,
+    sitemapSeedCap(!!opts.fullSite, remaining),
+  );
   for (const url of sitemapUrls.slice(0, remaining)) enqueueStatic(url, 1);
 
   for (let index = 0; index < staticQueue.length && records.length < opts.maxPages; index++) {
@@ -629,6 +668,14 @@ export async function crawl(
   const queue = new PQueue({ concurrency: opts.concurrency });
   const records: PageRecord[] = [];
 
+  if (opts.fullSite) {
+    logger.info(
+      `  Full-site crawl: sitemap seed cap=${sitemapSeedCap(true, opts.maxPages)}`
+      + `, page timeout=${Math.round(FULL_SITE_PAGE_CAPTURE_TIMEOUT / 1000)}s`
+      + `, static salvage=all failures`,
+    );
+  }
+
   if (STATIC_FIRST_SERVERLESS) {
     return crawlStatic(opts, origin, assetsDir, visited, records, onPage, 'serverless static-first mode');
   }
@@ -660,9 +707,13 @@ export async function crawl(
       logger.info('  Sitemap seeding skipped — page budget already filled by discovered links');
       return;
     }
-    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, remaining);
+    const seedCap = sitemapSeedCap(!!opts.fullSite, remaining);
+    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, seedCap);
     if (prioritized.length > 0) {
-      logger.info(`  Seeding ${prioritized.length} sitemap URL(s) into remaining budget (${remaining})`);
+      logger.info(
+        `  Seeding ${prioritized.length} sitemap URL(s) into remaining budget (${remaining}`
+        + `${opts.fullSite ? ', full-site' : ''})`,
+      );
       for (const url of prioritized) enqueue(url, 1, false);
     }
   };
@@ -738,7 +789,9 @@ export async function crawl(
 
         logger.info(`  [${records.length + 1}/${opts.maxPages}] ${clean}`);
         const isStartUrl = !!startNorm && clean === startNorm;
-        const captureTimeout = isStartUrl ? START_URL_CAPTURE_TIMEOUT : PAGE_CAPTURE_TIMEOUT;
+        const captureTimeout = isStartUrl
+          ? START_URL_CAPTURE_TIMEOUT
+          : (opts.fullSite ? FULL_SITE_PAGE_CAPTURE_TIMEOUT : PAGE_CAPTURE_TIMEOUT);
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         let timedOut = false;
         const capturePromise = capturePage(context, clean, assetsDir, hooks);
@@ -777,9 +830,9 @@ export async function crawl(
         const errMsg = (err as Error).message || String(err);
         logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
         // Start URL must not silently vanish — always try a static HTML salvage.
-        // Hosted Shopify/marketing pages often OOM or timeout in Playwright.
+        // Full-site / Max mode salvages every failed page so coverage stays high.
         const isStartUrl = !!startNorm && clean === startNorm;
-        if (isStartUrl || IS_SERVERLESS || IS_FAST_CLONE) {
+        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);

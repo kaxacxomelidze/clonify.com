@@ -2,7 +2,19 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isServerlessRuntime, isProbablyHtmlDocument, prioritizeSitemapUrls, shouldUseBundledChromium, shouldUseStaticFirstServerless, systemBrowserChannel, isFastCloneProfile } from '../crawler.js';
+import {
+  isServerlessRuntime,
+  isProbablyHtmlDocument,
+  prioritizeSitemapUrls,
+  shouldUseBundledChromium,
+  shouldUseStaticFirstServerless,
+  systemBrowserChannel,
+  isFastCloneProfile,
+  sitemapSeedCap,
+  shouldStaticSalvageOnFailure,
+  FULL_SITE_SITEMAP_SEED_CAP,
+  SITEMAP_SEED_CAP,
+} from '../crawler.js';
 
 let tempDir = '';
 
@@ -126,5 +138,34 @@ describe('prioritizeSitemapUrls', () => {
     expect(urls[0]).toBe('https://stripe.com/');
     expect(urls).toContain('https://stripe.com/pricing');
     expect(urls).not.toContain('https://stripe.com/legal/privacy');
+  });
+});
+
+describe('sitemapSeedCap', () => {
+  it('caps full-site seeds at FULL_SITE_SITEMAP_SEED_CAP and remaining budget', () => {
+    expect(sitemapSeedCap(true, 50)).toBe(50);
+    expect(sitemapSeedCap(true, 50_000)).toBe(FULL_SITE_SITEMAP_SEED_CAP);
+    expect(FULL_SITE_SITEMAP_SEED_CAP).toBeGreaterThanOrEqual(SITEMAP_SEED_CAP);
+  });
+
+  it('lets non-full-site seeds use the remaining page budget', () => {
+    expect(sitemapSeedCap(false, 500)).toBe(500);
+    expect(sitemapSeedCap(false)).toBe(SITEMAP_SEED_CAP);
+  });
+});
+
+describe('shouldStaticSalvageOnFailure', () => {
+  it('always salvages the start URL', () => {
+    expect(shouldStaticSalvageOnFailure(true, false, false, false)).toBe(true);
+  });
+
+  it('salvages every failure in full-site mode', () => {
+    expect(shouldStaticSalvageOnFailure(false, true, false, false)).toBe(true);
+  });
+
+  it('salvages hosted/fast failures and skips quiet quality failures', () => {
+    expect(shouldStaticSalvageOnFailure(false, false, true, false)).toBe(true);
+    expect(shouldStaticSalvageOnFailure(false, false, false, true)).toBe(true);
+    expect(shouldStaticSalvageOnFailure(false, false, false, false)).toBe(false);
   });
 });

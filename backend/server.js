@@ -228,6 +228,18 @@ const CLONE_DEADLINE_MS = Math.max(
   parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String(CLONE_DEADLINE_DEFAULT_MS), 10)
     || CLONE_DEADLINE_DEFAULT_MS,
 );
+/** Scale Max / full-site: long-running dedicated hosts need hours, not ~18 minutes. */
+const FULL_SITE_DEADLINE_DEFAULT_MS = IS_VERCEL
+  ? CLONE_DEADLINE_MS
+  : (4 * 60 * 60 * 1000);
+const FULL_SITE_DEADLINE_MS = Math.max(
+  CLONE_DEADLINE_MS,
+  parseInt(process.env.CLONYFY_FULL_SITE_DEADLINE_MS || String(FULL_SITE_DEADLINE_DEFAULT_MS), 10)
+    || FULL_SITE_DEADLINE_DEFAULT_MS,
+);
+function cloneDeadlineMs(fullSite = false) {
+  return fullSite ? FULL_SITE_DEADLINE_MS : CLONE_DEADLINE_MS;
+}
 const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || (IS_VERCEL ? '5' : '500'), 10) || (IS_VERCEL ? 5 : 500));
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
 const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE_MAX_PAGES || '10000', 10) || 10000);
@@ -1593,9 +1605,13 @@ async function writeCloneFile(outDir, relPath, bytes, contentType = contentTypeF
   const normalized = normalizeCloneRelPath(relPath);
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes ?? ''), 'utf8');
   const localPath = join(outDir, normalized);
-  if (isInsideOutputDir(localPath) && existsSync(outDir)) {
-    mkdirSync(dirname(localPath), { recursive: true });
-    writeFileSync(localPath, buffer);
+  if (isInsideOutputDir(localPath)) {
+    try {
+      mkdirSync(dirname(localPath), { recursive: true });
+      writeFileSync(localPath, buffer);
+    } catch (err) {
+      console.warn(`[writeCloneFile] local write failed for ${normalized}:`, err?.message || err);
+    }
   }
   const storagePath = cloneStoragePath(outDir, normalized);
   try {
@@ -1655,7 +1671,7 @@ async function readPersistedJob(id) {
     if (isActiveJob(job) && !jobs.has(id)) {
       const startedMs = Date.parse(String(job.startedAt || '')) || 0;
       const ageMs = startedMs ? Date.now() - startedMs : 0;
-      const pastDeadline = startedMs > 0 && ageMs > CLONE_DEADLINE_MS + 60_000;
+      const pastDeadline = startedMs > 0 && ageMs > cloneDeadlineMs(!!job.fullSite) + 60_000;
       if (!IS_SERVERLESS || pastDeadline) {
         job.status = 'error';
         const msg = IS_SERVERLESS
@@ -1781,6 +1797,36 @@ async function loadRouteMapAsync(outDir) {
   if (!data) return null;
   try { return JSON.parse(data.toString('utf8')); }
   catch { return null; }
+}
+
+/** Rematerialize from Storage when disk route-map is gone (hosted restart). */
+async function loadRouteMapWithRematerialize(outDir) {
+  let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+  if (map) return map;
+  try {
+    const materialized = await materializeCloneOutput(outDir);
+    map = loadRouteMap(materialized.dir) || await inferRouteMapFromCapturedPages(materialized.dir);
+    if (materialized.dir !== outDir) {
+      try {
+        if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+        const pagesSrc = join(materialized.dir, 'captured-pages');
+        const pagesDst = join(outDir, 'captured-pages');
+        if (existsSync(pagesSrc)) {
+          mkdirSync(pagesDst, { recursive: true });
+          for (const name of readdirSync(pagesSrc)) {
+            copyFileSync(join(pagesSrc, name), join(pagesDst, name));
+          }
+        }
+        const rmSrc = join(materialized.dir, 'route-map.json');
+        if (existsSync(rmSrc)) copyFileSync(rmSrc, join(outDir, 'route-map.json'));
+        map = loadRouteMap(outDir) || map;
+      } catch { /* best-effort sync back to canonical outDir */ }
+      try { materialized.cleanup(); } catch {}
+    }
+  } catch (err) {
+    console.warn('[route-map] rematerialize failed:', err?.message || err);
+  }
+  return map;
 }
 
 function inferredRouteFromPageFilename(filename) {
@@ -2139,7 +2185,8 @@ function rewriteBareAssetUrls(html, outDir) {
 /** Undo preview-only asset proxy URLs so exported / local Next apps use /_assets/ paths. */
 function revertPreviewAssetUrls(html) {
   let out = String(html || '');
-  out = out.replace(/\/api\/asset\?[^"'>\s]*?\bpath=([^"'>&\s]+)/gi, (_m, encoded) => {
+  // Absolute API host + relative /api/asset?…path= encodeURIComponent(_assets/…)
+  out = out.replace(/(?:https?:\/\/[^"'>\s]+)?\/api\/asset\?[^"'>\s]*?\bpath=([^"'>&\s]+)/gi, (_m, encoded) => {
     try {
       const decoded = decodeURIComponent(String(encoded).replace(/\+/g, ' '));
       if (decoded.startsWith('/')) return decoded;
@@ -2152,10 +2199,51 @@ function revertPreviewAssetUrls(html) {
   return out;
 }
 
+function restoreNeutralizedScripts(html) {
+  let out = String(html || '');
+  // Restore <script type="text/plain" data-clonyfy-disabled-script> to original type.
+  out = out.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (match, attrs = '', body = '') => {
+    if (!/data-clonyfy-disabled-script/i.test(attrs)) return match;
+    let nextAttrs = String(attrs)
+      .replace(/\sdata-clonyfy-disabled-script\s*=\s*(["'])[^"']*\1/gi, '')
+      .replace(/\stype\s*=\s*(["'])text\/plain\1/gi, '');
+    const originalType = nextAttrs.match(/\sdata-clonyfy-original-type\s*=\s*(["'])(.*?)\1/i);
+    if (originalType) {
+      nextAttrs = nextAttrs.replace(/\sdata-clonyfy-original-type\s*=\s*(["']).*?\1/gi, '');
+      const restored = String(originalType[2] || '').replace(/&quot;/g, '"');
+      if (restored) nextAttrs += ` type="${restored.replace(/"/g, '&quot;')}"`;
+    }
+    return `<script${nextAttrs}>${body}</script>`;
+  });
+  // Restore commented-out modulepreload / script preload links.
+  out = out.replace(/<!--clonyfy-disabled-script-preload\s+([\s\S]*?)-->/gi, (_m, inner) => {
+    const tag = String(inner || '').trim();
+    return /^<link\b/i.test(tag) ? tag : '';
+  });
+  return out;
+}
+
 function sanitizeStoredCloneHtml(html) {
   let out = revertPreviewAssetUrls(html);
   out = stripPreviewNavigationPatch(out);
+  // Strip preview/editor-only Clonyfy injections so saves do not bake them in forever.
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-replay\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-share-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
+  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']clonyfy-editor-style["'][^>]*>[\s\S]*?<\/style>/gi, '');
   out = out.replace(/<base\b[^>]*>/gi, '');
+  out = out.replace(/\scontenteditable\s*=\s*(["']?)true\1/gi, '');
+  out = out.replace(/\sclass\s*=\s*(["'])([^"']*)\1/gi, (_m, q, classes) => {
+    const next = String(classes)
+      .split(/\s+/)
+      .filter((c) => c && c !== 'clonyfy-edit-target' && c !== 'clonyfy-edit-selected' && c !== 'clonyfy-preview')
+      .join(' ');
+    return next ? ` class=${q}${next}${q}` : '';
+  });
+  out = restoreNeutralizedScripts(out);
   return out;
 }
 
@@ -4037,7 +4125,7 @@ async function handleRequest(req, res) {
     if (!await canReadOutDir(pagesUser, outDir) && !await canReadCloneRecord(pagesUser, outDir)) {
       return json(res, { error: pagesUser ? 'Not found' : 'Not authenticated' }, pagesUser ? 404 : 401);
     }
-    const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+    const map = await loadRouteMapWithRematerialize(outDir);
     if (!map) return json(res, []);
     return json(res, Object.keys(map));
   }
@@ -4051,34 +4139,7 @@ async function handleRequest(req, res) {
       res.writeHead(404); res.end('Not found'); return;
     }
     const route = url.searchParams.get('route') || '/';
-    let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
-    if (!map) {
-      // Hosted: local disk may be gone after restart — rematerialize from Storage once.
-      try {
-        const materialized = await materializeCloneOutput(outDir);
-        map = loadRouteMap(materialized.dir) || await inferRouteMapFromCapturedPages(materialized.dir);
-        if (materialized.dir !== outDir) {
-          // Copy critical pages back into the canonical outDir when possible.
-          try {
-            if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-            const pagesSrc = join(materialized.dir, 'captured-pages');
-            const pagesDst = join(outDir, 'captured-pages');
-            if (existsSync(pagesSrc)) {
-              mkdirSync(pagesDst, { recursive: true });
-              for (const name of readdirSync(pagesSrc)) {
-                copyFileSync(join(pagesSrc, name), join(pagesDst, name));
-              }
-            }
-            const rmSrc = join(materialized.dir, 'route-map.json');
-            if (existsSync(rmSrc)) copyFileSync(rmSrc, join(outDir, 'route-map.json'));
-            map = loadRouteMap(outDir) || map;
-          } catch {}
-          try { materialized.cleanup(); } catch {}
-        }
-      } catch (err) {
-        console.warn('[api/page] rematerialize failed:', err?.message || err);
-      }
-    }
+    let map = await loadRouteMapWithRematerialize(outDir);
     if (!map) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('No clone loaded — output files are missing from disk and storage. Re-run the clone.');
@@ -4107,7 +4168,7 @@ async function handleRequest(req, res) {
       // srcdoc resolves relative URLs against the Frontend origin — force API host.
       html = html.replace(/(["'(])\/api\/asset\?/g, `$1${apiBase}/api/asset?`);
       if (html.match(/<head[^>]*>/i)) {
-        html = html.replace(/<head[^>]*>/i, (m) => `${m}<style id="clonyfy-editor-style">[contenteditable="true"]{outline:1px dashed rgba(91,141,239,.55);outline-offset:2px}img.clonyfy-edit-target{cursor:pointer;outline:2px solid transparent}img.clonyfy-edit-target:hover{outline-color:rgba(91,141,239,.7)}</style>`);
+        html = html.replace(/<head[^>]*>/i, (m) => `${m}<style id="clonyfy-editor-style">[contenteditable="true"]{outline:1px dashed rgba(91,141,239,.55);outline-offset:2px}img.clonyfy-edit-target{cursor:pointer;outline:2px solid transparent}img.clonyfy-edit-target:hover{outline-color:rgba(91,141,239,.7)}img.clonyfy-edit-selected{outline-color:#5b8def!important}</style>`);
       }
       if (html.match(/<body\b/i)) {
         html = html.replace(/<body\b([^>]*)>/i, (m, attrs = '') => {
@@ -4151,13 +4212,13 @@ async function handleRequest(req, res) {
       if (!await canUseCloneOutput(saveUser, outDir)) return json(res, { error: 'Not found' }, 404);
       const quota = await consumeUsageQuota(saveUser, 'save', { outDir, record: false });
       if (!quota.allowed) return json(res, { error: quota.error, usage: { kind: 'save', used: quota.used, limit: quota.limit } }, 429);
-      const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+      const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No clone loaded' }, 404);
-      const filename = map[route || '/'];
-      if (!filename) return json(res, { error: 'Route not found: ' + route }, 404);
-      await writeCloneFile(outDir, join('captured-pages', filename), sanitizeStoredCloneHtml(String(html ?? '')), 'text/html; charset=utf-8');
+      const resolved = resolveSharedRoute(map, route || '/', '/');
+      if (!resolved.filename) return json(res, { error: 'Route not found: ' + route }, 404);
+      await writeCloneFile(outDir, join('captured-pages', resolved.filename), sanitizeStoredCloneHtml(String(html ?? '')), 'text/html; charset=utf-8');
       const recorded = await consumeUsageQuota(saveUser, 'save', { outDir });
-      json(res, { ok: true, usage: { kind: 'save', used: recorded.used, limit: recorded.limit } });
+      json(res, { ok: true, route: resolved.route, usage: { kind: 'save', used: recorded.used, limit: recorded.limit } });
     }).catch(err => {
       if (res.headersSent) return;
       if (err?.message === 'request too large') return json(res, { error: 'Page HTML too large to save (limit 50MB)' }, 413);
@@ -4349,6 +4410,7 @@ async function handleRequest(req, res) {
       };
       if (fullSite) {
         job.logs.push(`[INFO] Full-site mode: cloning same-origin pages under ${target.hostname} (budget ${job.maxPages} pages, depth ${job.depth}).`);
+        job.logs.push(`[INFO] Full-site wall-clock budget: ${Math.round(cloneDeadlineMs(true) / 60000)} min (override with CLONYFY_FULL_SITE_DEADLINE_MS).`);
         if (IS_SERVERLESS) {
           job.logs.push(`[WARN] Full-site clones on serverless are time/disk limited. Prefer a dedicated Node host (Render) and set CLONYFY_FULL_SITE_MAX_PAGES.`);
         }
@@ -4553,11 +4615,12 @@ async function handleRequest(req, res) {
       if (USE_INLINE_CLONE) {
         // Never block the HTTP response on the crawl — Frontend needs job.id immediately to poll.
         // On Vercel, register with waitUntil so the isolate keeps running after the response.
+        const jobDeadlineMs = cloneDeadlineMs(fullSite);
         const cloneWork = (async () => {
           const deadlineTimer = setTimeout(() => {
-            job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping and salvaging captured pages.`);
+            job.logs.push(`[WARN] Clone deadline (${Math.round(jobDeadlineMs / 60000)} min) reached — stopping and salvaging captured pages.`);
             persistJob(job, { force: true });
-          }, CLONE_DEADLINE_MS);
+          }, jobDeadlineMs);
           try {
             const result = await Promise.race([
               runClone({
@@ -4579,7 +4642,7 @@ async function handleRequest(req, res) {
                   : undefined,
               }),
               new Promise((_, reject) => {
-                setTimeout(() => reject(new Error(`Clone deadline exceeded (${Math.round(CLONE_DEADLINE_MS / 60000)} min)`)), CLONE_DEADLINE_MS);
+                setTimeout(() => reject(new Error(`Clone deadline exceeded (${Math.round(jobDeadlineMs / 60000)} min)`)), jobDeadlineMs);
               }),
             ]);
             clearTimeout(deadlineTimer);
@@ -4654,13 +4717,14 @@ async function handleRequest(req, res) {
             });
           }, 25_000)
           : null;
+        const jobDeadlineMs = cloneDeadlineMs(fullSite);
         const deadlineTimer = setTimeout(() => {
           if (!isActiveJob(job)) return;
-          job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping crawl and salvaging pages.`);
+          job.logs.push(`[WARN] Clone deadline (${Math.round(jobDeadlineMs / 60000)} min) reached — stopping crawl and salvaging pages.`);
           persistJob(job, { force: true });
           try { proc.kill('SIGTERM'); } catch {}
           setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
-        }, CLONE_DEADLINE_MS);
+        }, jobDeadlineMs);
         proc.stdout.on('data', (c) => {
           c.toString().split('\n').filter(Boolean).forEach((l) => job.logs.push(l));
           persistJob(job);
@@ -4923,7 +4987,7 @@ async function handleRequest(req, res) {
     const viewportWidth = Math.min(1440, Math.max(320, parseInt(url.searchParams.get('width') || '1280', 10) || 1280));
     const deadlineMs = IS_LOW_MEMORY ? 75_000 : (IS_HOSTED ? 100_000 : 180_000);
     try {
-      const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+      const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
       const filename = map[route] || map['/'];
       if (!filename) return json(res, { error: 'Route not found' }, 404);
@@ -4973,7 +5037,7 @@ async function handleRequest(req, res) {
     const viewportWidth = Math.min(1440, Math.max(320, parseInt(url.searchParams.get('width') || '1280', 10) || 1280));
     const deadlineMs = IS_LOW_MEMORY ? 75_000 : (IS_HOSTED ? 100_000 : 180_000);
     try {
-      const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+      const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
       const filename = map[route] || map['/'];
       if (!filename) return json(res, { error: 'Route not found' }, 404);
@@ -5026,14 +5090,14 @@ async function handleRequest(req, res) {
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
     try {
-      const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+      const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
       const allRoutes = Object.keys(map);
       const routeCap = IS_LOW_MEMORY ? 8 : (IS_SERVERLESS ? 12 : 80);
       const routes = allRoutes.slice(0, routeCap);
       const zipName = `${outDir.split(/[\\/]/).pop() || 'clone'}-figma.zip`;
       const zipPath = join(tmpdir(), `clonyfy-figma-${randomUUID()}.zip`);
-      await exportCloneToFigmaZip({
+      const zipResult = await exportCloneToFigmaZip({
         outDir,
         routes,
         rewriteHtml: async (raw, dir) => prepareHtmlForFigmaExport(String(raw), dir),
@@ -5047,14 +5111,27 @@ async function handleRequest(req, res) {
         viewportWidth,
         zipPath,
       });
-      audit(figmaUser.id, figmaUser.name, 'figma_export_zip', `outDir=${outDir} pages=${routes.length}`, ip);
+      const truncated = allRoutes.length > routes.length;
+      const skipped = Number(zipResult?.skipped || 0);
+      audit(
+        figmaUser.id,
+        figmaUser.name,
+        'figma_export_zip',
+        `outDir=${outDir} pages=${zipResult?.pageCount || routes.length} skipped=${skipped} truncated=${truncated ? allRoutes.length - routes.length : 0}`,
+        ip,
+      );
       if (!existsSync(zipPath)) return json(res, { error: 'Figma ZIP was not created' }, 500);
-      res.writeHead(200, {
+      const headers = {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${zipName}"`,
         'Content-Length': statSync(zipPath).size,
         'Cache-Control': 'no-store',
-      });
+        'X-Clonyfy-Figma-Pages': String(zipResult?.pageCount || routes.length),
+        'X-Clonyfy-Figma-Skipped': String(skipped),
+        'X-Clonyfy-Figma-Truncated': truncated ? String(allRoutes.length - routes.length) : '0',
+        'Access-Control-Expose-Headers': 'X-Clonyfy-Figma-Pages, X-Clonyfy-Figma-Skipped, X-Clonyfy-Figma-Truncated, Content-Disposition',
+      };
+      res.writeHead(200, headers);
       const stream = createReadStream(zipPath);
       stream.pipe(res);
       stream.on('close', () => { try { rmSync(zipPath); } catch {} });
@@ -5701,7 +5778,10 @@ async function handleRequest(req, res) {
       affiliate_program_url: s.affiliate_program_url || 'https://affonso.io/',
       affiliate_public_id: enabled ? (s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID) : '',
       affiliate_dashboard_enabled: enabled && !!(s.affiliate_api_key && s.affiliate_program_id),
-      figma_community_plugin_url: String(process.env.FIGMA_COMMUNITY_PLUGIN_URL || '').trim(),
+      figma_community_plugin_url: String(
+        process.env.FIGMA_COMMUNITY_PLUGIN_URL
+        || 'https://www.figma.com/community/plugin/1677522506571131225/Clonyfy-Import',
+      ).trim(),
     });
   }
 

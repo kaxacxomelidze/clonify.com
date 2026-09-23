@@ -106,7 +106,7 @@ export function ExportFigmaDialog({
 
   const exportDesktop = async () => {
     setBusy("desktop");
-    setHint("Building Scene Graph on the Backend (can take up to ~1 minute on free hosts)…");
+    setHint("Building Scene Graph on the Backend (can take up to ~2 minutes on free hosts)…");
     try {
       const { scene, warning } = await fetchFigmaScene(outDir, route);
       if (!scene?.nodes || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
@@ -144,10 +144,20 @@ export function ExportFigmaDialog({
     setBusy("zip");
     setHint("");
     try {
-      const { blob, filename } = await downloadFigmaZipBlob(outDir);
+      const { blob, filename, skipped, truncated, pages } = await downloadFigmaZipBlob(outDir);
       triggerBrowserDownload(blob, filename);
-      setHint("Multi-page Figma ZIP downloaded (SVG per route).");
-      toast.success("Figma ZIP downloaded.");
+      if (skipped || truncated) {
+        const parts = [
+          pages ? `${pages} page(s) exported` : "ZIP downloaded",
+          skipped ? `${skipped} page(s) failed` : "",
+          truncated ? `${truncated} page(s) omitted (host limit)` : "",
+        ].filter(Boolean);
+        setHint(parts.join(" · "));
+        toast.message(parts.join(" · "));
+      } else {
+        setHint("Multi-page Figma ZIP downloaded (SVG per route).");
+        toast.success("Figma ZIP downloaded.");
+      }
     } catch (err) {
       toast.error(paidGate(err));
     } finally {
