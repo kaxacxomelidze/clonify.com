@@ -3500,7 +3500,7 @@ async function checkTargetReachable(parsedUrl) {
 
 function unreachableTargetMessage(hostname, reason) {
   if (reason === 'not_found') return `The website ${hostname} does not exist (domain not found). Check the address and try again.`;
-  if (reason === 'timeout') return `The website ${hostname} did not respond within 20 seconds. It may be down — try again later.`;
+  if (reason === 'timeout') return `The website ${hostname} is not responding. It may be down — try again later.`;
   return `The website ${hostname} is not reachable (connection refused). It may be down — try again later.`;
 }
 
