@@ -5260,7 +5260,9 @@ async function handleRequest(req, res) {
           return true;
         });
         if (!files.length) return json(res, { error: 'No files found in output folder. Re-run the clone, then push again.' }, 400);
-        if (files.length > 5000) return json(res, { error: `Too many files for one GitHub commit (${files.length}/5000). Try a smaller clone.` }, 400);
+        // No hard file-count cap: large clones (e.g. Max / full-site) are split into
+        // multiple GitHub commits below (batchSize 250–500). Per-file GitHub API
+        // size limit (~100MB) still applies.
         const tooLarge = files.find(f => f.size > 95 * 1024 * 1024);
         if (tooLarge) return json(res, { error: `File is too large for GitHub API: ${tooLarge.rel}` }, 400);
 
@@ -5350,9 +5352,14 @@ async function handleRequest(req, res) {
 
         const message = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
         // Hosted: smaller batches avoid request-body / timeout failures on large clones (e.g. Shopify).
+        // Large Max/full-site clones span many commits intentionally — no total file ceiling.
         const batchSize = IS_HOSTED || IS_LOW_MEMORY ? 250 : 500;
         let commit = null;
         const allNextPaths = new Set();
+        const plannedBatches = Math.ceil(files.length / batchSize) || 1;
+        if (plannedBatches > 1) {
+          console.log(`[github/push] ${owner}/${repoName}: ${files.length} files → ${plannedBatches} commits (batchSize=${batchSize})`);
+        }
 
         for (let offset = 0; offset < files.length; offset += batchSize) {
           const batch = files.slice(offset, offset + batchSize);
