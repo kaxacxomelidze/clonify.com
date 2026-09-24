@@ -788,6 +788,48 @@ export function downloadZipUrl(outDir: string) {
   return `${getApiBaseUrl()}/api/download-zip?${params.toString()}`;
 }
 
+export function downloadZipJobUrl(jobId: string) {
+  const params = new URLSearchParams({ jobId });
+  return `${getApiBaseUrl()}/api/download-zip?${params.toString()}`;
+}
+
+export type ZipExportProgress = {
+  progress: number;
+  stage: string;
+  status?: string;
+};
+
+async function fetchZipBlobFromResponse(res: Response): Promise<Blob> {
+  const contentType = String(res.headers.get("content-type") || "");
+  if (contentType.includes("application/json")) {
+    const data = (await res.json()) as {
+      error?: string;
+      downloadUrl?: string;
+      mode?: string;
+      parts?: Array<{ url: string; index: number }>;
+    };
+    if (!res.ok || data.error) throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
+    if (data.mode === "parts" && Array.isArray(data.parts)) {
+      const ordered = data.parts.slice().sort((a, b) => (a.index || 0) - (b.index || 0));
+      const chunks: ArrayBuffer[] = [];
+      for (const part of ordered) {
+        const partRes = await fetch(part.url);
+        if (!partRes.ok) throw new ApiError(`Could not download part ${part.index + 1}`, partRes.status);
+        chunks.push(await partRes.arrayBuffer());
+      }
+      return new Blob(chunks, { type: "application/zip" });
+    }
+    if (data.downloadUrl) {
+      const zipRes = await fetch(data.downloadUrl);
+      if (!zipRes.ok) throw new ApiError("Could not download export", zipRes.status);
+      return zipRes.blob();
+    }
+    throw new ApiError("Export did not return a download URL", 500, data);
+  }
+  if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
+  return res.blob();
+}
+
 export async function forgotPasswordRequest(email: string) {
   return apiFetch<{ ok: boolean }>("/api/auth/forgot-password", {
     method: "POST",
@@ -847,37 +889,87 @@ export async function pushToGitHub(input: {
   });
 }
 
-export async function downloadZipBlob(outDir: string): Promise<Blob> {
-  const token = getAuthToken();
-  const res = await fetch(downloadZipUrl(outDir), {
-    headers: token ? { "X-Auth-Token": token } : {},
+/**
+ * Start async ZIP export, poll real backend progress (0–100), then download.
+ * Hosted builds skip Next.js regen so packing finishes sooner for large clones.
+ */
+export async function downloadZipBlob(
+  outDir: string,
+  onProgress?: (info: ZipExportProgress) => void,
+): Promise<Blob> {
+  await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
+  onProgress?.({ progress: 2, stage: "Starting export…", status: "running" });
+
+  const start = await apiFetch<{
+    id: string;
+    status: string;
+    progress: number;
+    stage: string;
+  }>("/api/export-zip", {
+    method: "POST",
+    body: { outDir, async: true },
+    timeoutMs: 60_000,
   });
-  const contentType = String(res.headers.get("content-type") || "");
-  if (contentType.includes("application/json")) {
-    const data = (await res.json()) as {
-      error?: string;
-      downloadUrl?: string;
-      mode?: string;
-      parts?: Array<{ url: string; index: number }>;
-    };
-    if (!res.ok || data.error) throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
-    if (data.mode === "parts" && Array.isArray(data.parts)) {
-      const ordered = data.parts.slice().sort((a, b) => (a.index || 0) - (b.index || 0));
-      const chunks: ArrayBuffer[] = [];
-      for (const part of ordered) {
-        const partRes = await fetch(part.url);
-        if (!partRes.ok) throw new ApiError(`Could not download part ${part.index + 1}`, partRes.status);
-        chunks.push(await partRes.arrayBuffer());
+
+  const jobId = start.id;
+  onProgress?.({
+    progress: Math.max(3, Number(start.progress) || 3),
+    stage: start.stage || "Preparing…",
+    status: start.status,
+  });
+
+  const startedAt = Date.now();
+  const maxWaitMs = 20 * 60 * 1000;
+  while (Date.now() - startedAt < maxWaitMs) {
+    await sleep(900);
+    const status = await apiFetch<{
+      id: string;
+      status: string;
+      progress: number;
+      stage: string;
+      error?: string | null;
+      ready?: boolean;
+      zipName?: string | null;
+    }>(`/api/export-zip/status?id=${encodeURIComponent(jobId)}`, {
+      timeoutMs: 30_000,
+      skipWake: true,
+    });
+
+    onProgress?.({
+      progress: Math.max(1, Math.min(99, Number(status.progress) || 1)),
+      stage: status.stage || "Working…",
+      status: status.status,
+    });
+
+    if (status.status === "error") {
+      throw new ApiError(status.error || "ZIP export failed", 500, status);
+    }
+    if (status.status === "done" || status.ready) {
+      onProgress?.({ progress: 99, stage: "Downloading ZIP…", status: "done" });
+      const token = getAuthToken();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 600_000);
+      try {
+        const res = await fetch(downloadZipJobUrl(jobId), {
+          headers: token ? { "X-Auth-Token": token } : {},
+          signal: controller.signal,
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (res.status === 401) setAuthToken(null);
+        const blob = await fetchZipBlobFromResponse(res);
+        onProgress?.({ progress: 100, stage: "Complete", status: "done" });
+        return blob;
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+        if (err instanceof DOMException && err.name === "AbortError") {
+          throw new ApiError("ZIP download timed out. Try again.", 504);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
       }
-      return new Blob(chunks, { type: "application/zip" });
     }
-    if (data.downloadUrl) {
-      const zipRes = await fetch(data.downloadUrl);
-      if (!zipRes.ok) throw new ApiError("Could not download export", zipRes.status);
-      return zipRes.blob();
-    }
-    throw new ApiError("Export did not return a download URL", 500, data);
   }
-  if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
-  return res.blob();
+  throw new ApiError("ZIP export took too long. Try again, or export fewer pages.", 504);
 }

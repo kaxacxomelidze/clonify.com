@@ -115,6 +115,7 @@ export function CaptureDetails({
   onDeleted?: () => void;
 }) {
   const [busy, setBusy] = useState("");
+  const [zipProgress, setZipProgress] = useState<{ pct: number; stage: string } | null>(null);
   const [iframeError, setIframeError] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [figmaOpen, setFigmaOpen] = useState(false);
@@ -155,14 +156,22 @@ export function CaptureDetails({
       return;
     }
     setBusy("zip");
+    setZipProgress({ pct: 1, stage: "Starting export…" });
     try {
-      const blob = await downloadZipBlob(job.outDir);
+      const blob = await downloadZipBlob(job.outDir, (info) => {
+        setZipProgress({
+          pct: Math.max(1, Math.min(100, Math.round(info.progress))),
+          stage: info.stage || "Working…",
+        });
+      });
       triggerBrowserDownload(blob, `${job.domain || "clone"}.zip`);
+      setZipProgress({ pct: 100, stage: "Complete" });
       toast.success("ZIP downloaded.");
     } catch (err) {
       toast.error(paidGateMessage(err, "ZIP export"));
     } finally {
       setBusy("");
+      setZipProgress(null);
     }
   };
 
@@ -312,8 +321,31 @@ export function CaptureDetails({
                 disabled={!job.outDir || busy === "zip"}
               >
                 <Download size={16} />
-                {busy === "zip" ? "Preparing ZIP…" : "Download ZIP"}
+                {busy === "zip"
+                  ? `ZIP ${zipProgress?.pct ?? 0}%`
+                  : "Download ZIP"}
               </button>
+              {busy === "zip" && zipProgress && (
+                <div className="zip-export-progress w-full basis-full" aria-live="polite">
+                  <div className="zip-export-progress__meta">
+                    <span className="zip-export-progress__stage">{zipProgress.stage}</span>
+                    <span className="zip-export-progress__pct tabular-nums">{zipProgress.pct}%</span>
+                  </div>
+                  <div
+                    className="zip-export-progress__track"
+                    role="progressbar"
+                    aria-label="ZIP export progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={zipProgress.pct}
+                  >
+                    <div
+                      className="zip-export-progress__fill"
+                      style={{ width: `${zipProgress.pct}%` }}
+                    />
+                  </div>
+                </div>
+              )}
               <button
                 type="button"
                 className="dashboard-button"

@@ -92,6 +92,7 @@ function ClonePage() {
   const [githubOpen, setGithubOpen] = useState(false);
   const [figmaOpen, setFigmaOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState("");
+  const [zipProgress, setZipProgress] = useState<{ pct: number; stage: string } | null>(null);
   const busy = phase === "running";
   const stage = STAGES.reduce((active, item, index) => (progress >= item.at ? index : active), 0);
   const fullSiteAllowed =
@@ -602,15 +603,49 @@ function ClonePage() {
               disabled={!!exportBusy}
               onClick={() =>
                 void withExport("zip", async () => {
-                  const blob = await downloadZipBlob(run.outDir!);
-                  triggerBrowserDownload(blob, `${run.domain || "clone"}.zip`);
-                  setNotice("ZIP downloaded (Next.js project regenerated on export).");
+                  setZipProgress({ pct: 1, stage: "Starting export…" });
+                  try {
+                    const blob = await downloadZipBlob(run.outDir!, (info) => {
+                      setZipProgress({
+                        pct: Math.max(1, Math.min(100, Math.round(info.progress))),
+                        stage: info.stage || "Working…",
+                      });
+                    });
+                    triggerBrowserDownload(blob, `${run.domain || "clone"}.zip`);
+                    setZipProgress({ pct: 100, stage: "Complete" });
+                    setNotice("ZIP downloaded.");
+                  } finally {
+                    setZipProgress(null);
+                  }
                 })
               }
             >
               <Download size={16} />
-              {exportBusy === "zip" ? "Preparing ZIP…" : "Download ZIP"}
+              {exportBusy === "zip"
+                ? `ZIP ${zipProgress?.pct ?? 0}%`
+                : "Download ZIP"}
             </button>
+            {exportBusy === "zip" && zipProgress && (
+              <div className="zip-export-progress w-full basis-full" aria-live="polite">
+                <div className="zip-export-progress__meta">
+                  <span className="zip-export-progress__stage">{zipProgress.stage}</span>
+                  <span className="zip-export-progress__pct tabular-nums">{zipProgress.pct}%</span>
+                </div>
+                <div
+                  className="zip-export-progress__track"
+                  role="progressbar"
+                  aria-label="ZIP export progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={zipProgress.pct}
+                >
+                  <div
+                    className="zip-export-progress__fill"
+                    style={{ width: `${zipProgress.pct}%` }}
+                  />
+                </div>
+              </div>
+            )}
             <button
               type="button"
               className="dashboard-button"

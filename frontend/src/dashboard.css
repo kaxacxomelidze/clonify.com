@@ -228,6 +228,46 @@
 .dashboard-button.bg-primary:hover {
   background: color-mix(in srgb, var(--primary) 90%, var(--primary-foreground));
 }
+.zip-export-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--background) 88%, var(--accent));
+}
+.zip-export-progress__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.zip-export-progress__stage {
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zip-export-progress__pct {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.zip-export-progress__track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+}
+.zip-export-progress__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 0.35s ease;
+}
 .dashboard-search {
   display: flex;
   flex: 1;
