@@ -54,8 +54,21 @@ const CANONICAL_APP_URL = (process.env.PUBLIC_APP_URL || process.env.SHARE_BASE_
 const DEFAULT_AFFONSO_PUBLIC_ID = 'cmpj1i5tn00087mxngp80ddzy';
 
 const jobs = new Map();
+/** Async ZIP export jobs (progress for Download ZIP UI). */
+const zipJobs = new Map();
+const ZIP_JOB_TTL_MS = 45 * 60 * 1000;
 const ACTIVE_JOB_STATUSES = new Set(['running', 'saving']);
 const isActiveJob = (job) => ACTIVE_JOB_STATUSES.has(job?.status);
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of zipJobs) {
+    if (now - (job.createdAt || 0) > ZIP_JOB_TTL_MS) {
+      if (job.zipPath) { try { rmSync(job.zipPath, { force: true }); } catch {} }
+      zipJobs.delete(id);
+    }
+  }
+}, 60_000).unref?.();
 
 // ── Security constants ────────────────────────────────────────────────────────
 // Set PASSWORD_PEPPER and SHARE_PASSWORD_PEPPER in your .env file.
@@ -1741,12 +1754,13 @@ function cloneOutputHasPages(dir) {
   return false;
 }
 
-async function materializeCloneOutput(outDir) {
+async function materializeCloneOutput(outDir, { onProgress } = {}) {
   outDir = resolveCloneOutDir(outDir) || outDir;
   if (!isInsideOutputDir(outDir)) throw new Error('Invalid output folder');
   // Local dir may exist but be empty/incomplete (e.g. ephemeral disk wiped mid-flight,
   // or a leftover empty folder). Only trust it when real page HTML is present.
   if (existsSync(outDir) && cloneOutputHasPages(outDir)) {
+    onProgress?.({ progress: 35, stage: 'Clone files ready' });
     return { dir: outDir, cleanup: () => {} };
   }
   if (existsSync(outDir) && !cloneOutputHasPages(outDir)) {
@@ -1757,20 +1771,28 @@ async function materializeCloneOutput(outDir) {
   const tempDir = join(OUTPUT_DIR, `__materialized_${randomUUID().slice(0, 8)}`);
   mkdirSync(tempDir, { recursive: true });
   try {
+    const total = Math.max(1, files.length);
+    let done = 0;
     for (const file of files) {
       let rel;
       try { rel = normalizeCloneRelPath(file.rel); }
-      catch { continue; }
+      catch { done++; continue; }
       const data = await readCloneFile(outDir, rel);
-      if (!data) continue;
+      if (!data) { done++; continue; }
       const dest = join(tempDir, rel);
-      if (!isInsideDir(tempDir, dest)) continue;
+      if (!isInsideDir(tempDir, dest)) { done++; continue; }
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, data);
+      done++;
+      if (done === 1 || done === total || done % 25 === 0) {
+        const pct = 8 + Math.round((done / total) * 32);
+        onProgress?.({ progress: pct, stage: `Loading files… ${done}/${total}` });
+      }
     }
     if (!cloneOutputHasPages(tempDir)) {
       throw new Error('Clone pages could not be loaded for export. Open Run Preview first, then try Export Code again.');
     }
+    onProgress?.({ progress: 42, stage: 'Clone files loaded' });
     return {
       dir: tempDir,
       cleanup: () => { try { rmSync(tempDir, { recursive: true, force: true }); } catch {} },
@@ -3079,14 +3101,32 @@ async function materializeStaticWebsite(outDir) {
 // Archive Utility refuses to open it. archiver is a pure-JS streaming
 // implementation that always writes real PKZIP, identical on Mac/Linux/
 // Windows and Linux hosts, so every user's OS unzips it without complaint.
-async function createCrossPlatformZip(srcDir, zipPath, { skipDirs = [] } = {}) {
+async function createCrossPlatformZip(srcDir, zipPath, { skipDirs = [], onProgress, compressionLevel } = {}) {
   if (!srcDir || !existsSync(srcDir)) throw new Error('ZIP source folder is missing');
   const { default: archiver } = await import('archiver');
   let fileCount = 0;
+  const countWalk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (skipDirs.includes(entry.name)) continue;
+        countWalk(join(dir, entry.name));
+      } else if (entry.isFile()) {
+        fileCount++;
+      }
+    }
+  };
+  countWalk(srcDir);
+  if (fileCount === 0) throw new Error('ZIP source folder has no files');
+
+  // Large clones: store faster (level 1). Smaller clones: better size (level 6).
+  const level = Number.isFinite(compressionLevel)
+    ? compressionLevel
+    : ((IS_HOSTED || IS_LOW_MEMORY || fileCount > 1500) ? 1 : 6);
+  onProgress?.({ progress: 48, stage: `Packing ${fileCount} files…` });
+
   await new Promise((resolvePromise, reject) => {
     const output = createWriteStream(zipPath);
-    // level 6 is much faster than 9 on large asset trees and still compresses well
-    const archive = archiver('zip', { zlib: { level: 6 } });
+    const archive = archiver('zip', { zlib: { level } });
     let settled = false;
     const fail = (err) => { if (!settled) { settled = true; reject(err); } };
     output.on('close', () => {
@@ -3094,10 +3134,11 @@ async function createCrossPlatformZip(srcDir, zipPath, { skipDirs = [] } = {}) {
       settled = true;
       try {
         const size = existsSync(zipPath) ? statSync(zipPath).size : 0;
-        if (fileCount === 0 || size < 64) {
+        if (size < 64) {
           reject(new Error('ZIP archive is empty — no clone files were packed'));
           return;
         }
+        onProgress?.({ progress: 96, stage: 'Finalizing ZIP…' });
         resolvePromise();
       } catch (err) {
         reject(err);
@@ -3106,6 +3147,15 @@ async function createCrossPlatformZip(srcDir, zipPath, { skipDirs = [] } = {}) {
     output.on('error', fail);
     archive.on('error', fail);
     archive.on('warning', (err) => { if (err.code !== 'ENOENT') fail(err); });
+    archive.on('progress', (progress) => {
+      const processed = Number(progress?.entries?.processed || 0);
+      const total = Math.max(fileCount, Number(progress?.entries?.total || 0), 1);
+      const pct = 48 + Math.min(46, Math.round((processed / total) * 46));
+      onProgress?.({
+        progress: pct,
+        stage: `Packing files… ${Math.min(processed, total)}/${total}`,
+      });
+    });
     archive.pipe(output);
     if (skipDirs.length) {
       const walk = (dir, prefix = '') => {
@@ -3116,25 +3166,12 @@ async function createCrossPlatformZip(srcDir, zipPath, { skipDirs = [] } = {}) {
           } else if (entry.isFile()) {
             const name = prefix ? `${prefix}/${entry.name}` : entry.name;
             archive.file(join(dir, entry.name), { name });
-            fileCount++;
           }
         }
       };
       walk(srcDir);
     } else {
       archive.directory(srcDir, false);
-      // directory() doesn't expose a count up front — approximate via walk
-      const countWalk = (dir) => {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-          if (entry.isDirectory()) countWalk(join(dir, entry.name));
-          else if (entry.isFile()) fileCount++;
-        }
-      };
-      countWalk(srcDir);
-    }
-    if (fileCount === 0) {
-      fail(new Error('ZIP source folder has no files'));
-      return;
     }
     archive.finalize();
   });
@@ -3157,10 +3194,11 @@ function assertValidZipFile(zipPath) {
   return size;
 }
 
-async function buildOutputZip(outDir) {
+async function buildOutputZip(outDir, { onProgress } = {}) {
   if (!isInsideOutputDir(outDir)) throw new Error('Invalid output folder');
   ensureOutputDir();
-  const materialized = await materializeCloneOutput(outDir);
+  onProgress?.({ progress: 4, stage: 'Starting export…' });
+  const materialized = await materializeCloneOutput(outDir, { onProgress });
   const zipName = `${outDir.split(/[\\/]/).pop()}.zip`;
   const zipPath = join(tmpdir(), `clonyfy-export-${randomUUID()}.zip`);
   try { rmSync(zipPath, { force: true }); } catch {}
@@ -3168,27 +3206,76 @@ async function buildOutputZip(outDir) {
     if (!cloneOutputHasPages(materialized.dir)) {
       throw new Error('Clone has no captured pages to export. Open Run Preview first.');
     }
-    // Rebuild Next scaffolding when possible; on low-memory Free hosts this can OOM —
-    // fall back to zipping captured HTML so export still succeeds.
-    try {
-      await regenerateCloneProject(materialized.dir);
-    } catch (regenErr) {
-      console.warn(`[export-zip] regenerateCloneProject failed, exporting captured pages only: ${regenErr?.message || regenErr}`);
-      if (!cloneOutputHasPages(materialized.dir)) {
-        throw new Error('Export regeneration failed and no captured pages remain. Re-run the clone, then export again.');
+    // Hosted/low-memory: skip Next.js regen (slow/OOM). Zip captured HTML + assets.
+    // Dedicated local hosts still regenerate a Next project when possible.
+    const skipNext = IS_HOSTED || IS_LOW_MEMORY || IS_SERVERLESS
+      || process.env.CLONYFY_ZIP_SKIP_NEXT === '1'
+      || process.env.CLONYFY_ZIP_SKIP_NEXT === 'true';
+    if (!skipNext) {
+      onProgress?.({ progress: 44, stage: 'Building project scaffold…' });
+      try {
+        await regenerateCloneProject(materialized.dir);
+      } catch (regenErr) {
+        console.warn(`[export-zip] regenerateCloneProject failed, exporting captured pages only: ${regenErr?.message || regenErr}`);
+        if (!cloneOutputHasPages(materialized.dir)) {
+          throw new Error('Export regeneration failed and no captured pages remain. Re-run the clone, then export again.');
+        }
       }
+    } else {
+      onProgress?.({ progress: 45, stage: 'Packing captured site…' });
     }
     if (!cloneOutputHasPages(materialized.dir)) {
       throw new Error('Export regeneration cleared page HTML. Re-run the clone, then export again.');
     }
     await createCrossPlatformZip(materialized.dir, zipPath, {
       skipDirs: ['node_modules', '.next', '.git'],
+      onProgress,
     });
     assertValidZipFile(zipPath);
+    onProgress?.({ progress: 99, stage: 'ZIP ready' });
   } finally {
     materialized.cleanup();
   }
   return { zipName, zipPath };
+}
+
+function startZipExportJob({ userId, outDir }) {
+  const id = randomUUID();
+  const job = {
+    id,
+    userId,
+    outDir,
+    status: 'running',
+    progress: 1,
+    stage: 'Queued…',
+    zipPath: null,
+    zipName: null,
+    error: null,
+    createdAt: Date.now(),
+  };
+  zipJobs.set(id, job);
+  void (async () => {
+    try {
+      const result = await buildOutputZip(outDir, {
+        onProgress: ({ progress, stage }) => {
+          job.progress = Math.max(1, Math.min(99, Number(progress) || job.progress));
+          if (stage) job.stage = stage;
+        },
+      });
+      job.zipPath = result.zipPath;
+      job.zipName = result.zipName;
+      job.progress = 100;
+      job.stage = 'Ready to download';
+      job.status = 'done';
+    } catch (err) {
+      job.status = 'error';
+      job.error = String(err?.message || err || 'ZIP export failed');
+      job.stage = 'Failed';
+      if (job.zipPath) { try { rmSync(job.zipPath, { force: true }); } catch {} }
+      job.zipPath = null;
+    }
+  })();
+  return job;
 }
 
 function githubAPIRequest(method, path, token, body = null) {
@@ -4838,9 +4925,27 @@ async function handleRequest(req, res) {
     const outDir = resolveCloneOutDir(body?.outDir);
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(zipUser, outDir)) return json(res, { error: 'Not found' }, 404);
+    // Prefer async job with progress (Frontend polls /api/export-zip/status).
+    if (body?.async !== false) {
+      const running = [...zipJobs.values()].filter(
+        (j) => j.userId === zipUser.id && j.status === 'running',
+      ).length;
+      if (running >= 2) {
+        return json(res, { error: 'You already have 2 ZIP exports running. Wait for one to finish.' }, 429);
+      }
+      const job = startZipExportJob({ userId: zipUser.id, outDir });
+      audit(zipUser.id, zipUser.name, 'export_zip_start', `outDir=${outDir} job=${job.id}`, ip);
+      return json(res, {
+        ok: true,
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        stage: job.stage,
+      });
+    }
     try {
       const { zipName, zipPath } = await buildOutputZip(outDir);
-      return json(res, { ok: true, zipPath, folder: OUTPUT_DIR });
+      return json(res, { ok: true, zipPath, zipName, folder: OUTPUT_DIR });
     } catch(err) {
       const message = err?.message || 'ZIP export failed';
       if (/paid plan|Upgrade/i.test(message)) return json(res, { error: message }, 403);
@@ -4852,10 +4957,81 @@ async function handleRequest(req, res) {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/export-zip/status') {
+    const zipUser = await getSessionUser(req);
+    if (!zipUser) return json(res, { error: 'Not authenticated' }, 401);
+    const id = String(url.searchParams.get('id') || '');
+    const job = zipJobs.get(id);
+    if (!job || job.userId !== zipUser.id) return json(res, { error: 'not found' }, 404);
+    return json(res, {
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      stage: job.stage,
+      error: job.error || null,
+      zipName: job.zipName || null,
+      ready: job.status === 'done' && !!job.zipPath,
+    });
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/download-zip') {
     const dlUser = await getSessionUser(req);
     if (!dlUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(dlUser.plan)) return json(res, { error: 'Export requires a paid plan. Upgrade to download your clones.' }, 403);
+
+    // Async job download (after /api/export-zip start + poll).
+    const jobId = String(url.searchParams.get('jobId') || '');
+    if (jobId) {
+      const job = zipJobs.get(jobId);
+      if (!job || job.userId !== dlUser.id) return json(res, { error: 'not found' }, 404);
+      if (job.status === 'error') return json(res, { error: job.error || 'ZIP export failed' }, 500);
+      if (job.status !== 'done' || !job.zipPath || !existsSync(job.zipPath)) {
+        return json(res, {
+          error: 'ZIP is not ready yet',
+          status: job.status,
+          progress: job.progress,
+          stage: job.stage,
+        }, 409);
+      }
+      try {
+        const zipSize = assertValidZipFile(job.zipPath);
+        const zipName = job.zipName || 'clone.zip';
+        if (IS_SERVERLESS) {
+          if (zipSize > 500 * 1024 * 1024) {
+            try { rmSync(job.zipPath, { force: true }); } catch {}
+            zipJobs.delete(jobId);
+            return json(res, { error: 'Export ZIP is too large to deliver (>500MB). Lower max pages or contact support.' }, 413);
+          }
+          const storagePrefix = `exports/${dlUser.id}/${randomUUID().slice(0, 8)}`;
+          let payload;
+          try {
+            payload = await uploadExportZipForDownload(storagePrefix, job.zipPath, zipName);
+          } finally {
+            try { rmSync(job.zipPath, { force: true }); } catch {}
+            zipJobs.delete(jobId);
+          }
+          audit(dlUser.id, dlUser.name, 'export_zip_signed', `job=${jobId} size=${zipSize} mode=${payload.mode}`, ip);
+          return json(res, { ok: true, ...payload });
+        }
+        audit(dlUser.id, dlUser.name, 'export_zip', `job=${jobId} size=${zipSize}`, ip);
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${zipName}"`,
+          'Content-Length': zipSize,
+          'Cache-Control': 'no-store',
+        });
+        const stream = createReadStream(job.zipPath);
+        stream.pipe(res);
+        stream.on('close', () => {
+          try { rmSync(job.zipPath, { force: true }); } catch {}
+          zipJobs.delete(jobId);
+        });
+      } catch (err) {
+        return json(res, { error: err?.message || 'ZIP download failed' }, 500);
+      }
+      return;
+    }
+
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(dlUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -4863,7 +5039,6 @@ async function handleRequest(req, res) {
       const { zipName, zipPath } = await buildOutputZip(outDir);
       const zipSize = assertValidZipFile(zipPath);
       // Large ZIPs leave via signed Storage URLs (single object or chunked parts).
-      const LARGE_ZIP_BYTES = 32 * 1024 * 1024;
       if (IS_SERVERLESS) {
         if (zipSize > 500 * 1024 * 1024) {
           try { rmSync(zipPath, { force: true }); } catch {}
