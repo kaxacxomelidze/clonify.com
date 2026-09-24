@@ -57,7 +57,7 @@ function mapOutput(item: OutputItem): CloneJob {
     routes: Number(item.apiRoutes) || 0,
     status,
     startedAt: item.capturedAt ? new Date(item.capturedAt).toLocaleTimeString("en-US") : "",
-    elapsed: "—",
+    elapsed: status === "running" ? elapsedSince(item.capturedAt) : "—",
     ...(item.dir ? { outDir: item.dir } : {}),
   };
 }
@@ -95,6 +95,14 @@ export function DashboardWorkspace({ children }: { children: ReactNode }) {
     }
     void refreshJobs();
   }, [isAuthenticated, refreshJobs]);
+
+  // Keep running captures (pages, elapsed, final status) live in the list/details view.
+  const hasRunningJob = jobs.some((job) => job.status === "running");
+  useEffect(() => {
+    if (!isAuthenticated || !hasRunningJob) return;
+    const timer = window.setInterval(() => void refreshJobs(), 5000);
+    return () => window.clearInterval(timer);
+  }, [isAuthenticated, hasRunningJob, refreshJobs]);
 
   useEffect(() => {
     try {

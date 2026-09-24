@@ -177,6 +177,18 @@ function checkRateLimit(key, maxReq = 10, windowMs = 60000) {
   rateLimits.set(key, rl);
   return rl.count <= maxReq;
 }
+/** Returns ms until the next request under `key` is allowed (0 = allowed now). Does not consume. */
+function peekRateLimit(key, maxReq) {
+  const rl = rateLimits.get(key);
+  if (!rl || Date.now() > rl.resetAt) return 0;
+  return rl.count < maxReq ? 0 : rl.resetAt - Date.now();
+}
+const CLONE_HOURLY_LIMITS = { free: 3, starter: 10, growth: 20, unlimited: 60 };
+function cloneHourlyLimit(plan) {
+  const override = parseInt(process.env.CLONYFY_CLONES_PER_HOUR || '', 10);
+  if (override > 0) return override;
+  return CLONE_HOURLY_LIMITS[normalizePlan(plan)] || CLONE_HOURLY_LIMITS.free;
+}
 setInterval(() => { const now = Date.now(); for (const [k, v] of rateLimits) { if (now > v.resetAt) rateLimits.delete(k); } }, 300000);
 setInterval(async () => { try { await cleanExpiredSessions(Date.now()); } catch {} }, 3600000);
 setInterval(async () => { try { await pruneAuditLog(); } catch {} }, 3600000);
@@ -1317,7 +1329,11 @@ function contentTypeForPath(filePath) {
   }[ext] || 'application/octet-stream';
 }
 
+/** storagePath → "size:mtime" of the last successful upload (mid-clone syncs skip unchanged files). */
+const persistedFileStamps = new Map();
+
 async function persistCloneOutput(outDir, options = {}) {
+  const incremental = !!options.incremental;
   const deferAssets = !!options.deferAssets;
   const assetsOnly = !!options.assetsOnly;
   const requireCritical = options.requireCritical !== false;
@@ -1382,7 +1398,20 @@ async function persistCloneOutput(outDir, options = {}) {
   };
 
   const uploadOne = async (file) => {
-    const size = statSync(file.abs).size;
+    const st = statSync(file.abs);
+    const stamp = `${st.size}:${st.mtimeMs}`;
+    const stampKey = cloneStoragePath(outDir, file.rel);
+    if (incremental && persistedFileStamps.get(stampKey) === stamp) return;
+    const beforeFailures = failures.length;
+    await uploadOneInner(file, st.size);
+    // Other uploads run in parallel, so only look for failures naming this file.
+    const failed = failures.slice(beforeFailures).some((f) => String(f).startsWith(`${file.rel}:`) || String(f).startsWith(`${file.rel} `));
+    if (!failed) {
+      if (persistedFileStamps.size > 200_000) persistedFileStamps.clear();
+      persistedFileStamps.set(stampKey, stamp);
+    }
+  };
+  const uploadOneInner = async (file, size) => {
     const isPage = file.rel.startsWith('captured-pages/');
     const isRouteMap = file.rel === 'route-map.json';
     const isManifest = file.rel === 'manifest.json';
@@ -3427,6 +3456,54 @@ async function assertPublicTarget(parsedUrl) {
   }
 }
 
+const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_FAIL']);
+const NO_SUCH_HOST_CODES = new Set(['ENOTFOUND', 'ENODATA', 'EAI_NONAME']);
+
+/**
+ * Fail fast on sites that don't exist or don't answer, instead of spawning
+ * Chromium and leaving a job "Running" with 0 pages. Only definitive
+ * answers block; anything ambiguous (TLS quirks, 4xx/5xx) lets the clone run.
+ */
+async function checkTargetReachable(parsedUrl) {
+  const host = parsedUrl.hostname.replace(/^\[|\]$/g, '');
+  const looksLikeIp = /^[0-9.]+$/.test(host) || host.includes(':');
+  if (!looksLikeIp) {
+    try {
+      const addrs = await Promise.race([
+        dnsLookup(host, { all: true }),
+        new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('dns timeout'), { code: 'ETIMEOUT' })), 8000)),
+      ]);
+      if (!addrs || addrs.length === 0) return { ok: false, reason: 'not_found' };
+    } catch (err) {
+      if (NO_SUCH_HOST_CODES.has(err?.code)) return { ok: false, reason: 'not_found' };
+      // EAI_AGAIN / timeout: our resolver is struggling — don't blame the site.
+      return { ok: true };
+    }
+  }
+  try {
+    const res = await fetch(parsedUrl.href, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClonyfyBot/1.0; +https://clonyfy.com)', Accept: 'text/html,*/*' },
+    });
+    try { await res.body?.cancel(); } catch {}
+    return { ok: true, status: res.status };
+  } catch (err) {
+    const code = err?.cause?.code || err?.code;
+    if (NO_SUCH_HOST_CODES.has(code)) return { ok: false, reason: 'not_found' };
+    if (UNREACHABLE_CODES.has(code)) return { ok: false, reason: 'unreachable' };
+    if (err?.name === 'TimeoutError' || code === 'UND_ERR_CONNECT_TIMEOUT') return { ok: false, reason: 'timeout' };
+    return { ok: true };
+  }
+}
+
+function unreachableTargetMessage(hostname, reason) {
+  if (reason === 'not_found') return `The website ${hostname} does not exist (domain not found). Check the address and try again.`;
+  if (reason === 'timeout') return `The website ${hostname} did not respond within 20 seconds. It may be down — try again later.`;
+  return `The website ${hostname} is not reachable (connection refused). It may be down — try again later.`;
+}
+
 function listOutputFiles(outDir) {
   const files = [];
   const walk = (dir) => {
@@ -4038,6 +4115,10 @@ async function handleRequest(req, res) {
           /* keep stored metrics */
         }
       }
+      if (liveJob && isActiveJob(liveJob)) {
+        status = liveJob.status === 'saving' ? 'saving' : 'running';
+        pages = liveJob.pages ?? pages;
+      }
       normalized.push({
         id: c.id,
         name: c.out_dir.split(/[\\/]/).pop(),
@@ -4413,6 +4494,21 @@ async function handleRequest(req, res) {
     return json(res, { ...job, logOffset: 0 });
   }
 
+  // ── Cancel a running clone (keeps whatever pages were already captured) ──
+  if (req.method === 'POST' && url.pathname === '/api/clone/cancel') {
+    const cancelUser = await getSessionUser(req);
+    if (!cancelUser) return json(res, { error: 'Not authenticated' }, 401);
+    const { id } = await readJsonBody(req);
+    const job = id ? jobs.get(String(id)) : null;
+    if (!job || (job.userId !== cancelUser.id && cancelUser.role !== 'admin')) return json(res, { error: 'Not found' }, 404);
+    if (!isActiveJob(job) || !job.proc) return json(res, { error: 'This clone is not running.' }, 409);
+    job.logs.push('[WARN] Clone stopped by user — saving pages captured so far.');
+    persistJob(job, { force: true });
+    try { job.proc.kill('SIGTERM'); } catch {}
+    setTimeout(() => { try { job.proc?.kill('SIGKILL'); } catch {} }, 12_000);
+    return json(res, { ok: true });
+  }
+
   // ── Clone ──────────────────────────────────────────────────────────────────
 
   if (req.method === 'POST' && url.pathname === '/api/clone') {
@@ -4457,15 +4553,18 @@ async function handleRequest(req, res) {
             return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade to clone more.` }, 429);
           }
         }
-        // Per-user hourly burst limit: free=2/hr, paid=5/hr
-        const hourlyMax = isPaidPlan(plan) ? 5 : 2;
-        if (!checkRateLimit(`clone_user:${cloneUser.id}`, hourlyMax, 3600000)) {
-          return json(res, { error: `Too many clone requests. Please wait before starting another.` }, 429);
-        }
         // Cap concurrent running jobs per user
         const userRunning = [...jobs.values()].filter(j => j.userId === cloneUser.id && isActiveJob(j)).length;
         if (userRunning >= 2) {
           return json(res, { error: 'You already have 2 clones running. Wait for one to finish before starting another.' }, 429);
+        }
+        // Per-user hourly burst limit. Only clones that actually start count
+        // (slot is taken below, after the target is validated).
+        const hourlyMax = cloneHourlyLimit(plan);
+        const retryAfterMs = peekRateLimit(`clone_user:${cloneUser.id}`, hourlyMax);
+        if (retryAfterMs > 0) {
+          const mins = Math.max(1, Math.ceil(retryAfterMs / 60000));
+          return json(res, { error: `Hourly clone limit reached (${hourlyMax}/hour on your plan). You can start another clone in ${mins} minute${mins === 1 ? '' : 's'}.` }, 429);
         }
 
         if (wantFullSite) {
@@ -4483,6 +4582,12 @@ async function handleRequest(req, res) {
       }
       maxPages = String(Math.max(1, parseInt(maxPages, 10) || 1));
       depth = String(Math.max(1, parseInt(depth, 10) || 1));
+
+      const reachable = await checkTargetReachable(target);
+      if (!reachable.ok) {
+        return json(res, { error: unreachableTargetMessage(target.hostname, reachable.reason), code: `target_${reachable.reason}` }, 422);
+      }
+      if (cloneUser) checkRateLimit(`clone_user:${cloneUser.id}`, cloneHourlyLimit(normalizePlan(cloneUser.plan)), 3600000);
 
       const id = randomUUID();
       const hostname = target.hostname.replace(/\./g, '-');
@@ -4808,12 +4913,17 @@ async function handleRequest(req, res) {
         job.proc = proc;
         // While Chromium runs, periodically push captured HTML to Storage so a mid-clone
         // crash/restart still leaves a previewable salvage.
+        let midPersistRunning = false;
         const midPersistTimer = IS_HOSTED
           ? setInterval(() => {
-            if (!isActiveJob(job) || !existsSync(outDir)) return;
-            persistCloneOutput(outDir, { deferAssets: true, requireCritical: false }).catch((err) => {
-              job.logs.push(`[WARN] Mid-clone storage sync: ${err?.message || err}`);
-            });
+            if (midPersistRunning || !isActiveJob(job) || !existsSync(outDir)) return;
+            midPersistRunning = true;
+            // Incremental + awaited assets: only new/changed files, and never overlapping runs.
+            persistCloneOutput(outDir, { deferAssets: false, requireCritical: false, incremental: true })
+              .catch((err) => {
+                job.logs.push(`[WARN] Mid-clone storage sync: ${err?.message || err}`);
+              })
+              .finally(() => { midPersistRunning = false; });
           }, 25_000)
           : null;
         const jobDeadlineMs = cloneDeadlineMs(fullSite);
@@ -4825,7 +4935,12 @@ async function handleRequest(req, res) {
           setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
         }, jobDeadlineMs);
         proc.stdout.on('data', (c) => {
-          c.toString().split('\n').filter(Boolean).forEach((l) => job.logs.push(l));
+          c.toString().split('\n').filter(Boolean).forEach((l) => {
+            job.logs.push(l);
+            // "[12/500] ✓ url" — surface live progress so the dashboard isn't stuck at 0 pages.
+            const progress = l.match(/\[(\d+)\/\d+\]\s+✓/);
+            if (progress && job.status === 'running') job.pages = Math.max(job.pages || 0, parseInt(progress[1], 10));
+          });
           persistJob(job);
         });
         proc.stderr.on('data', (c) => {

@@ -9,6 +9,7 @@ import {
   Link2,
   Pencil,
   Search,
+  Square,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -24,6 +25,7 @@ import {
   getApiBaseUrl,
   pagePreviewUrl,
   previewClone,
+  stopClone,
   triggerBrowserDownload,
 } from "@/lib/api";
 
@@ -127,6 +129,20 @@ export function CaptureDetails({
       return err.message || `${feature} requires a paid plan. Upgrade in Subscription.`;
     }
     return err instanceof ApiError ? err.message : `${feature} failed.`;
+  };
+
+  const stopRunningClone = async () => {
+    if (!job) return;
+    if (!window.confirm(`Stop cloning ${job.domain}? Pages captured so far will be kept.`)) return;
+    setBusy("stop");
+    try {
+      await stopClone(job.id);
+      toast.success("Stopping clone — saving the pages captured so far.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not stop the clone.");
+    } finally {
+      setBusy("");
+    }
   };
 
   const openPreview = async () => {
@@ -295,6 +311,17 @@ export function CaptureDetails({
               </p>
             )}
             <div className="flex flex-wrap gap-2">
+              {job.status === "running" && (
+                <button
+                  type="button"
+                  className="dashboard-button"
+                  onClick={() => void stopRunningClone()}
+                  disabled={busy === "stop"}
+                >
+                  <Square size={16} />
+                  {busy === "stop" ? "Stopping…" : "Stop clone"}
+                </button>
+              )}
               <button
                 type="button"
                 className="dashboard-button"

@@ -333,6 +333,29 @@ function shouldSkipPageUrl(url: string, startUrl?: string): boolean {
   }
 }
 
+const MAX_BROWSER_RELAUNCHES = 5;
+/** Same path with different query strings (filters, currency/sort switchers) is the classic crawler trap. */
+const MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || '150', 10) || 150);
+
+export function createQueryVariantLimiter(limit = MAX_QUERY_VARIANTS_PER_PATH) {
+  const counts = new Map<string, number>();
+  return {
+    allow(url: string): boolean {
+      try {
+        const u = new URL(url);
+        if (!u.search) return true;
+        const key = `${u.origin}${u.pathname}`;
+        const n = counts.get(key) || 0;
+        if (n >= limit) return false;
+        counts.set(key, n + 1);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 function visitedPageVariants(url: string): string[] {
   try {
     const parsed = new URL(url);
@@ -606,6 +629,7 @@ async function crawlStatic(
   logger.warn(`  [FALLBACK] Using static HTML crawler (${reason})`);
 
   const staticQueue: Array<{ url: string; depth: number }> = [];
+  const queryVariants = createQueryVariantLimiter();
   const enqueueStatic = (url: string, currentDepth: number) => {
     const clean = normalizePageUrl(url);
     if (!clean) return;
@@ -613,6 +637,7 @@ async function crawlStatic(
     if (shouldSkipPageUrl(clean, opts.url)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
+    if (!queryVariants.allow(clean)) return;
     visited.add(clean);
     staticQueue.push({ url: clean, depth: currentDepth });
   };
@@ -668,6 +693,7 @@ export async function crawl(
   const visited = new Set<string>();
   const queue = new PQueue({ concurrency: opts.concurrency });
   const records: PageRecord[] = [];
+  const queryVariants = createQueryVariantLimiter();
 
   if (opts.fullSite) {
     logger.info(
@@ -693,6 +719,26 @@ export async function crawl(
   } catch (err) {
     return crawlStatic(opts, origin, assetsDir, visited, records, onPage, `browser launch failed: ${(err as Error).message.split('\n')[0]}`);
   }
+
+  // Chromium can crash (OOM, renderer abort) mid-crawl. Without a relaunch every
+  // remaining page fails with "Target page, context or browser has been closed".
+  let relaunches = 0;
+  let relaunching: Promise<void> | null = null;
+  const ensureBrowser = async () => {
+    if (browser.isConnected()) return;
+    if (!relaunching) {
+      relaunching = (async () => {
+        if (relaunches >= MAX_BROWSER_RELAUNCHES) {
+          throw new Error('browser crashed too many times');
+        }
+        relaunches += 1;
+        logger.warn(`  Browser disconnected — relaunching (${relaunches}/${MAX_BROWSER_RELAUNCHES})`);
+        await browser.close().catch(() => {});
+        browser = await chromium.launch({ headless: true, ...launchOptions });
+      })().finally(() => { relaunching = null; });
+    }
+    await relaunching;
+  };
 
   const startNorm = normalizePageUrl(opts.url);
   let sitemapUrls: string[] = [];
@@ -726,6 +772,7 @@ export async function crawl(
     if (shouldSkipPageUrl(clean, opts.url)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
+    if (!queryVariants.allow(clean)) return;
     visited.add(clean);
 
     const priority = linkEnqueuePriority(clean, fromNav);
@@ -745,6 +792,7 @@ export async function crawl(
 
       let context: Awaited<ReturnType<typeof browser.newContext>> | null = null;
       try {
+        await ensureBrowser();
         context = await browser.newContext({
           userAgent: USER_AGENT,
           viewport: { width: 1440, height: 900 },
