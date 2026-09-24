@@ -879,6 +879,8 @@ export async function pushToGitHub(input: {
     repoUrl?: string;
     createdRepo?: boolean;
     files?: number;
+    commits?: number;
+    lfsFiles?: number;
   }>("/api/github/push", {
     method: "POST",
     body: input,
