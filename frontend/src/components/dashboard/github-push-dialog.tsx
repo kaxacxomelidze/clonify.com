@@ -127,7 +127,7 @@ export function GitHubPushDialog({
     }
     setBusy("push");
     setHint(
-      "Checking GitHub repo, then uploading clone files. Large clones can take several minutes — keep this tab open.",
+      "Checking GitHub repo, then uploading clone files. Large clones use multiple commits and can take several minutes — keep this tab open.",
     );
     try {
       await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
