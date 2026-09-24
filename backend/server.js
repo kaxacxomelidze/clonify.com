@@ -5,9 +5,10 @@ import { resolve, join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync, createReadStream, createWriteStream, copyFileSync, openSync, closeSync, readSync } from 'fs';
 import { request as httpsRequest } from 'https';
-import { lookup as dnsLookup } from 'dns/promises';
+import { request as httpRequestPlain } from 'http';
+import { lookup as dnsLookup, Resolver as DnsResolver } from 'dns/promises';
 import { createRequire } from 'module';
-import { tmpdir } from 'os';
+import { tmpdir, totalmem } from 'os';
 import 'dotenv/config';
 import { runClone, regenerateCloneProject } from './packages/cloner/dist/runClone.js';
 import {
@@ -29,6 +30,7 @@ import {
   createCloneFileSignedUrl, uploadExportZipForDownload, isStorageSizeLimitError,
   getAffiliateOwnerBySlug, saveAffiliateSlug, getAffiliateReferrals, addAffiliateReferral, getAffiliateVisits, addAffiliateVisit,
 } from './db.js';
+import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
@@ -54,11 +56,37 @@ const CANONICAL_APP_URL = (process.env.PUBLIC_APP_URL || process.env.SHARE_BASE_
 const DEFAULT_AFFONSO_PUBLIC_ID = 'cmpj1i5tn00087mxngp80ddzy';
 
 const jobs = new Map();
+const ACTIVE_JOB_STATUSES = new Set(['running', 'saving', 'queued']);
+const isActiveJob = (job) => ACTIVE_JOB_STATUSES.has(job?.status);
+
+// ── Clone capacity ────────────────────────────────────────────────────────────
+// Each clone runs its own Chromium (~0.5–1.5 GB). Default: one clone per ~1.5 GB of RAM.
+const MAX_ACTIVE_CLONES = Math.max(1, parseInt(process.env.CLONYFY_MAX_ACTIVE_CLONES || String(Math.floor(totalmem() / (1.5 * 1024 ** 3))), 10) || 1);
+const CLONE_NO_PAGE_TIMEOUT_MS = Math.max(60_000, parseInt(process.env.CLONYFY_NO_PAGE_TIMEOUT_MS || String(6 * 60_000), 10) || 6 * 60_000);
+const CLONE_STALL_TIMEOUT_MS = Math.max(60_000, parseInt(process.env.CLONYFY_STALL_TIMEOUT_MS || String(8 * 60_000), 10) || 8 * 60_000);
+const runningCloneProcs = new Set();
+const cloneQueue = [];
+function drainCloneQueue() {
+  while (runningCloneProcs.size < MAX_ACTIVE_CLONES && cloneQueue.length) {
+    const next = cloneQueue.shift();
+    const job = jobs.get(next.id);
+    if (!job || job.status !== 'queued') continue; // cancelled while waiting
+    job.logs.push('[INFO] Starting — your turn in the queue.');
+    try { next.start(); } catch (err) {
+      runningCloneProcs.delete(next.id);
+      job.status = 'error';
+      job.logs.push(`[ERROR] Could not start clone: ${err?.message || err}`);
+      persistJob(job, { force: true });
+    }
+  }
+  cloneQueue.forEach((q, i) => {
+    const job = jobs.get(q.id);
+    if (job && job.status === 'queued') job.queuePosition = i + 1;
+  });
+}
 /** Async ZIP export jobs (progress for Download ZIP UI). */
 const zipJobs = new Map();
 const ZIP_JOB_TTL_MS = 45 * 60 * 1000;
-const ACTIVE_JOB_STATUSES = new Set(['running', 'saving']);
-const isActiveJob = (job) => ACTIVE_JOB_STATUSES.has(job?.status);
 
 setInterval(() => {
   const now = Date.now();
@@ -188,6 +216,11 @@ function cloneHourlyLimit(plan) {
   const override = parseInt(process.env.CLONYFY_CLONES_PER_HOUR || '', 10);
   if (override > 0) return override;
   return CLONE_HOURLY_LIMITS[normalizePlan(plan)] || CLONE_HOURLY_LIMITS.free;
+}
+// Give a slot back (a clone that captured nothing shouldn't burn the user's hourly quota).
+function refundRateLimit(key) {
+  const rl = rateLimits.get(key);
+  if (rl && rl.count > 0) rl.count--;
 }
 setInterval(() => { const now = Date.now(); for (const [k, v] of rateLimits) { if (now > v.resetAt) rateLimits.delete(k); } }, 300000);
 setInterval(async () => { try { await cleanExpiredSessions(Date.now()); } catch {} }, 3600000);
@@ -3424,6 +3457,40 @@ function isBlockedHostname(host) {
   if (host === 'metadata.google.internal' || host === 'metadata') return true;
   return false;
 }
+// Does the domain exist at all? Asks two public resolvers so a flaky local resolver can't
+// false-block a real site. Returns false only when both say NXDOMAIN / no address.
+async function domainExists(hostname) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '');
+  if (!host || /^[0-9.]+$/.test(host) || host.includes(':')) return true;
+  const ask = async (server) => {
+    const r = new DnsResolver({ timeout: 3000, tries: 2 });
+    r.setServers([server]);
+    const tryType = (fn) => fn.call(r, host).then((a) => a.length > 0).catch((e) => (e?.code === 'ENOTFOUND' || e?.code === 'ENODATA' ? false : null));
+    const [v4, v6] = await Promise.all([tryType(r.resolve4), tryType(r.resolve6)]);
+    if (v4 || v6) return true;
+    if (v4 === false && v6 === false) return false;
+    return null; // timeout / SERVFAIL → unknown
+  };
+  const answers = await Promise.all(['1.1.1.1', '8.8.8.8'].map(ask));
+  if (answers.includes(true)) return true;
+  return answers.every((a) => a === false) ? false : true;
+}
+
+// Can we open a connection to the site? Any HTTP answer (even 403/503) counts as reachable —
+// only hard network failures (refused / unreachable / timeout, twice) return false.
+function siteReachable(targetUrl) {
+  const once = () => new Promise((resolveProbe) => {
+    let u;
+    try { u = new URL(targetUrl); } catch { return resolveProbe(true); }
+    const mod = u.protocol === 'http:' ? httpRequestPlain : httpsRequest;
+    const req = mod(u, { method: 'HEAD', timeout: 12_000, rejectUnauthorized: false, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClonyfyCheck/1.0)' } }, (r) => { r.resume(); resolveProbe(true); });
+    req.on('timeout', () => { req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })); });
+    req.on('error', (e) => resolveProbe(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ECONNRESET'].includes(e?.code) ? false : true));
+    req.end();
+  });
+  return once().then((ok) => ok || once());
+}
+
 async function assertPublicTarget(parsedUrl) {
   const rawHost = parsedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
   if (isBlockedHostname(parsedUrl.hostname)) throw new Error('That address is not allowed');
@@ -3454,54 +3521,6 @@ async function assertPublicTarget(parsedUrl) {
     // DNS error (ENOTFOUND / timeout / SERVFAIL): allow — the cloner will fail
     // gracefully on a genuinely unreachable domain instead of us false-blocking.
   }
-}
-
-const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_FAIL']);
-const NO_SUCH_HOST_CODES = new Set(['ENOTFOUND', 'ENODATA', 'EAI_NONAME']);
-
-/**
- * Fail fast on sites that don't exist or don't answer, instead of spawning
- * Chromium and leaving a job "Running" with 0 pages. Only definitive
- * answers block; anything ambiguous (TLS quirks, 4xx/5xx) lets the clone run.
- */
-async function checkTargetReachable(parsedUrl) {
-  const host = parsedUrl.hostname.replace(/^\[|\]$/g, '');
-  const looksLikeIp = /^[0-9.]+$/.test(host) || host.includes(':');
-  if (!looksLikeIp) {
-    try {
-      const addrs = await Promise.race([
-        dnsLookup(host, { all: true }),
-        new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('dns timeout'), { code: 'ETIMEOUT' })), 8000)),
-      ]);
-      if (!addrs || addrs.length === 0) return { ok: false, reason: 'not_found' };
-    } catch (err) {
-      if (NO_SUCH_HOST_CODES.has(err?.code)) return { ok: false, reason: 'not_found' };
-      // EAI_AGAIN / timeout: our resolver is struggling — don't blame the site.
-      return { ok: true };
-    }
-  }
-  try {
-    const res = await fetch(parsedUrl.href, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(20_000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClonyfyBot/1.0; +https://clonyfy.com)', Accept: 'text/html,*/*' },
-    });
-    try { await res.body?.cancel(); } catch {}
-    return { ok: true, status: res.status };
-  } catch (err) {
-    const code = err?.cause?.code || err?.code;
-    if (NO_SUCH_HOST_CODES.has(code)) return { ok: false, reason: 'not_found' };
-    if (UNREACHABLE_CODES.has(code)) return { ok: false, reason: 'unreachable' };
-    if (err?.name === 'TimeoutError' || code === 'UND_ERR_CONNECT_TIMEOUT') return { ok: false, reason: 'timeout' };
-    return { ok: true };
-  }
-}
-
-function unreachableTargetMessage(hostname, reason) {
-  if (reason === 'not_found') return `The website ${hostname} does not exist (domain not found). Check the address and try again.`;
-  if (reason === 'timeout') return `The website ${hostname} is not responding. It may be down — try again later.`;
-  return `The website ${hostname} is not reachable (connection refused). It may be down — try again later.`;
 }
 
 function listOutputFiles(outDir) {
@@ -4116,7 +4135,7 @@ async function handleRequest(req, res) {
         }
       }
       if (liveJob && isActiveJob(liveJob)) {
-        status = liveJob.status === 'saving' ? 'saving' : 'running';
+        status = liveJob.status;
         pages = liveJob.pages ?? pages;
       }
       normalized.push({
@@ -4501,6 +4520,15 @@ async function handleRequest(req, res) {
     const { id } = await readJsonBody(req);
     const job = id ? jobs.get(String(id)) : null;
     if (!job || (job.userId !== cancelUser.id && cancelUser.role !== 'admin')) return json(res, { error: 'Not found' }, 404);
+    if (job.status === 'queued') {
+      // Not started yet: drop it from the queue (drainCloneQueue skips non-queued jobs).
+      job.status = 'error';
+      job.logs.push('[WARN] Clone cancelled by user before it started.');
+      persistJob(job, { force: true });
+      updateCloneStatus({ id: job.id, status: 'error', pages: 0, completedAt: new Date().toISOString() }).catch(() => {});
+      if (job.userId) refundRateLimit(`clone_user:${job.userId}`);
+      return json(res, { ok: true });
+    }
     if (!isActiveJob(job) || !job.proc) return json(res, { error: 'This clone is not running.' }, 409);
     job.logs.push('[WARN] Clone stopped by user — saving pages captured so far.');
     persistJob(job, { force: true });
@@ -4535,6 +4563,13 @@ async function handleRequest(req, res) {
         }
         // unexpected guard error — log and continue; the cloner will handle a bad URL.
         console.warn('[ssrf-guard] non-blocking error for', target.href, '-', err?.message || err);
+      }
+      // Fail fast on typos / dead sites instead of letting a crawler wait out the deadline.
+      if (!await domainExists(target.hostname).catch(() => true)) {
+        return json(res, { error: `This website doesn't exist: ${target.hostname} — the domain was not found. Check the address for typos.`, code: 'domain_not_found' }, 400);
+      }
+      if (!await siteReachable(target.href).catch(() => true)) {
+        return json(res, { error: `${target.hostname} isn't responding (connection failed). Check that the site is online, then try again.`, code: 'site_unreachable' }, 400);
       }
       const targetUrl = target.href;
       const { ignoreRobots = false } = parsed;
@@ -4583,10 +4618,6 @@ async function handleRequest(req, res) {
       maxPages = String(Math.max(1, parseInt(maxPages, 10) || 1));
       depth = String(Math.max(1, parseInt(depth, 10) || 1));
 
-      const reachable = await checkTargetReachable(target);
-      if (!reachable.ok) {
-        return json(res, { error: unreachableTargetMessage(target.hostname, reachable.reason), code: `target_${reachable.reason}` }, 422);
-      }
       if (cloneUser) checkRateLimit(`clone_user:${cloneUser.id}`, cloneHourlyLimit(normalizePlan(cloneUser.plan)), 3600000);
 
       const id = randomUUID();
@@ -4809,7 +4840,7 @@ async function handleRequest(req, res) {
                 NAME: cloneUser.name,
                 SITE: new URL(targetUrl).hostname,
                 PAGES: String(job.pages ?? 0),
-                LINK: appUrl + '/app',
+                LINK: appUrl + '/dashboard',
               })
             ).catch(() => {});
           }
@@ -4899,63 +4930,115 @@ async function handleRequest(req, res) {
           void cloneWork;
         }
       } else {
-        const childEnv = {
-          ...process.env,
-          // Quality-first: never force lossy fast clone on hosted. Opt in with CLONYFY_FAST_CLONE=1.
-          ...(IS_HOSTED && process.env.CLONYFY_FAST_CLONE == null && process.env.CLONYFY_QUALITY === '0'
-            ? { CLONYFY_FAST_CLONE: '1' }
-            : {}),
-        };
-        const proc = spawn(process.execPath, [CLI, ...args], {
-          cwd: __dirname,
-          env: childEnv,
-        });
-        job.proc = proc;
-        // While Chromium runs, periodically push captured HTML to Storage so a mid-clone
-        // crash/restart still leaves a previewable salvage.
-        let midPersistRunning = false;
-        const midPersistTimer = IS_HOSTED
-          ? setInterval(() => {
-            if (midPersistRunning || !isActiveJob(job) || !existsSync(outDir)) return;
-            midPersistRunning = true;
-            // Incremental + awaited assets: only new/changed files, and never overlapping runs.
-            persistCloneOutput(outDir, { deferAssets: false, requireCritical: false, incremental: true })
-              .catch((err) => {
-                job.logs.push(`[WARN] Mid-clone storage sync: ${err?.message || err}`);
-              })
-              .finally(() => { midPersistRunning = false; });
-          }, 25_000)
-          : null;
-        const jobDeadlineMs = cloneDeadlineMs(fullSite);
-        const deadlineTimer = setTimeout(() => {
-          if (!isActiveJob(job)) return;
-          job.logs.push(`[WARN] Clone deadline (${Math.round(jobDeadlineMs / 60000)} min) reached — stopping crawl and salvaging pages.`);
-          persistJob(job, { force: true });
-          try { proc.kill('SIGTERM'); } catch {}
-          setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
-        }, jobDeadlineMs);
-        proc.stdout.on('data', (c) => {
-          c.toString().split('\n').filter(Boolean).forEach((l) => {
-            job.logs.push(l);
-            // "[12/500] ✓ url" — surface live progress so the dashboard isn't stuck at 0 pages.
-            const progress = l.match(/\[(\d+)\/\d+\]\s+✓/);
-            if (progress && job.status === 'running') job.pages = Math.max(job.pages || 0, parseInt(progress[1], 10));
+        // Global cap: every clone is a Chromium; too many at once takes the whole server down.
+        const startClone = () => {
+          job.status = 'running';
+          runningCloneProcs.add(job.id);
+          const childEnv = {
+            ...process.env,
+            // Quality-first: never force lossy fast clone on hosted. Opt in with CLONYFY_FAST_CLONE=1.
+            ...(IS_HOSTED && process.env.CLONYFY_FAST_CLONE == null && process.env.CLONYFY_QUALITY === '0'
+              ? { CLONYFY_FAST_CLONE: '1' }
+              : {}),
+          };
+          const proc = spawn(process.execPath, [CLI, ...args], {
+            cwd: __dirname,
+            env: childEnv,
           });
-          persistJob(job);
-        });
-        proc.stderr.on('data', (c) => {
-          c.toString().split('\n').filter(Boolean).forEach((l) => job.logs.push(`[ERROR] ${l}`));
-          persistJob(job);
-        });
-        proc.on('close', (code, signal) => {
-          clearTimeout(deadlineTimer);
-          if (midPersistTimer) clearInterval(midPersistTimer);
-          finalizeCloneJob(code, signal).catch((err) => {
-            job.status = 'error';
-            job.logs.push(`[ERROR] Could not finalize clone: ${err?.message || err}`);
+          job.proc = proc;
+          // While Chromium runs, periodically push captured HTML to Storage so a mid-clone
+          // crash/restart still leaves a previewable salvage.
+          let midPersistRunning = false;
+          const midPersistTimer = IS_HOSTED
+            ? setInterval(() => {
+              if (midPersistRunning || !isActiveJob(job) || !existsSync(outDir)) return;
+              midPersistRunning = true;
+              // Incremental + awaited assets: only new/changed files, and never overlapping runs.
+              persistCloneOutput(outDir, { deferAssets: false, requireCritical: false, incremental: true })
+                .catch((err) => {
+                  job.logs.push(`[WARN] Mid-clone storage sync: ${err?.message || err}`);
+                })
+                .finally(() => { midPersistRunning = false; });
+            }, 25_000)
+            : null;
+          const jobDeadlineMs = cloneDeadlineMs(fullSite);
+          const deadlineTimer = setTimeout(() => {
+            if (!isActiveJob(job)) return;
+            job.logs.push(`[WARN] Clone deadline (${Math.round(jobDeadlineMs / 60000)} min) reached — stopping crawl and salvaging pages.`);
             persistJob(job, { force: true });
+            try { proc.kill('SIGTERM'); } catch {}
+            setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
+          }, jobDeadlineMs);
+          // Stall watchdog: stop crawls that can't load a single page (bot protection, dead host)
+          // or go silent, instead of holding a Chromium for the whole deadline.
+          let lastOutputAt = Date.now();
+          const procStartedAt = Date.now();
+          const stallTimer = setInterval(() => {
+            if (!isActiveJob(job) || job.stallReason) return;
+            const age = Date.now() - procStartedAt;
+            const quiet = Date.now() - lastOutputAt;
+            let captured = 0;
+            try {
+              const pagesDir = join(outDir, 'captured-pages');
+              captured = existsSync(pagesDir) ? readdirSync(pagesDir).filter((f) => f.endsWith('.html')).length : 0;
+            } catch {}
+            let reason = null;
+            if (captured === 0 && age > CLONE_NO_PAGE_TIMEOUT_MS) {
+              reason = `Could not load any page of ${target.hostname} in ${Math.round(age / 60000)} min. The site may block automated browsers (e.g. Cloudflare bot protection) or isn't responding.`;
+            } else if (quiet > CLONE_STALL_TIMEOUT_MS) {
+              reason = `Clone stalled — no progress for ${Math.round(quiet / 60000)} min. Stopping and keeping the ${captured} page(s) captured so far.`;
+            }
+            if (!reason) return;
+            job.stallReason = reason;
+            job.logs.push(`[ERROR] ${reason}`);
+            persistJob(job, { force: true });
+            try { proc.kill('SIGTERM'); } catch {}
+            setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
+          }, 30_000);
+          proc.stdout.on('data', (c) => {
+            lastOutputAt = Date.now();
+            c.toString().split('\n').filter(Boolean).forEach((l) => {
+              job.logs.push(l);
+              // "[12/500] ✓ url" — surface live progress so the dashboard isn't stuck at 0 pages.
+              const progress = l.match(/\[(\d+)\/\d+\]\s+✓/);
+              if (progress && job.status === 'running') job.pages = Math.max(job.pages || 0, parseInt(progress[1], 10));
+            });
+            persistJob(job);
           });
-        });
+          proc.stderr.on('data', (c) => {
+            lastOutputAt = Date.now();
+            c.toString().split('\n').filter(Boolean).forEach((l) => job.logs.push(`[ERROR] ${l}`));
+            persistJob(job);
+          });
+          proc.on('close', (code, signal) => {
+            clearTimeout(deadlineTimer);
+            clearInterval(stallTimer);
+            runningCloneProcs.delete(job.id);
+            drainCloneQueue();
+            if (midPersistTimer) clearInterval(midPersistTimer);
+            finalizeCloneJob(code, signal).then(() => {
+              // Nothing captured → don't charge the user's hourly clone quota for it.
+              if (job.userId && (job.status === 'error' || !job.pages)) refundRateLimit(`clone_user:${job.userId}`);
+            }).catch((err) => {
+              job.status = 'error';
+              job.logs.push(`[ERROR] Could not finalize clone: ${err?.message || err}`);
+              persistJob(job, { force: true });
+            });
+          });
+          // A process that fails to start may never emit 'close' — free its queue slot anyway.
+          proc.on('error', () => {
+            runningCloneProcs.delete(job.id);
+            drainCloneQueue();
+          });
+        };
+        if (runningCloneProcs.size < MAX_ACTIVE_CLONES) startClone();
+        else {
+          job.status = 'queued';
+          cloneQueue.push({ id: job.id, start: startClone });
+          job.queuePosition = cloneQueue.length;
+          job.logs.push(`[INFO] Server is busy — your clone is #${cloneQueue.length} in the queue and will start automatically.`);
+          persistJob(job, { force: true });
+        }
       }
 
       return json(res, job);
@@ -5562,11 +5645,12 @@ async function handleRequest(req, res) {
           return true;
         });
         if (!files.length) return json(res, { error: 'No files found in output folder. Re-run the clone, then push again.' }, 400);
-        // No hard file-count cap: large clones (e.g. Max / full-site) are split into
-        // multiple GitHub commits below (batchSize 250–500). Per-file GitHub API
-        // size limit (~100MB) still applies.
-        const tooLarge = files.find(f => f.size > 95 * 1024 * 1024);
-        if (tooLarge) return json(res, { error: `File is too large for GitHub API: ${tooLarge.rel}` }, 400);
+        // No file-count cap. With git available the whole clone goes up via `git push`
+        // (no per-file API calls, >95 MB files via LFS). Without git (serverless), the REST
+        // fallback below splits the upload into multiple commits.
+        const useGit = await gitAvailable();
+        const tooLarge = !useGit && files.find(f => f.size > 95 * 1024 * 1024);
+        if (tooLarge) return json(res, { error: `File is too large for the GitHub API: ${tooLarge.rel}` }, 400);
 
         // GET uses singular /git/ref/... ; PATCH/update must use plural /git/refs/...
         const branchRefSuffix = `heads/${cleanBranch.split('/').map(encodeURIComponent).join('/')}`;
@@ -5645,6 +5729,29 @@ async function handleRequest(req, res) {
           throw new Error('Could not resolve a GitHub branch after initializing the repository.');
         }
 
+        const pushMessage = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
+        if (useGit) {
+          const totalMb = Math.round(files.reduce((a, f) => a + f.size, 0) / 1048576);
+          console.log(`[github/push] ${owner}/${repoName}: git push of ${files.length} files (${totalMb} MB)`);
+          const pushed = await pushCloneWithGit({
+            files, prefix, owner, repo: repoName, token, branch: cleanBranch,
+            baseCommitSha, cleanTarget: !!cleanTarget, message: pushMessage, log: (m) => console.log(m),
+          });
+          audit(ghUser.id, ghUser.name, 'github_push', `repo=${owner}/${repoName} files=${files.length} via=git commits=${pushed.commits} lfs=${pushed.lfsFiles}`, ip);
+          return json(res, {
+            ok: true,
+            files: files.length,
+            commits: pushed.commits,
+            lfsFiles: pushed.lfsFiles,
+            branch: cleanBranch,
+            targetPath: prefix,
+            commitUrl: pushed.commitUrl,
+            repoUrl: repoInfo.body.html_url,
+            emptyRepoBootstrapped: !!emptyLikely,
+            createdRepo: !!(createRepo && repoInfo.body?.created_at && Date.now() - Date.parse(repoInfo.body.created_at) < 60_000),
+          });
+        }
+
         let baseCommit = await githubAPIRequest(
           'GET',
           `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits/${baseCommitSha}`,
@@ -5652,7 +5759,7 @@ async function handleRequest(req, res) {
         );
         baseTreeSha = baseCommit.body.tree.sha;
 
-        const message = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
+        const message = pushMessage;
         // Hosted: smaller batches avoid request-body / timeout failures on large clones (e.g. Shopify).
         // Large Max/full-site clones span many commits intentionally — no total file ceiling.
         const batchSize = IS_HOSTED || IS_LOW_MEMORY ? 250 : 500;
@@ -7066,9 +7173,11 @@ async function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/xml' });
     const urls = [
       { loc: `${host}/`,           changefreq: 'weekly',  priority: '1.0' },
-      { loc: `${host}/app`,        changefreq: 'monthly', priority: '0.8' },
+      { loc: `${host}/fr`,         changefreq: 'weekly',  priority: '0.8' },
+      { loc: `${host}/register`,   changefreq: 'monthly', priority: '0.6' },
+      { loc: `${host}/login`,      changefreq: 'monthly', priority: '0.4' },
       { loc: `${host}/privacy`,    changefreq: 'monthly', priority: '0.3' },
-      { loc: `${host}/tos`,        changefreq: 'monthly', priority: '0.3' },
+      { loc: `${host}/terms`,      changefreq: 'monthly', priority: '0.3' },
     ];
     const urlset = urls.map(u => `<url><loc>${u.loc}</loc><lastmod>${now}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join('');
     res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urlset}</urlset>`);

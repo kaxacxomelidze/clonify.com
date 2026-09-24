@@ -97,7 +97,7 @@ export function DashboardWorkspace({ children }: { children: ReactNode }) {
   }, [isAuthenticated, refreshJobs]);
 
   // Keep running captures (pages, elapsed, final status) live in the list/details view.
-  const hasRunningJob = jobs.some((job) => job.status === "running");
+  const hasRunningJob = jobs.some((job) => job.status === "running" || job.status === "queued");
   useEffect(() => {
     if (!isAuthenticated || !hasRunningJob) return;
     const timer = window.setInterval(() => void refreshJobs(), 5000);

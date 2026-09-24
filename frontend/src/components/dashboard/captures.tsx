@@ -311,7 +311,7 @@ export function CaptureDetails({
               </p>
             )}
             <div className="flex flex-wrap gap-2">
-              {job.status === "running" && (
+              {(job.status === "running" || job.status === "queued") && (
                 <button
                   type="button"
                   className="dashboard-button"
