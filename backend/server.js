@@ -2122,6 +2122,30 @@ function previewReplayPatch(assetMap, targetOrigin = '') {
   if (window.HTMLEmbedElement) patchUrlProperty(HTMLEmbedElement.prototype, 'src');
   if (window.HTMLFormElement) patchUrlProperty(HTMLFormElement.prototype, 'action');
 
+  // Scripts that build markup as strings (el.innerHTML = '<img src="/flags/ge.svg">')
+  // bypass the property/attribute hooks above — localize URLs inside the HTML too.
+  const rewriteHtml = (html) => {
+    if (typeof html !== 'string' || !/\\b(?:src|srcset|poster)\\s*=|url\\(/i.test(html)) return html;
+    return html
+      .replace(/\\b(src|poster)\\s*=\\s*(["'])([^"']*)\\2/gi, (m, attr, q, url) => attr + '=' + q + localize(url) + q)
+      .replace(/\\b(srcset)\\s*=\\s*(["'])([^"']*)\\2/gi, (m, attr, q, value) => attr + '=' + q + rewriteSrcset(value) + q)
+      .replace(/\\bstyle\\s*=\\s*(["'])([^"']*)\\1/gi, (m, q, css) => 'style=' + q + rewriteCssText(css) + q);
+  };
+  for (const prop of ['innerHTML', 'outerHTML']) {
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, prop);
+    if (!desc || !desc.set || !desc.get) continue;
+    Object.defineProperty(Element.prototype, prop, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get() { return desc.get.call(this); },
+      set(value) { return desc.set.call(this, rewriteHtml(value)); },
+    });
+  }
+  const nativeInsertAdjacentHTML = Element.prototype.insertAdjacentHTML;
+  Element.prototype.insertAdjacentHTML = function(position, html) {
+    return nativeInsertAdjacentHTML.call(this, position, rewriteHtml(html));
+  };
+
   function rewriteCssText(value) {
     return String(value || '').replace(/url\\(\\s*(['"]?)([^'")\\s]+)\\1\\s*\\)/g, (match, quote, url) => {
       const next = localize(url);

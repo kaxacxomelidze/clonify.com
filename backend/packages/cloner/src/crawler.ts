@@ -334,17 +334,21 @@ function shouldSkipPageUrl(url: string, startUrl?: string): boolean {
 }
 
 const MAX_BROWSER_RELAUNCHES = 5;
-/** Same path with different query strings (filters, currency/sort switchers) is the classic crawler trap. */
-const MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || '150', 10) || 150);
+const BROWSER_GONE_RE = /Target page, context or browser has been closed|Browser has been closed|browser has disconnected|Target closed/i;
+/**
+ * Captured pages are stored by pathname (route-map keys), so `/?cur=GEL` would just
+ * overwrite `/`. Crawling query variants of an already-queued path only burns the page
+ * budget — and currency/sort/filter switchers turn it into an endless crawler trap.
+ */
+const MAX_URLS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_URLS_PER_PATH || '1', 10) || 1);
 
-export function createQueryVariantLimiter(limit = MAX_QUERY_VARIANTS_PER_PATH) {
+export function createQueryVariantLimiter(limit = MAX_URLS_PER_PATH) {
   const counts = new Map<string, number>();
   return {
     allow(url: string): boolean {
       try {
         const u = new URL(url);
-        if (!u.search) return true;
-        const key = `${u.origin}${u.pathname}`;
+        const key = `${u.origin}${u.pathname.replace(/\/$/, '') || '/'}`;
         const n = counts.get(key) || 0;
         if (n >= limit) return false;
         counts.set(key, n + 1);
@@ -694,6 +698,7 @@ export async function crawl(
   const queue = new PQueue({ concurrency: opts.concurrency });
   const records: PageRecord[] = [];
   const queryVariants = createQueryVariantLimiter();
+  const crashRetried = new Set<string>();
 
   if (opts.fullSite) {
     logger.info(
@@ -776,7 +781,9 @@ export async function crawl(
     visited.add(clean);
 
     const priority = linkEnqueuePriority(clean, fromNav);
-    queue.add(async () => {
+    let retryingAfterCrash = false;
+    const task = async () => {
+      retryingAfterCrash = false;
       if (records.length >= opts.maxPages) return;
 
       // Guard: skip URLs whose path extension is a known non-page type.
@@ -878,6 +885,15 @@ export async function crawl(
         }
       } catch (err) {
         const errMsg = (err as Error).message || String(err);
+        // A Chromium crash takes every in-flight page with it; give those pages one
+        // more go on the relaunched browser instead of dropping them.
+        if (BROWSER_GONE_RE.test(errMsg) && !crashRetried.has(clean)) {
+          crashRetried.add(clean);
+          retryingAfterCrash = true;
+          logger.warn(`  [RETRY] ${clean}: browser crashed mid-capture — retrying`);
+          queue.add(task, { priority });
+          return;
+        }
         logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
         // Start URL must not silently vanish — always try a static HTML salvage.
         // Full-site / Max mode salvages every failed page so coverage stays high.
@@ -917,13 +933,14 @@ export async function crawl(
           }
         }
       } finally {
-        if (startNorm && clean === startNorm) {
+        if (startNorm && clean === startNorm && !retryingAfterCrash) {
           startUrlFinished = true;
           maybeEnqueueSitemap();
         }
         await context?.close().catch(() => {});
       }
-    }, { priority });
+    };
+    queue.add(task, { priority });
   };
 
   enqueue(opts.url, 0);
