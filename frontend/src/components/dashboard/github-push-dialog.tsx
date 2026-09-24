@@ -127,7 +127,7 @@ export function GitHubPushDialog({
     }
     setBusy("push");
     setHint(
-      "Checking GitHub repo, then uploading clone files. Large clones use multiple commits and can take several minutes — keep this tab open.",
+      "Checking GitHub repo, then pushing every clone file. Very large clones can take several minutes — keep this tab open.",
     );
     try {
       await ensureApiAwake({ attempts: 4, timeoutMs: 12_000 }).catch(() => {});
@@ -149,10 +149,13 @@ export function GitHubPushDialog({
       if (msg) payload.commitMessage = msg;
       const data = await pushToGitHub(payload);
       writeSessionToken(token.trim());
+      const pushedWhat = [
+        data.files ? `${data.files.toLocaleString()} files` : "",
+        data.lfsFiles ? `${data.lfsFiles} large via Git LFS` : "",
+      ].filter(Boolean).join(", ");
       toast.success(
-        data.createdRepo
-          ? "Created the GitHub repo and pushed the clone."
-          : "Pushed to GitHub.",
+        (data.createdRepo ? "Created the GitHub repo and pushed the clone" : "Pushed to GitHub") +
+          (pushedWhat ? ` (${pushedWhat}).` : "."),
       );
       const openUrl = data.commitUrl || data.repoUrl || data.url;
       if (openUrl) window.open(openUrl, "_blank", "noopener,noreferrer");
