@@ -12,3 +12,10 @@ browsers/
 .admin-sessions.json
 .next/
 out/
+
+# Env files other than the example hold production secrets
+.env.*
+!.env.example
+# Stray editor/backup copies
+*.tmp
+*.before-*

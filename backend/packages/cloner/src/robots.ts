@@ -1,4 +1,5 @@
 import { createRequire } from 'module';
+import { safeFetch } from './ssrfGuard.js';
 
 const _require = createRequire(import.meta.url);
 type RobotsInstance = { isAllowed(url: string, ua?: string): boolean | undefined };
@@ -11,7 +12,7 @@ export async function checkRobots(targetUrl: string): Promise<{ allowed: boolean
   const robotsUrl = `${u.protocol}//${u.host}/robots.txt`;
 
   try {
-    const res = await fetch(robotsUrl, {
+    const res = await safeFetch(robotsUrl, {
       headers: { 'User-Agent': USER_AGENT },
       signal: AbortSignal.timeout(10_000),
     });

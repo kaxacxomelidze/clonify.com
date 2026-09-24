@@ -5,6 +5,7 @@ import mime from 'mime-types';
 import type { BrowserContext, Page } from 'playwright';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
 import { logger } from './logger.js';
+import { isPublicUrl, safeFetch } from './ssrfGuard.js';
 import { normalizePageUrl } from './pageUrls.js';
 import {
   IS_FAST_CLONE,
@@ -701,7 +702,7 @@ export async function capturePage(
         try {
           const absUrl = new URL(cssUrl, sourceUrl).href;
           if (assetMap.has(absUrl)) return;
-          const r = await fetch(absUrl, { headers: assetFetchHeaders(pageUrl), signal: AbortSignal.timeout(10_000) });
+          const r = await safeFetch(absUrl, { headers: assetFetchHeaders(pageUrl), signal: AbortSignal.timeout(10_000) });
           if (!r.ok) {
             logger.debug(`  [CSS REF FAIL] ${absUrl} -> HTTP ${r.status}`);
             markFailed(absUrl, `http_status:${r.status}`);
@@ -745,6 +746,14 @@ export async function capturePage(
     const url = req.url();
     networkRequests++;
 
+    // Subresources, redirects and crawled links can point at internal hosts
+    // even when the clone target itself is public.
+    if (!(await isPublicUrl(url))) {
+      logger.debug(`  [BLOCKED private address] ${url}`);
+      await route.abort('blockedbyclient');
+      return;
+    }
+
     if (shouldSkipAsset(url)) {
       assetsSkipped++;
       await route.continue();
@@ -777,6 +786,10 @@ export async function capturePage(
     let response;
     try {
       response = await route.fetch({ timeout: ROUTE_FETCH_TIMEOUT });
+      // route.fetch follows redirects itself; reject ones that landed inside.
+      if (!(await isPublicUrl(response.url()))) {
+        throw new Error(`redirected to a private address: ${response.url()}`);
+      }
     } catch (err) {
       logger.debug(`  [FETCH FAIL] ${url}: ${(err as Error).message}`);
       await route.abort();
@@ -1121,7 +1134,7 @@ export async function capturePage(
             const pathOnly = new URL(absUrl).pathname;
             if (assetMap.has(pathOnly)) return;
           } catch { /* ignore */ }
-          const r = await fetch(absUrl, {
+          const r = await safeFetch(absUrl, {
             headers: assetFetchHeaders(pageUrl),
             signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
           });
@@ -1190,7 +1203,7 @@ export async function capturePage(
         try {
           const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
           if (assetMap.has(absUrl)) return;
-          const r = await fetch(absUrl, {
+          const r = await safeFetch(absUrl, {
             headers: assetFetchHeaders(pageUrl),
             signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
           });
@@ -1343,7 +1356,7 @@ export async function capturePage(
             try {
               if (assetMap.has(new URL(absUrl).pathname)) return;
             } catch { /* ignore */ }
-            const r = await fetch(absUrl, {
+            const r = await safeFetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
               signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
             });
@@ -1588,7 +1601,7 @@ export async function capturePage(
           try {
             const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
             if (assetMap.has(absUrl)) return;
-            const r = await fetch(absUrl, {
+            const r = await safeFetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
               signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
             });

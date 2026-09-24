@@ -5,6 +5,7 @@ import { extname, join } from 'path';
 import mime from 'mime-types';
 import { capturePage, extractCssUrls } from './capture.js';
 import { logger } from './logger.js';
+import { safeFetch } from './ssrfGuard.js';
 import { normalizePageUrl } from './pageUrls.js';
 import {
   isLocaleOnlyPath,
@@ -207,7 +208,7 @@ async function fetchSitemap(origin: string): Promise<string[]> {
   const fetchedSitemaps = new Set<string>();
 
   try {
-    const robots = await fetch(`${origin}/robots.txt`, {
+    const robots = await safeFetch(`${origin}/robots.txt`, {
       headers: { 'User-Agent': USER_AGENT },
       signal: AbortSignal.timeout(IS_SERVERLESS ? 2_000 : 5_000),
     });
@@ -237,7 +238,7 @@ async function fetchSitemap(origin: string): Promise<string[]> {
         if (fetchedSitemaps.has(nestedUrl)) continue;
         fetchedSitemaps.add(nestedUrl);
         try {
-          const res = await fetch(nestedUrl, {
+          const res = await safeFetch(nestedUrl, {
             headers: { 'User-Agent': USER_AGENT },
             signal: AbortSignal.timeout(IS_SERVERLESS ? 3_000 : 8_000),
           });
@@ -263,7 +264,7 @@ async function fetchSitemap(origin: string): Promise<string[]> {
     if (fetchedSitemaps.has(url)) continue;
     fetchedSitemaps.add(url);
     try {
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         headers: { 'User-Agent': USER_AGENT },
         signal: AbortSignal.timeout(IS_SERVERLESS ? 3_000 : 8_000),
       });
@@ -410,7 +411,7 @@ async function saveStaticAsset(rawUrl: string, pageUrl: string, assetsDir: strin
   }
 
   try {
-    const res = await fetch(absUrl, {
+    const res = await safeFetch(absUrl, {
       headers: { 'User-Agent': USER_AGENT },
       signal: AbortSignal.timeout(STATIC_ASSET_TIMEOUT),
     });
@@ -491,7 +492,7 @@ async function collectStaticAssets(
 
     if (/\.css(?:$|[?#])/i.test(saved.originalUrl) && hasTime() && remainingSlots() > 0) {
       try {
-        const cssRes = await fetch(saved.originalUrl, {
+        const cssRes = await safeFetch(saved.originalUrl, {
           headers: { 'User-Agent': USER_AGENT },
           signal: AbortSignal.timeout(STATIC_ASSET_TIMEOUT),
         });
@@ -533,7 +534,7 @@ async function fetchStaticPage(
   let lastErr: unknown = null;
   for (let attempt = 1; attempt <= (IS_SERVERLESS ? 3 : 1); attempt++) {
     try {
-      res = await fetch(url, {
+      res = await safeFetch(url, {
         headers: {
           'User-Agent': USER_AGENT,
           'Accept': 'text/html,application/xhtml+xml',
@@ -556,7 +557,7 @@ async function fetchStaticPage(
     const waitMs = retryAfter > 0 ? Math.min(retryAfter * 1000, 15_000) : 5_000;
     logger.warn(`  [429] ${url} — backing off ${waitMs}ms then retrying`);
     await new Promise((r) => setTimeout(r, waitMs));
-    const retry = await fetch(url, {
+    const retry = await safeFetch(url, {
       headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9' },
       signal: AbortSignal.timeout(STATIC_PAGE_TIMEOUT),
     });
@@ -748,6 +749,7 @@ export async function crawl(
           userAgent: USER_AGENT,
           viewport: { width: 1440, height: 900 },
           ignoreHTTPSErrors: true,
+          serviceWorkers: 'block',
           extraHTTPHeaders: {
             'Accept-Language': 'en-US,en;q=0.9',
           },
@@ -854,6 +856,7 @@ export async function crawl(
                   userAgent: USER_AGENT,
                   viewport: { width: 1440, height: 900 },
                   ignoreHTTPSErrors: true,
+                  serviceWorkers: 'block',
                   extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
                 });
                 const retry = await capturePage(context, clean, assetsDir, hooks);

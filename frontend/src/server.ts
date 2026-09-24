@@ -44,15 +44,37 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
+// HEAD requests (uptime monitors, Cloudflare scanners) start a full SSR stream
+// whose body nobody reads, so it hangs until the router's 120s lifetime cleanup.
+// Render as GET, drain the body so the stream finishes, and return headers only.
+async function toHeadResponse(response: Response): Promise<Response> {
+  const bytes = response.body ? (await response.arrayBuffer()).byteLength : 0;
+  const headers = new Headers(response.headers);
+  headers.set("content-length", String(bytes));
+  return new Response(null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    const isHead = request.method === "HEAD";
     try {
       const handler = await getServerEntry();
-      const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
+      // srvx hands us its own request class, which undici's `new Request(req, init)`
+      // can't clone — rebuild the GET from url + headers instead.
+      const ssrRequest = isHead
+        ? new Request(request.url, { method: "GET", headers: new Headers(request.headers) })
+        : request;
+      const response = await normalizeCatastrophicSsrResponse(
+        await handler.fetch(ssrRequest, env, ctx),
+      );
+      return isHead ? await toHeadResponse(response) : response;
     } catch (error) {
       console.error(error);
-      return new Response(renderErrorPage(), {
+      return new Response(isHead ? null : renderErrorPage(), {
         status: 500,
         headers: { "content-type": "text/html; charset=utf-8" },
       });

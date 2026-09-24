@@ -34,7 +34,7 @@ npm run smoke:week4   # edit quota, share host, ZIP export gate
 
 ```bash
 # Add to Vercel + local .env:
-SUPABASE_DB_URL=postgresql://USER:PASSWORD@HOST:5432/DB
+SUPABASE_DB_URL=postgresql://postgres.[ref]:[password]@...
 
 npm run db:migrate
 ```

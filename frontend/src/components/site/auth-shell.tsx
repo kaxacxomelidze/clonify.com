@@ -40,7 +40,7 @@ export function AuthShell({
       const params = new URLSearchParams(window.location.search);
       const oauthError = params.get("oauth_error");
       if (oauthError) {
-        setError(oauthError === "cancelled" ? tr("Google sign-in was cancelled.") : oauthError);
+        setError(oauthErrorMessage(oauthError, params.get("ban_reason"), tr));
         params.delete("oauth_error");
         params.delete("ban_reason");
         const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}`;
@@ -286,4 +286,29 @@ function GoogleMark() {
       <path d="M12 6c1.6 0 2.9.6 4 1.6l3-3A9.6 9.6 0 0 0 12 2a10 10 0 0 0-9 5.4l3.4 2.7A6 6 0 0 1 12 6Z" />
     </svg>
   );
+}
+
+function oauthErrorMessage(
+  code: string,
+  banReason: string | null,
+  tr: (text: string) => string,
+): string {
+  switch (code) {
+    case "cancelled":
+      return tr("Google sign-in was cancelled.");
+    case "not_configured":
+      return tr("Google sign-in is not available yet. Please use email and password.");
+    case "email_unverified":
+      return tr("Your Google account email is not verified.");
+    case "invalid_state":
+      return tr("Google sign-in expired. Please try again.");
+    case "blocked":
+      return banReason
+        ? `${tr("This account has been blocked.")} ${banReason}`
+        : tr("This account has been blocked.");
+    case "server_error":
+      return tr("Google sign-in failed. Please try again.");
+    default:
+      return code;
+  }
 }

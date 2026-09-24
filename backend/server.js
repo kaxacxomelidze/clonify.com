@@ -758,6 +758,13 @@ async function verifyTurnstile(token, remoteIp) {
     } finally { clearTimeout(timer); }
   } catch { return false; }
 }
+function getGoogleOAuthSettings(raw = getCachedSettings()) {
+  return {
+    ...raw,
+    google_client_id: cleanSettingValue(raw.google_client_id) || envFirst('GOOGLE_CLIENT_ID'),
+    google_client_secret: cleanSettingValue(raw.google_client_secret) || envFirst('GOOGLE_CLIENT_SECRET'),
+  };
+}
 function getStripeSettings(raw = getCachedSettings()) {
   const out = { ...raw };
   out.stripe_secret_key = cleanSettingValue(raw.stripe_secret_key) || envFirst('STRIPE_SECRET_KEY', 'STRIPE_SECRET', 'STRIPE_SK', 'STRIPE_PRIVATE_KEY');
@@ -3669,10 +3676,12 @@ function isAllowedOrigin(origin) {
     }
   }
   if (allowed.has(origin)) return true;
-  // Allow localhost in development
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
-  // Vercel preview / production aliases
-  if (/^https:\/\/[a-z0-9-]+-?[a-z0-9]*\.vercel\.app$/i.test(origin)) return true;
+  // Localhost and *.vercel.app previews are dev/Vercel-era conveniences; in
+  // production they let any site on vercel.app make credentialed API calls.
+  if (process.env.NODE_ENV !== 'production') {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+    if (/^https:\/\/[a-z0-9-]+-?[a-z0-9]*\.vercel\.app$/i.test(origin)) return true;
+  }
   return false;
 }
 
@@ -3754,7 +3763,10 @@ function parseRequestUrl(req) {
 
 async function handleRequest(req, res) {
   const url = parseRequestUrl(req);
-  const ip = req.socket?.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown';
+  // Behind nginx the socket peer is always the proxy, so every client shared one
+  // rate-limit bucket. Trust X-Real-IP only when the peer itself is private (nginx).
+  const peerIp = req.socket?.remoteAddress || '';
+  const ip = (isPrivateIp(peerIp) && String(req.headers['x-real-ip'] || '').trim()) || peerIp || 'unknown';
   const reqOrigin = req.headers['origin'] || '';
 
   // CORS — only allow our own origin, not arbitrary third-party sites
@@ -5948,7 +5960,7 @@ async function handleRequest(req, res) {
       stripe_ready: !stripeReason,
       stripe_error: stripeReason,
       stripe_publishable_key: s.stripe_publishable_key || '',
-      google_oauth_enabled: !!s.google_client_id,
+      google_oauth_enabled: !!getGoogleOAuthSettings(s).google_client_id,
     });
   }
 
@@ -6557,8 +6569,12 @@ async function handleRequest(req, res) {
   // ── Google OAuth ──────────────────────────────────────────────────────────────
 
   if (req.method === 'GET' && url.pathname === '/api/auth/google') {
-    const s = getCachedSettings();
-    if (!s.google_client_id) return json(res, { error: 'Google OAuth not configured' }, 503);
+    const s = getGoogleOAuthSettings();
+    if (!s.google_client_id) {
+      res.writeHead(302, { Location: `${frontendPublicUrl(req)}/login?oauth_error=not_configured` });
+      res.end();
+      return;
+    }
     const state = randomUUID().replace(/-/g, '');
     _oauthStates.set(state, Date.now() + 10 * 60 * 1000); // 10 min
     const apiUrl = apiPublicUrl(req);
@@ -6578,7 +6594,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/auth/google/callback') {
-    const s = getCachedSettings();
+    const s = getGoogleOAuthSettings();
     const apiUrl = apiPublicUrl(req);
     const frontend = frontendPublicUrl(req);
     const code = url.searchParams.get('code');
@@ -6607,6 +6623,11 @@ async function handleRequest(req, res) {
       const googleId = gUser.sub;
       const googleEmail = (gUser.email || '').toLowerCase().trim();
       const googleName = gUser.name || googleEmail.split('@')[0];
+      if (!googleEmail || gUser.email_verified !== true) {
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=email_unverified` });
+        res.end();
+        return;
+      }
 
       // Find or create user
       let dbUser = await getUserByGoogleId(googleId);
