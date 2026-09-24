@@ -374,6 +374,10 @@ export async function startClone(input: {
   });
 }
 
+export async function stopClone(id: string) {
+  return apiFetch<{ ok: boolean }>("/api/clone/cancel", { method: "POST", body: { id } });
+}
+
 export async function fetchJobStatus(id: string, logsFrom = 0) {
   return apiFetch<CloneJobResponse>(
     `/api/status?id=${encodeURIComponent(id)}&logsFrom=${logsFrom}`,
