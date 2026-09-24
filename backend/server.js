@@ -2160,14 +2160,34 @@ function previewNavigationPatch(outDir, targetOrigin = '') {
 (() => {
   const apiBase = ${JSON.stringify(apiBase)};
   const targetOrigin = ${JSON.stringify(String(targetOrigin || '').replace(/\/$/, ''))};
+  // The preview is authenticated by ?access_token= on the first page; carry it to every
+  // page we navigate to, otherwise the next /api/page request is "Not authenticated".
+  const authQuery = (() => {
+    try {
+      const q = new URLSearchParams(location.search);
+      const token = q.get('access_token') || q.get('authToken');
+      return token ? '&access_token=' + encodeURIComponent(token) : '';
+    } catch { return ''; }
+  })();
+  const withAuth = (href) => {
+    if (!authQuery) return href;
+    try {
+      const url = new URL(href, location.href);
+      if (url.pathname !== '/api/page' || url.searchParams.has('access_token')) return href;
+      const hash = url.hash;
+      url.hash = '';
+      return url.pathname + url.search + authQuery + hash;
+    } catch { return href; }
+  };
   const previewUrl = (value) => {
     if (!value || /^#/.test(String(value))) return value;
     try {
       const url = new URL(value, location.href);
-      if (url.pathname === '/api/page' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/_assets/')) return value;
+      if (url.pathname === '/api/page') return withAuth(value);
+      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/_assets/')) return value;
       if (url.origin === location.origin || (targetOrigin && url.origin === targetOrigin)) {
         const route = (url.pathname || '/') + url.search;
-        return apiBase + encodeURIComponent(route === '' ? '/' : route) + url.hash;
+        return apiBase + encodeURIComponent(route === '' ? '/' : route) + authQuery + url.hash;
       }
     } catch {}
     return value;
