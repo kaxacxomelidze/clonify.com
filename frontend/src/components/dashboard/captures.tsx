@@ -6,9 +6,12 @@ import {
   Eye,
   Figma,
   Github,
+  Laptop,
   Link2,
+  Monitor,
   Pencil,
   Search,
+  Smartphone,
   Square,
   Trash2,
 } from "lucide-react";
@@ -107,6 +110,18 @@ function absoluteApiUrl(pathOrUrl: string) {
   return `${base}${pathOrUrl.startsWith("/") ? pathOrUrl : `/${pathOrUrl}`}`;
 }
 
+type CaptureDetailsView = "desktop" | "laptop" | "mobile";
+
+const CAPTURE_DETAILS_VIEWS: Array<{
+  id: CaptureDetailsView;
+  label: string;
+  Icon: typeof Monitor;
+}> = [
+  { id: "desktop", label: "Desktop view (full screen)", Icon: Monitor },
+  { id: "laptop", label: "Laptop view (half screen)", Icon: Laptop },
+  { id: "mobile", label: "Mobile view (compact)", Icon: Smartphone },
+];
+
 export function CaptureDetails({
   job,
   onClose,
@@ -121,6 +136,7 @@ export function CaptureDetails({
   const [iframeError, setIframeError] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [figmaOpen, setFigmaOpen] = useState(false);
+  const [view, setView] = useState<CaptureDetailsView>("desktop");
   const canPreview = !!job?.outDir && job.status === "done";
   const previewSrc = canPreview && job?.outDir ? pagePreviewUrl(job.outDir) : "";
 
@@ -234,14 +250,36 @@ export function CaptureDetails({
       onOpenChange={(open) => {
         if (!open) {
           setIframeError(false);
+          setView("desktop");
           onClose();
         }
       }}
     >
-      <DialogContent className="dashboard-dialog" data-lenis-prevent>
+      <DialogContent
+        className="dashboard-dialog capture-details-dialog"
+        data-view={view}
+        data-lenis-prevent
+      >
         {job && (
           <>
-            <p className="eyebrow">Capture details</p>
+            <div className="capture-details-header">
+              <p className="eyebrow">Capture details</p>
+              <div className="capture-view-switch" role="group" aria-label="Window size">
+                {CAPTURE_DETAILS_VIEWS.map(({ id, label, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className="capture-view-switch__button"
+                    aria-label={label}
+                    aria-pressed={view === id}
+                    title={label}
+                    onClick={() => setView(id)}
+                  >
+                    <Icon size={16} />
+                  </button>
+                ))}
+              </div>
+            </div>
             <DialogTitle className="break-all pr-4 font-display text-2xl leading-tight">
               {job.domain}
             </DialogTitle>
@@ -266,7 +304,7 @@ export function CaptureDetails({
             {canPreview ? (
               <div className="overflow-hidden rounded-2xl border border-border">
                 {iframeError ? (
-                  <div className="flex h-[320px] flex-col items-center justify-center gap-3 bg-background px-6 text-center">
+                  <div className="capture-preview-frame flex flex-col items-center justify-center gap-3 bg-background px-6 text-center">
                     <p className="text-sm text-muted-foreground">
                       Inline preview could not load. Use Open preview to view it on the API host.
                     </p>
@@ -284,7 +322,7 @@ export function CaptureDetails({
                   <iframe
                     title={`Preview ${job.domain}`}
                     src={previewSrc}
-                    className="h-[320px] w-full bg-background"
+                    className="capture-preview-frame w-full bg-background"
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                     onError={() => setIframeError(true)}
                     onLoad={(event) => {

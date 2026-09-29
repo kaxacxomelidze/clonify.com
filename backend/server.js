@@ -34,6 +34,7 @@ import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
+import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './lib/clonePreviewRuntime.js';
 
 const _cjsRequire = createRequire(import.meta.url);
 let bcrypt = null, nodemailer = null, StripeLib = null;
@@ -2154,112 +2155,8 @@ function previewReplayPatch(assetMap, targetOrigin = '') {
 </script>`;
 }
 
-function previewNavigationPatch(outDir, targetOrigin = '') {
-  const apiBase = `/api/page?outDir=${encodeURIComponent(outDir)}&route=`;
-  return `<script data-clonyfy-preview-nav>
-(() => {
-  const apiBase = ${JSON.stringify(apiBase)};
-  const targetOrigin = ${JSON.stringify(String(targetOrigin || '').replace(/\/$/, ''))};
-  // The preview is authenticated by ?access_token= on the first page; carry it to every
-  // page we navigate to, otherwise the next /api/page request is "Not authenticated".
-  const authQuery = (() => {
-    try {
-      const q = new URLSearchParams(location.search);
-      const token = q.get('access_token') || q.get('authToken');
-      return token ? '&access_token=' + encodeURIComponent(token) : '';
-    } catch { return ''; }
-  })();
-  const withAuth = (href) => {
-    if (!authQuery) return href;
-    try {
-      const url = new URL(href, location.href);
-      if (url.pathname !== '/api/page' || url.searchParams.has('access_token')) return href;
-      const hash = url.hash;
-      url.hash = '';
-      return url.pathname + url.search + authQuery + hash;
-    } catch { return href; }
-  };
-  const previewUrl = (value) => {
-    if (!value || /^#/.test(String(value))) return value;
-    try {
-      const url = new URL(value, location.href);
-      if (url.pathname === '/api/page') return withAuth(value);
-      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/_assets/')) return value;
-      if (url.origin === location.origin || (targetOrigin && url.origin === targetOrigin)) {
-        const route = (url.pathname || '/') + url.search;
-        return apiBase + encodeURIComponent(route === '' ? '/' : route) + authQuery + url.hash;
-      }
-    } catch {}
-    return value;
-  };
-  const notifyParent = (route) => {
-    try { window.parent.postMessage({ type: 'clonyfy-preview-nav', route }, '*'); } catch {}
-  };
-  const go = (next, routeHint) => {
-    if (!next) return;
-    try {
-      const parsed = new URL(next, location.href);
-      const route = routeHint || decodeURIComponent(parsed.searchParams.get('route') || parsed.pathname || '/');
-      notifyParent(route);
-    } catch {}
-    location.href = next;
-  };
-  const linkFromEvent = (event) => {
-    let el = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-    if (!el) {
-      el = event.target && event.target.closest
-        ? event.target.closest('nav [href], header [href], [role="navigation"] [href], [role="link"][href], [data-href], [data-url], [data-link]')
-        : null;
-    }
-    if (!el) return null;
-    const href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-link');
-    return href ? { el, href } : null;
-  };
-  document.addEventListener('click', (event) => {
-    const link = linkFromEvent(event);
-    if (!link) return;
-    const a = link.el;
-    if (a.target || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const next = previewUrl(link.href);
-    if (next && next !== link.href) {
-      event.preventDefault();
-      event.stopPropagation();
-      go(next);
-    }
-  }, true);
-  document.addEventListener('submit', (event) => {
-    const form = event.target;
-    if (!form || !form.getAttribute) return;
-    const next = previewUrl(form.getAttribute('action') || location.href);
-    if (next && next !== form.getAttribute('action')) form.setAttribute('action', next);
-  }, true);
-  for (const name of ['pushState', 'replaceState']) {
-    const native = history[name];
-    history[name] = function(state, title, url) {
-      if (url != null) {
-        const next = previewUrl(url);
-        if (next && next !== url) {
-          notifyParent(decodeURIComponent(new URL(next, location.href).searchParams.get('route') || '/'));
-        }
-        url = next;
-      }
-      return native.call(this, state, title, url);
-    };
-  }
-  try {
-    const nativeOpen = window.open;
-    window.open = function(url, target, features) {
-      return nativeOpen.call(window, previewUrl(url), target, features);
-    };
-  } catch {}
-  try {
-    const nativeAssign = Location.prototype.assign;
-    const nativeReplace = Location.prototype.replace;
-    Location.prototype.assign = function(url) { return nativeAssign.call(this, previewUrl(url)); };
-    Location.prototype.replace = function(url) { return nativeReplace.call(this, previewUrl(url)); };
-  } catch {}
-})();
-</script>`;
+function previewNavigationPatch(outDir, targetOrigin = '', routes = []) {
+  return buildPreviewNavigationScript({ mode: 'preview', outDir, targetOrigin, routes });
 }
 
 async function previewOutDirFromReferer(req) {
@@ -2341,6 +2238,9 @@ function sanitizeStoredCloneHtml(html) {
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-replay\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-share-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-interactions-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<div\b[^>]*\bid\s*=\s*["']__clonyfy_toast_host__["'][^>]*>\s*<\/div>/gi, '');
+  out = out.replace(/\sdata-clonyfy-editor-[a-z-]+(?:\s*=\s*(["'])[^"']*\1)?/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
@@ -2392,6 +2292,13 @@ function neutralizeCloneScripts(html) {
   return out;
 }
 
+/** Insert before the LAST </body> (inline scripts can contain the literal string). */
+function injectBeforeBodyEnd(html, snippet) {
+  const out = String(html);
+  const idx = out.toLowerCase().lastIndexOf('</body>');
+  return idx === -1 ? out + snippet : out.slice(0, idx) + snippet + out.slice(idx);
+}
+
 function stripPreviewNavigationPatch(html) {
   return String(html).replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
 }
@@ -2406,6 +2313,8 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     injectPreviewNav = true,
     // Save As level: never re-hide text with fake scroll-reveal unless explicitly opted in.
     injectScrollReveal = process.env.CLONYFY_SCROLL_REVEAL === '1' || process.env.CLONYFY_SCROLL_REVEAL === 'true',
+    injectInteractions = true,
+    routes = null,
     assetContext = null,
   } = options;
   let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(html, outDir));
@@ -2473,9 +2382,14 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     else out = patch + out;
   }
   if (injectPreviewNav && !out.includes('data-clonyfy-preview-nav')) {
-    const navPatch = previewNavigationPatch(outDir, targetOrigin);
-    if (out.includes('</body>')) out = out.replace('</body>', `${navPatch}</body>`);
-    else out += navPatch;
+    const routeList = Array.isArray(routes)
+      ? routes
+      : Object.keys((await loadRouteMapAsync(outDir).catch(() => null)) || {});
+    const navPatch = previewNavigationPatch(outDir, targetOrigin, routeList);
+    out = injectBeforeBodyEnd(out, navPatch);
+  }
+  if (injectInteractions && !out.includes('data-clonyfy-interactions-runtime')) {
+    out = injectBeforeBodyEnd(out, buildInteractionRuntimeScript());
   }
   if (injectScrollReveal && !out.includes('data-clonyfy-scroll-reveal')) {
     const scrollPatch = previewScrollAnimationsPatch();
@@ -2569,6 +2483,7 @@ async function prepareHtmlForFigmaExport(html, outDir) {
   let out = await rewritePreviewAssetUrls(String(html), outDir, {
     injectPreviewNav: false,
     injectScrollReveal: false,
+    injectInteractions: false,
   });
   out = String(out)
     .replace(/<script[^>]*data-clonyfy-scroll-reveal[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -2625,84 +2540,25 @@ function shareAccessSetCookie(share) {
 }
 
 /** Same rewrite pipeline as /api/page preview, with share-aware in-frame navigation. */
-async function prepareHtmlForSharePreview(html, outDir, shareId) {
+async function prepareHtmlForSharePreview(html, outDir, shareId, { routes = [], defaultRoute = '/' } = {}) {
   const context = await buildPreviewAssetContext(outDir);
   let out = await rewritePreviewAssetUrls(String(html), outDir, {
     baseHref: '/',
     injectPreviewNav: false,
+    assetContext: context,
   });
   out = stripPreviewNavigationPatch(out);
   if (!out.includes('data-clonyfy-share-nav')) {
-    const patch = shareIframeNavigationPatch(shareId, context.targetOrigin);
-    if (out.includes('</body>')) out = out.replace('</body>', `${patch}</body>`);
-    else out += patch;
+    const patch = buildPreviewNavigationScript({
+      mode: 'share',
+      shareId,
+      targetOrigin: context.targetOrigin,
+      routes,
+      defaultRoute,
+    });
+    out = injectBeforeBodyEnd(out, patch);
   }
   return out;
-}
-
-function shareIframeNavigationPatch(shareId, targetOrigin = '') {
-  const sharePageBase = `/api/share-page?shareId=${encodeURIComponent(shareId)}&route=`;
-  const sharePathBase = `/share/${shareId}`;
-  return `<script data-clonyfy-share-nav>
-(() => {
-  const sharePageBase = ${JSON.stringify(sharePageBase)};
-  const sharePathBase = ${JSON.stringify(sharePathBase)};
-  const targetOrigin = ${JSON.stringify(String(targetOrigin || '').replace(/\/$/, ''))};
-  const sharePageUrl = (value) => {
-    if (!value || /^#/.test(String(value))) return value;
-    try {
-      const url = new URL(value, location.href);
-      if (url.pathname === '/api/share-page' || url.pathname.startsWith('/api/asset') || url.pathname.startsWith('/_assets/')) return value;
-      if (url.origin === location.origin || (targetOrigin && url.origin === targetOrigin)) {
-        const route = (url.pathname || '/') + url.search + url.hash;
-        const pageUrl = sharePageBase + encodeURIComponent(route === '' ? '/' : route);
-        try {
-          if (window.parent && window.parent !== window) {
-            const sharePath = sharePathBase + (url.pathname === '/' ? '/' : url.pathname) + url.search + url.hash;
-            window.parent.history.replaceState(null, '', sharePath);
-          }
-        } catch {}
-        return pageUrl;
-      }
-    } catch {}
-    return value;
-  };
-  document.addEventListener('click', (event) => {
-    const a = event.target && event.target.closest ? event.target.closest('a[href]') : null;
-    if (!a || a.target || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const next = sharePageUrl(a.getAttribute('href'));
-    if (next && next !== a.getAttribute('href')) {
-      event.preventDefault();
-      location.href = next;
-    }
-  }, true);
-  document.addEventListener('submit', (event) => {
-    const form = event.target;
-    if (!form || !form.getAttribute) return;
-    const next = sharePageUrl(form.getAttribute('action') || location.href);
-    if (next && next !== form.getAttribute('action')) form.setAttribute('action', next);
-  }, true);
-  for (const name of ['pushState', 'replaceState']) {
-    const native = history[name];
-    history[name] = function(state, title, url) {
-      if (url != null) url = sharePageUrl(url);
-      return native.call(this, state, title, url);
-    };
-  }
-  try {
-    const nativeOpen = window.open;
-    window.open = function(url, target, features) {
-      return nativeOpen.call(window, sharePageUrl(url), target, features);
-    };
-  } catch {}
-  try {
-    const nativeAssign = Location.prototype.assign;
-    const nativeReplace = Location.prototype.replace;
-    Location.prototype.assign = function(url) { return nativeAssign.call(this, sharePageUrl(url)); };
-    Location.prototype.replace = function(url) { return nativeReplace.call(this, sharePageUrl(url)); };
-  } catch {}
-})();
-</script>`;
 }
 
 function shareWrapperHtml(shareId, route = '/') {
@@ -2729,7 +2585,10 @@ async function loadSharedPreviewHtml(share, shareId, requestedRoute) {
   try { data = await readCloneFile(share.out_dir, join('captured-pages', resolved.filename)); }
   catch { return { error: 'Invalid page path', status: 400 }; }
   if (!data) return { error: 'Page file missing', status: 404 };
-  const html = await prepareHtmlForSharePreview(data.toString('utf8'), share.out_dir, shareId);
+  const html = await prepareHtmlForSharePreview(data.toString('utf8'), share.out_dir, shareId, {
+    routes: Object.keys(map),
+    defaultRoute: resolved.route,
+  });
   return { html, route: resolved.route };
 }
 
@@ -2787,6 +2646,7 @@ h1{font-size:22px;margin:0 0 12px}p{color:#9fb0d0;margin:0 0 16px}code{backgroun
 <body><h1>This page was not cloned</h1>
 <p>The navbar link <code>${route}</code> points to a page that was not captured during cloning.</p>
 <p>Try increasing <strong>Max pages</strong> and <strong>Depth</strong>, then re-clone. Or pick a captured route from the preview dropdown.</p>
+<p><button type="button" onclick="history.length > 1 ? history.back() : (location.href = location.href.replace(/([?&]route=)[^&]*/, '$1%2F'))" style="font:inherit;color:#0b1220;background:#e8eefc;border:0;border-radius:999px;padding:8px 16px;cursor:pointer">← Back to the clone</button></p>
 ${samples ? `<p>Captured routes include:</p><ul>${samples}</ul>${more}` : ''}
 </body></html>`;
 }
@@ -4382,21 +4242,15 @@ async function handleRequest(req, res) {
       html = await rewritePreviewAssetUrls(html, outDir, {
         injectPreviewNav: false,
         injectScrollReveal: false,
+        injectInteractions: false,
         baseHref: `${apiBase}/`,
       });
       // srcdoc resolves relative URLs against the Frontend origin — force API host.
       html = html.replace(/(["'(])\/api\/asset\?/g, `$1${apiBase}/api/asset?`);
-      if (html.match(/<head[^>]*>/i)) {
-        html = html.replace(/<head[^>]*>/i, (m) => `${m}<style id="clonyfy-editor-style">[contenteditable="true"]{outline:1px dashed rgba(91,141,239,.55);outline-offset:2px}img.clonyfy-edit-target{cursor:pointer;outline:2px solid transparent}img.clonyfy-edit-target:hover{outline-color:rgba(91,141,239,.7)}img.clonyfy-edit-selected{outline-color:#5b8def!important}</style>`);
-      }
-      if (html.match(/<body\b/i)) {
-        html = html.replace(/<body\b([^>]*)>/i, (m, attrs = '') => {
-          if (/\bcontenteditable\s*=/i.test(attrs)) return m;
-          return `<body${attrs} contenteditable="true">`;
-        });
-      }
+      // Editor chrome (selection, inline text editing) is injected by the Frontend editor.
+      html = html.replace(/(<body\b[^>]*?)\scontenteditable\s*=\s*(["']?)true\2/i, '$1');
     } else {
-      html = await rewritePreviewAssetUrls(html, outDir);
+      html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map) });
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(html);

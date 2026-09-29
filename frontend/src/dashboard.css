@@ -523,6 +523,76 @@
   width: 44px;
   height: 44px;
 }
+.capture-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 48px;
+}
+.capture-view-switch {
+  display: none;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+}
+.capture-view-switch__button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  transition: background 0.2s, color 0.2s;
+}
+.capture-view-switch__button:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+.capture-view-switch__button[aria-pressed="true"] {
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+.capture-preview-frame {
+  height: 320px;
+}
+@media (min-width: 768px) {
+  .capture-view-switch {
+    display: inline-flex;
+  }
+  .capture-details-dialog {
+    transition: width 0.25s ease, height 0.25s ease, max-width 0.25s ease, border-radius 0.25s ease;
+  }
+  .capture-details-dialog[data-view="desktop"] {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    align-content: start;
+    padding: 24px 32px;
+  }
+  .capture-details-dialog[data-view="laptop"] {
+    width: max(50vw, 720px);
+    max-width: calc(100vw - 32px);
+    height: calc(100dvh - 32px);
+    align-content: start;
+  }
+  .capture-details-dialog[data-view="desktop"] .capture-detail-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .capture-details-dialog[data-view="laptop"] .capture-detail-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .capture-details-dialog[data-view="desktop"] .capture-preview-frame {
+    height: max(360px, calc(100dvh - 420px));
+  }
+  .capture-details-dialog[data-view="laptop"] .capture-preview-frame {
+    height: max(320px, calc(100dvh - 520px));
+  }
+}
 .capture-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
