@@ -515,6 +515,20 @@ export function VisualEditor({
     } else if (mod && key === "d") {
       e.preventDefault();
       duplicateSelected();
+    } else if (
+      fromFrame &&
+      !mod &&
+      !e.altKey &&
+      e.key.length === 1 &&
+      selectedRef.current &&
+      (canEditText(selectedRef.current) || textTargetFor(selectedRef.current))
+    ) {
+      // Click once to select, then type — same as Figma / Docs, no double-click required.
+      e.preventDefault();
+      const ch = e.key;
+      startEditing(selectedRef.current);
+      const doc = docRef.current;
+      if (doc) insertPlainText(doc, ch);
     }
   };
   const handleKeyRef = useRef(handleKey);
@@ -568,8 +582,18 @@ export function VisualEditor({
         const editing = editingRef.current;
         if (editing && editing.el.contains(e.target as Node)) return;
         e.stopPropagation();
+        const target = selectableTarget(e.target);
+        // Second click on the exact same selection enters text edit mode.
+        if (
+          target &&
+          target === selectedRef.current &&
+          (canEditText(target) || textTargetFor(target))
+        ) {
+          startEditing(target, { x: e.clientX, y: e.clientY });
+          return;
+        }
         commitEditing();
-        select(selectableTarget(e.target));
+        select(target);
       },
       true,
     );
