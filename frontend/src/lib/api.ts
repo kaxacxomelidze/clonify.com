@@ -321,6 +321,10 @@ export function googleAuthUrl() {
   return `${getApiBaseUrl()}/api/auth/google`;
 }
 
+export function githubAuthUrl() {
+  return `${getApiBaseUrl()}/api/auth/github`;
+}
+
 export type CloneJobResponse = {
   id: string;
   url: string;
@@ -637,6 +641,8 @@ export async function fetchPublicConfig() {
   return apiFetch<{
     figma_community_plugin_url?: string;
     affiliate_enabled?: boolean;
+    google_oauth_enabled?: boolean;
+    github_oauth_enabled?: boolean;
   }>("/api/public-config", { auth: false });
 }
 

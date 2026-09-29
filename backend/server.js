@@ -14,7 +14,7 @@ import { runClone, regenerateCloneProject } from './packages/cloner/dist/runClon
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
-  getUserByGoogleId, getUserByStripeCustomerId, insertOAuthUser,
+  getUserByGoogleId, getUserByGithubId, getUserByStripeCustomerId, insertOAuthUser,
   getSession, insertSession, deleteSession, deleteUserSessions, cleanExpiredSessions,
   insertClone, updateCloneLabel, updateCloneStatus, getClonesByUser, getAllClones, deleteCloneById, deleteUserClones, getCloneCountThisMonth,
   getAllPayments, getPaymentsByUser, getPaymentById, insertPayment, updatePayment, getPendingPaymentByUserPlan, getAdminStats,
@@ -809,6 +809,13 @@ function getGoogleOAuthSettings(raw = getCachedSettings()) {
     ...raw,
     google_client_id: cleanSettingValue(raw.google_client_id) || envFirst('GOOGLE_CLIENT_ID'),
     google_client_secret: cleanSettingValue(raw.google_client_secret) || envFirst('GOOGLE_CLIENT_SECRET'),
+  };
+}
+function getGithubOAuthSettings(raw = getCachedSettings()) {
+  return {
+    ...raw,
+    github_client_id: cleanSettingValue(raw.github_client_id) || envFirst('GITHUB_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_ID'),
+    github_client_secret: cleanSettingValue(raw.github_client_secret) || envFirst('GITHUB_CLIENT_SECRET', 'GITHUB_OAUTH_CLIENT_SECRET'),
   };
 }
 function getStripeSettings(raw = getCachedSettings()) {
@@ -6066,11 +6073,14 @@ async function handleRequest(req, res) {
       stripe_error: stripeReason,
       stripe_publishable_key: s.stripe_publishable_key || '',
       google_oauth_enabled: !!getGoogleOAuthSettings(s).google_client_id,
+      github_oauth_enabled: !!getGithubOAuthSettings(s).github_client_id,
     });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/public-config') {
     const s = getCachedSettings();
+    const google = getGoogleOAuthSettings(s);
+    const github = getGithubOAuthSettings(s);
     const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
     return json(res, {
       affiliate_enabled: enabled,
@@ -6081,6 +6091,8 @@ async function handleRequest(req, res) {
         process.env.FIGMA_COMMUNITY_PLUGIN_URL
         || 'https://www.figma.com/community/plugin/1677522506571131225/Clonyfy-Import',
       ).trim(),
+      google_oauth_enabled: !!google.google_client_id,
+      github_oauth_enabled: !!github.github_client_id,
     });
   }
 
@@ -6365,6 +6377,7 @@ async function handleRequest(req, res) {
       // secret fields — only overwrite when a real value is sent (not masked placeholder)
       'stripe_secret_key', 'stripe_webhook_secret',
       'google_client_id', 'google_client_secret',
+      'github_client_id', 'github_client_secret',
     ];
     for (const k of plainKeys) {
       if (body[k] !== undefined && !isMaskedSecret(body[k])) {
@@ -6676,7 +6689,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/auth/google') {
     const s = getGoogleOAuthSettings();
     if (!s.google_client_id) {
-      res.writeHead(302, { Location: `${frontendPublicUrl(req)}/login?oauth_error=not_configured` });
+      res.writeHead(302, { Location: `${frontendPublicUrl(req)}/login?oauth_error=not_configured&provider=google` });
       res.end();
       return;
     }
@@ -6705,8 +6718,8 @@ async function handleRequest(req, res) {
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     const errParam = url.searchParams.get('error');
-    if (errParam || !code || !state) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=cancelled` }); res.end(); return; }
-    if (!_oauthStates.has(state)) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state` }); res.end(); return; }
+    if (errParam || !code || !state) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=cancelled&provider=google` }); res.end(); return; }
+    if (!_oauthStates.has(state)) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=google` }); res.end(); return; }
     _oauthStates.delete(state);
     try {
       const redirectUri = `${apiUrl}/api/auth/google/callback`;
@@ -6729,7 +6742,7 @@ async function handleRequest(req, res) {
       const googleEmail = (gUser.email || '').toLowerCase().trim();
       const googleName = gUser.name || googleEmail.split('@')[0];
       if (!googleEmail || gUser.email_verified !== true) {
-        res.writeHead(302, { Location: `${frontend}/login?oauth_error=email_unverified` });
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=email_unverified&provider=google` });
         res.end();
         return;
       }
@@ -6750,7 +6763,7 @@ async function handleRequest(req, res) {
 
       if (dbUser.blocked) {
         const reason = encodeURIComponent(await userBlockedReason(dbUser));
-        res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&ban_reason=${reason}` });
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=google&ban_reason=${reason}` });
         res.end();
         return;
       }
@@ -6763,7 +6776,166 @@ async function handleRequest(req, res) {
       res.end();
     } catch (err) {
       console.error('[Google OAuth]', err.message);
-      res.writeHead(302, { Location: `${frontend}/login?oauth_error=server_error` });
+      res.writeHead(302, { Location: `${frontend}/login?oauth_error=server_error&provider=google` });
+      res.end();
+    }
+    return;
+  }
+
+  // ── GitHub OAuth ──────────────────────────────────────────────────────────────
+
+  if (req.method === 'GET' && url.pathname === '/api/auth/github') {
+    const s = getGithubOAuthSettings();
+    if (!s.github_client_id) {
+      res.writeHead(302, { Location: `${frontendPublicUrl(req)}/login?oauth_error=not_configured&provider=github` });
+      res.end();
+      return;
+    }
+    const state = randomUUID().replace(/-/g, '');
+    _oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+    const apiUrl = apiPublicUrl(req);
+    const redirectUri = `${apiUrl}/api/auth/github/callback`;
+    const params = new URLSearchParams({
+      client_id: s.github_client_id,
+      redirect_uri: redirectUri,
+      scope: 'read:user user:email',
+      state,
+      allow_signup: 'true',
+    });
+    res.writeHead(302, { Location: `https://github.com/login/oauth/authorize?${params}` });
+    res.end();
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/auth/github/callback') {
+    const s = getGithubOAuthSettings();
+    const apiUrl = apiPublicUrl(req);
+    const frontend = frontendPublicUrl(req);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const errParam = url.searchParams.get('error');
+    if (errParam || !code || !state) {
+      res.writeHead(302, { Location: `${frontend}/login?oauth_error=cancelled&provider=github` });
+      res.end();
+      return;
+    }
+    if (!_oauthStates.has(state)) {
+      res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=github` });
+      res.end();
+      return;
+    }
+    _oauthStates.delete(state);
+    try {
+      const redirectUri = `${apiUrl}/api/auth/github/callback`;
+      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'User-Agent': 'Clonyfy',
+        },
+        body: JSON.stringify({
+          client_id: s.github_client_id,
+          client_secret: s.github_client_secret || '',
+          code,
+          redirect_uri: redirectUri,
+        }),
+      });
+      if (!tokenRes.ok) throw new Error('token exchange failed');
+      const tokenBody = await tokenRes.json();
+      if (tokenBody.error || !tokenBody.access_token) {
+        throw new Error(tokenBody.error_description || tokenBody.error || 'no access_token');
+      }
+      const accessToken = tokenBody.access_token;
+
+      const userRes = await fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Clonyfy',
+        },
+      });
+      if (!userRes.ok) throw new Error('userinfo failed');
+      const ghUser = await userRes.json();
+      const githubId = String(ghUser.id || '');
+      if (!githubId) throw new Error('missing github id');
+
+      let githubEmail = String(ghUser.email || '').toLowerCase().trim();
+      let emailVerified = !!githubEmail;
+      if (!githubEmail) {
+        const emailsRes = await fetch('https://api.github.com/user/emails', {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'Clonyfy',
+          },
+        });
+        if (emailsRes.ok) {
+          const emails = await emailsRes.json();
+          const list = Array.isArray(emails) ? emails : [];
+          const primary = list.find((e) => e?.primary && e?.verified && e?.email)
+            || list.find((e) => e?.verified && e?.email)
+            || list.find((e) => e?.email);
+          if (primary?.email) {
+            githubEmail = String(primary.email).toLowerCase().trim();
+            emailVerified = !!primary.verified;
+          }
+        }
+      }
+      if (!githubEmail) {
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=email_missing&provider=github` });
+        res.end();
+        return;
+      }
+      if (!emailVerified) {
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=email_unverified&provider=github` });
+        res.end();
+        return;
+      }
+
+      const githubName = ghUser.name || ghUser.login || githubEmail.split('@')[0];
+
+      let dbUser = await getUserByGithubId(githubId);
+      if (!dbUser && githubEmail) dbUser = await getUserByEmail(githubEmail);
+      if (dbUser) {
+        const patch = { email_verified: 1 };
+        if (!dbUser.github_id) patch.github_id = githubId;
+        await updateUser(dbUser.id, patch);
+      } else {
+        const newId = randomUUID();
+        await insertOAuthUser({
+          id: newId,
+          name: githubName,
+          email: githubEmail,
+          githubId,
+          createdAt: new Date().toISOString(),
+        });
+        dbUser = await getUserById(newId);
+        audit(newId, githubName, 'register_github', null, ip);
+      }
+
+      if (dbUser.blocked) {
+        const reason = encodeURIComponent(await userBlockedReason(dbUser));
+        res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=github&ban_reason=${reason}` });
+        res.end();
+        return;
+      }
+
+      const sessionToken = randomUUID();
+      await insertSession({
+        token: sessionToken,
+        userId: dbUser.id,
+        createdAt: new Date().toISOString(),
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        impersonatedBy: null,
+      });
+      audit(dbUser.id, dbUser.name, 'login_github', null, ip);
+
+      res.writeHead(302, { Location: `${frontend}/dashboard?oauth_token=${sessionToken}` });
+      res.end();
+    } catch (err) {
+      console.error('[GitHub OAuth]', err.message);
+      res.writeHead(302, { Location: `${frontend}/login?oauth_error=server_error&provider=github` });
       res.end();
     }
     return;

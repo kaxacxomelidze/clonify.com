@@ -66,7 +66,7 @@ export const updateUser = async (id, fields) => {
     'name','email','hash','salt','plan','plan_renews_at','billing_interval',
     'email_verified','verify_token','verify_expiry','reset_token','reset_expiry',
     'blocked','blocked_reason','cancel_at_period_end','renewal_reminder_sent','usage_alert_sent',
-    'google_id','stripe_customer_id','stripe_subscription_id',
+    'google_id','github_id','stripe_customer_id','stripe_subscription_id',
   ];
   const update = {};
   for (const [k, v] of Object.entries(fields)) {
@@ -97,15 +97,28 @@ export const getUserByResetToken = (token, now) =>
 export const getUserByGoogleId = (googleId) =>
   one(supabase.from('users').select('*').eq('google_id', googleId));
 
+export const getUserByGithubId = (githubId) =>
+  one(supabase.from('users').select('*').eq('github_id', String(githubId)));
+
 export const getUserByStripeCustomerId = (customerId) =>
   one(supabase.from('users').select('*').eq('stripe_customer_id', customerId));
 
 export const insertOAuthUser = async (u) => {
-  const { error } = await supabase.from('users').insert({
-    id: u.id, name: u.name, email: u.email, hash: '', salt: null,
-    plan: 'free', email_verified: 1, google_id: u.googleId,
-    verify_token: null, verify_expiry: null, created_at: u.createdAt,
-  });
+  const row = {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    hash: '',
+    salt: null,
+    plan: 'free',
+    email_verified: 1,
+    verify_token: null,
+    verify_expiry: null,
+    created_at: u.createdAt,
+  };
+  if (u.googleId) row.google_id = u.googleId;
+  if (u.githubId) row.github_id = String(u.githubId);
+  const { error } = await supabase.from('users').insert(row);
   if (error) throw new Error(error.message);
 };
 
