@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { resolve, join } from 'path';
 import { checkRobots } from './robots.js';
 import { crawl, isFastCloneProfile, isServerlessRuntime } from './crawler.js';
+import { shouldReplaceCapturedHtml } from './captureQuality.js';
 import { rewriteHtml } from './rewriter.js';
 import { analyzeTraffic } from './analyzer.js';
 import { generateNextApp, safeName } from './generator.js';
@@ -110,6 +111,14 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
       try {
         const filename = pageFilename(page.route);
         const pagePath = join(capturedPagesDir, filename);
+        if (existsSync(pagePath)) {
+          const existing = readFileSync(pagePath, 'utf8');
+          if (!shouldReplaceCapturedHtml(existing, page.html)) {
+            logger.info(`  [KEEP] ${page.route} — keeping richer capture (skipped thinner overwrite)`);
+            routeMap[page.route] = filename;
+            return;
+          }
+        }
         writeFileSync(pagePath, page.html, 'utf8');
         routeMap[page.route] = filename;
         const routeMapPath = join(opts.out, 'route-map.json');

@@ -1753,8 +1753,14 @@ async function recordNavInteractions(page, pageUrl) {
         });
         await page.waitForTimeout(SETTLE_MS);
         if (page.url() !== startUrl) {
-          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; skipping interactions`);
+          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
           raw = [];
+          try {
+            await page.goto(startUrl, { waitUntil: "load", timeout: 15e3 });
+            await page.waitForLoadState("networkidle", { timeout: 5e3 }).catch(() => {
+            });
+          } catch {
+          }
           break;
         }
         const finalized = await page.evaluate(({ ops: ops2, i: i2 }) => {
@@ -1778,7 +1784,65 @@ async function recordNavInteractions(page, pageUrl) {
     logger.debug(`  [NAV INTERACTIONS WARN] ${err.message}`);
     await teardownRecorder(page, keep);
     return "";
+  } finally {
+    try {
+      if (page.url() !== startUrl) {
+        await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 12e3 }).catch(() => {
+        });
+      }
+    } catch {
+    }
   }
+}
+
+// src/captureQuality.ts
+function normalizePathname(pathname) {
+  let p = String(pathname || "/").trim() || "/";
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+  }
+  p = p.replace(/\/index\.html?$/i, "/");
+  if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
+  if (p === "/index") p = "/";
+  return p.toLowerCase() || "/";
+}
+function pathnamesMatch(a, b) {
+  return normalizePathname(a) === normalizePathname(b);
+}
+function pathnameOfUrl(url) {
+  try {
+    if (/^https?:\/\//i.test(url)) return new URL(url).pathname || "/";
+    if (url.startsWith("/")) return url.split(/[?#]/)[0] || "/";
+    return new URL(url, "https://example.invalid").pathname || "/";
+  } catch {
+    return "/";
+  }
+}
+function isThinSpaShell(html) {
+  const raw = String(html || "");
+  if (!raw) return true;
+  const withoutNoise = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  if (/<div\s+id=["'](?:__next|root|app|__nuxt)["']\s*>\s*<\/div>/i.test(withoutNoise)) {
+    return true;
+  }
+  const text = withoutNoise.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ").replace(/\s+/g, " ").trim();
+  const hasSpaRoot = /id=["'](?:__next|root|app|__nuxt)["']/i.test(raw);
+  if (text.length < 120 && hasSpaRoot) return true;
+  if (text.length < 40 && raw.length < 12e3) return true;
+  if (/Application Error/i.test(text) && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(text) && text.length < 800) {
+    return true;
+  }
+  return false;
+}
+function shouldReplaceCapturedHtml(existing, candidate) {
+  if (!existing) return true;
+  if (!candidate) return false;
+  const existingShell = isThinSpaShell(existing);
+  const candidateShell = isThinSpaShell(candidate);
+  if (existingShell && !candidateShell) return true;
+  if (!existingShell && candidateShell) return false;
+  return candidate.length >= existing.length * 0.85;
 }
 
 // src/capture.ts
@@ -1960,6 +2024,26 @@ window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 var IS_FAST = IS_FAST_CLONE;
 var NAVIGATION_TIMEOUT = IS_FAST ? 18e3 : 3e4;
 var ROUTE_FETCH_TIMEOUT = IS_FAST ? 8e3 : 15e3;
+async function restoreRequestedUrl(page, pageUrl, reason) {
+  const wanted = pathnameOfUrl(pageUrl);
+  let current = "";
+  try {
+    current = pathnameOfUrl(page.url());
+  } catch {
+    current = "";
+  }
+  if (pathnamesMatch(wanted, current)) return true;
+  logger.warn(`  [ROUTE DRIFT] ${reason}: expected ${wanted}, got ${current || "(unknown)"} \u2014 restoring ${pageUrl}`);
+  try {
+    await page.goto(pageUrl, { waitUntil: "load", timeout: NAVIGATION_TIMEOUT });
+    await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 4e3 : 1e4 }).catch(() => {
+    });
+    return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+  } catch (err) {
+    logger.warn(`  [ROUTE DRIFT] restore failed: ${err.message}`);
+    return false;
+  }
+}
 var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 var MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024;
 var MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
@@ -2536,6 +2620,9 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         throw new Error(`HTTP ${status}`);
       }
       logger.debug(`  [NAV] load fired for ${pageUrl}`);
+      if (!await restoreRequestedUrl(page, pageUrl, "after initial navigation")) {
+        throw new Error(`Navigated away from ${pathnameOfUrl(pageUrl)} (landed on ${pathnameOfUrl(page.url())})`);
+      }
       await page.waitForLoadState("networkidle", {
         timeout: deepMedia ? IS_FAST ? 1e4 : 15e3 : IS_FAST ? 5e3 : 15e3
       }).catch(() => {
@@ -2879,6 +2966,11 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           if (results.length >= MAX) break;
           const els = [...document.querySelectorAll(sel)].slice(0, 4);
           els.forEach((el, idx) => {
+            if (el.closest('a[href]:not([href^="#"]):not([href=""])')) return;
+            if (el.tagName === "A") {
+              const href = el.getAttribute("href") || "";
+              if (href && !href.startsWith("#") && !href.toLowerCase().startsWith("javascript:")) return;
+            }
             const key = sel + "__" + idx;
             if (seen.has(key)) return;
             seen.add(key);
@@ -2893,7 +2985,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           try {
             const btn = page.locator(sel).first();
             if (await btn.count() === 0) continue;
-            await btn.click({ timeout: 1500, force: true });
+            await btn.click({ timeout: 1500, force: true, noWaitAfter: true });
             await page.waitForTimeout(IS_FAST ? 200 : 400);
           } catch {
           }
@@ -2904,7 +2996,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         for (const target of clickTargets) {
           try {
             const el = await page.locator(`${target.selector}`).nth(target.idx);
-            await el.click({ timeout: 2e3, force: true });
+            await el.click({ timeout: 2e3, force: true, noWaitAfter: true });
             await page.waitForTimeout(300);
           } catch {
           }
@@ -2913,6 +3005,9 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         });
       }
     } catch {
+    }
+    if (!await restoreRequestedUrl(page, pageUrl, "after interaction pass")) {
+      throw new Error(`Interaction pass navigated away from ${pathnameOfUrl(pageUrl)}`);
     }
     await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 8e3 }).catch(() => {
     });
@@ -3510,7 +3605,10 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       recordNavInteractions(page, pageUrl),
       new Promise((resolve3) => setTimeout(() => resolve3(""), IS_FAST ? 12e3 : 22e3))
     ]).catch(() => "");
-    const html = await page.content();
+    if (!await restoreRequestedUrl(page, pageUrl, "after nav interaction recording")) {
+      throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
+    }
+    let html = await page.content();
     let finalHtml = html;
     try {
       const isAppError = await page.evaluate(() => {
@@ -3528,6 +3626,19 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
       }
     } catch {
+    }
+    if (isThinSpaShell(finalHtml)) {
+      logger.warn(`  [SHELL] ${pageUrl} looks like an unhydrated SPA shell; waiting and re-snapshotting`);
+      await page.waitForTimeout(IS_FAST ? 1e3 : 2500);
+      await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 3e3 : 8e3 }).catch(() => {
+      });
+      await restoreRequestedUrl(page, pageUrl, "before shell re-snapshot");
+      const retryShell = await page.content();
+      if (!isThinSpaShell(retryShell)) {
+        finalHtml = retryShell;
+      } else {
+        throw new Error(`Capture produced a thin SPA shell for ${pathnameOfUrl(pageUrl)}`);
+      }
     }
     finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
     finalHtml = bakeStaticMediaVisibility(finalHtml);
@@ -4443,7 +4554,7 @@ function shouldSkipPageUrl(url, startUrl) {
   }
 }
 var MAX_BROWSER_RELAUNCHES = 5;
-var MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || "150", 10) || 150);
+var MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || "2", 10) || 2);
 function createQueryVariantLimiter(limit = MAX_QUERY_VARIANTS_PER_PATH) {
   const counts = /* @__PURE__ */ new Map();
   return {
@@ -4705,9 +4816,13 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
     try {
       logger.info(`  [FALLBACK] Static HTML fetch for ${item.url}`);
       const { record, links } = await fetchStaticPage(item.url, origin, assetsDir, { captureAssets: false });
-      records.push(record);
-      if (item.depth < opts.depth) {
-        for (const link of links) enqueueStatic(link, item.depth + 1);
+      if (isThinSpaShell(record.html) && item.url !== opts.url) {
+        logger.warn(`  [FALLBACK SKIP] ${item.url}: static HTML is a thin SPA shell`);
+      } else {
+        records.push(record);
+        if (item.depth < opts.depth) {
+          for (const link of links) enqueueStatic(link, item.depth + 1);
+        }
       }
     } catch (fallbackErr) {
       logger.warn(`  [SKIP] ${item.url}: ${fallbackErr.message}`);
@@ -4898,10 +5013,14 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
-            records.push(record);
-            await Promise.resolve(onPage(record));
-            if (currentDepth < opts.depth) {
-              for (const link of links) enqueue(link, currentDepth + 1);
+            if (!isStartUrl && isThinSpaShell(record.html)) {
+              logger.warn(`  [FALLBACK SKIP] ${clean}: static HTML is a thin SPA shell`);
+            } else {
+              records.push(record);
+              await Promise.resolve(onPage(record));
+              if (currentDepth < opts.depth) {
+                for (const link of links) enqueue(link, currentDepth + 1);
+              }
             }
           } catch (fallbackErr) {
             logger.warn(`  [FALLBACK FAIL] ${clean}: ${fallbackErr.message}`);
@@ -13746,6 +13865,14 @@ CLONYFY v0.1`);
       try {
         const filename = pageFilename(page.route);
         const pagePath = join6(capturedPagesDir, filename);
+        if (existsSync5(pagePath)) {
+          const existing = readFileSync2(pagePath, "utf8");
+          if (!shouldReplaceCapturedHtml(existing, page.html)) {
+            logger.info(`  [KEEP] ${page.route} \u2014 keeping richer capture (skipped thinner overwrite)`);
+            routeMap[page.route] = filename;
+            return;
+          }
+        }
         writeFileSync5(pagePath, page.html, "utf8");
         routeMap[page.route] = filename;
         const routeMapPath = join6(opts.out, "route-map.json");
@@ -13938,4 +14065,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-X4WVNOIM.js.map
+//# sourceMappingURL=chunk-WQOUGB3C.js.map
