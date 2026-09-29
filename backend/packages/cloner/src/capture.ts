@@ -22,6 +22,11 @@ import {
   normalizeAllMotionStacksInDocument,
 } from './carouselFix.js';
 import { injectInteractionsScript, recordNavInteractions } from './interactionRecorder.js';
+import {
+  isThinSpaShell,
+  pathnameOfUrl,
+  pathnamesMatch,
+} from './captureQuality.js';
 
 /** Hover / expand nav menus so product links (e.g. /payments) appear in the DOM. */
 async function revealNavDropdownLinks(page: Page): Promise<void> {
@@ -177,6 +182,24 @@ window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 const IS_FAST = IS_FAST_CLONE;
 const NAVIGATION_TIMEOUT = IS_FAST ? 18_000 : 30_000;
 const ROUTE_FETCH_TIMEOUT = IS_FAST ? 8_000 : 15_000;
+
+/** Re-navigate if interaction recording / clicks drifted away from the requested page. */
+async function restoreRequestedUrl(page: Page, pageUrl: string, reason: string): Promise<boolean> {
+  const wanted = pathnameOfUrl(pageUrl);
+  let current = '';
+  try { current = pathnameOfUrl(page.url()); } catch { current = ''; }
+  if (pathnamesMatch(wanted, current)) return true;
+  logger.warn(`  [ROUTE DRIFT] ${reason}: expected ${wanted}, got ${current || '(unknown)'} — restoring ${pageUrl}`);
+  try {
+    await page.goto(pageUrl, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT });
+    await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 10_000 }).catch(() => {});
+    return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+  } catch (err) {
+    logger.warn(`  [ROUTE DRIFT] restore failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024; // Align with hosted persist cap so heroes survive.
 const MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
@@ -921,6 +944,10 @@ export async function capturePage(
       throw new Error(`HTTP ${status}`);
     }
     logger.debug(`  [NAV] load fired for ${pageUrl}`);
+    // Soft client redirects (marketing → home) must not be frozen under the requested route.
+    if (!(await restoreRequestedUrl(page, pageUrl, 'after initial navigation'))) {
+      throw new Error(`Navigated away from ${pathnameOfUrl(pageUrl)} (landed on ${pathnameOfUrl(page.url())})`);
+    }
     // Wait for networkidle - aborted beacon patterns above help this settle quickly
     await page.waitForLoadState('networkidle', {
       timeout: deepMedia ? (IS_FAST ? 10_000 : 15_000) : (IS_FAST ? 5_000 : 15_000),
@@ -1269,6 +1296,7 @@ export async function capturePage(
   }
 
   // -- Interaction pass: click tabs/accordions/carousels to surface content ----
+  // Never follow real links here — that would freeze the wrong page under this route.
   try {
     const interactiveSelectors = [
       '[role="tab"]',
@@ -1295,6 +1323,12 @@ export async function capturePage(
         if (results.length >= MAX) break;
         const els = [...document.querySelectorAll<HTMLElement>(sel)].slice(0, 4);
         els.forEach((el, idx) => {
+          // Skip real navigations — those dump another page into this route's snapshot.
+          if (el.closest('a[href]:not([href^="#"]):not([href=""])')) return;
+          if (el.tagName === 'A') {
+            const href = el.getAttribute('href') || '';
+            if (href && !href.startsWith('#') && !href.toLowerCase().startsWith('javascript:')) return;
+          }
           const key = sel + '__' + idx;
           if (seen.has(key)) return;
           seen.add(key);
@@ -1310,7 +1344,7 @@ export async function capturePage(
         try {
           const btn = page.locator(sel).first();
           if (await btn.count() === 0) continue;
-          await btn.click({ timeout: 1500, force: true });
+          await btn.click({ timeout: 1500, force: true, noWaitAfter: true });
           await page.waitForTimeout(IS_FAST ? 200 : 400);
         } catch { /* best-effort */ }
       }
@@ -1321,13 +1355,17 @@ export async function capturePage(
       for (const target of clickTargets) {
         try {
           const el = await page.locator(`${target.selector}`).nth(target.idx);
-          await el.click({ timeout: 2000, force: true });
+          await el.click({ timeout: 2000, force: true, noWaitAfter: true });
           await page.waitForTimeout(300);
         } catch { /* click may fail on hidden/stale element */ }
       }
       await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 6_000 }).catch(() => {});
     }
   } catch { /* interaction pass is best-effort */ }
+
+  if (!(await restoreRequestedUrl(page, pageUrl, 'after interaction pass'))) {
+    throw new Error(`Interaction pass navigated away from ${pathnameOfUrl(pageUrl)}`);
+  }
 
   // Final networkidle wait after scroll + interaction
   await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 8_000 }).catch(() => {});
@@ -1982,7 +2020,11 @@ export async function capturePage(
     new Promise<string>((resolve) => setTimeout(() => resolve(''), IS_FAST ? 12_000 : 22_000)),
   ]).catch(() => '');
 
-  const html = await page.content();
+  if (!(await restoreRequestedUrl(page, pageUrl, 'after nav interaction recording'))) {
+    throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
+  }
+
+  let html = await page.content();
 
   // Shopify/Remix/Next sometimes paint an Application Error boundary mid-capture when
   // stubbed XHR/JS races hydration. Prefer a second snapshot after a short settle if so.
@@ -2004,6 +2046,20 @@ export async function capturePage(
       else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
     }
   } catch { /* best-effort */ }
+
+  // Reject empty SPA shells — better to fail/retry than store a blank /apps page.
+  if (isThinSpaShell(finalHtml)) {
+    logger.warn(`  [SHELL] ${pageUrl} looks like an unhydrated SPA shell; waiting and re-snapshotting`);
+    await page.waitForTimeout(IS_FAST ? 1_000 : 2_500);
+    await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 3_000 : 8_000 }).catch(() => {});
+    await restoreRequestedUrl(page, pageUrl, 'before shell re-snapshot');
+    const retryShell = await page.content();
+    if (!isThinSpaShell(retryShell)) {
+      finalHtml = retryShell;
+    } else {
+      throw new Error(`Capture produced a thin SPA shell for ${pathnameOfUrl(pageUrl)}`);
+    }
+  }
 
   finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
 

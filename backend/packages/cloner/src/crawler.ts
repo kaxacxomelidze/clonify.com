@@ -20,9 +20,17 @@ import {
   SERVERLESS_ASSET_BUDGET_BYTES,
 } from './serverlessBudget.js';
 import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, PageRecord } from './types.js';
+import { isThinSpaShell } from './captureQuality.js';
 
 export { isLocaleOnlyPath, isLocalePrefixedPath, shouldSkipLocaleVariant } from './localePaths.js';
 export { isFastCloneProfile, isServerlessRuntime } from './serverlessBudget.js';
+export {
+  isThinSpaShell,
+  pathnamesMatch,
+  pathnameOfUrl,
+  shouldReplaceCapturedHtml,
+  normalizePathname,
+} from './captureQuality.js';
 
 type ChromiumLauncher = typeof import('playwright-core').chromium;
 
@@ -334,8 +342,10 @@ function shouldSkipPageUrl(url: string, startUrl?: string): boolean {
 }
 
 const MAX_BROWSER_RELAUNCHES = 5;
-/** Same path with different query strings (filters, currency/sort switchers) is the classic crawler trap. */
-const MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || '150', 10) || 150);
+/** Same path with different query strings (filters, currency/sort switchers) is the classic crawler trap.
+ *  Default 2 — one clean path + at most one query variant. Higher values overwrite the same
+ *  route file and are the #1 cause of "wrong page under /apps". */
+const MAX_QUERY_VARIANTS_PER_PATH = Math.max(1, parseInt(process.env.CLONYFY_MAX_QUERY_VARIANTS_PER_PATH || '2', 10) || 2);
 
 export function createQueryVariantLimiter(limit = MAX_QUERY_VARIANTS_PER_PATH) {
   const counts = new Map<string, number>();
@@ -658,9 +668,13 @@ async function crawlStatic(
     try {
       logger.info(`  [FALLBACK] Static HTML fetch for ${item.url}`);
       const { record, links } = await fetchStaticPage(item.url, origin, assetsDir, { captureAssets: false });
-      records.push(record);
-      if (item.depth < opts.depth) {
-        for (const link of links) enqueueStatic(link, item.depth + 1);
+      if (isThinSpaShell(record.html) && item.url !== opts.url) {
+        logger.warn(`  [FALLBACK SKIP] ${item.url}: static HTML is a thin SPA shell`);
+      } else {
+        records.push(record);
+        if (item.depth < opts.depth) {
+          for (const link of links) enqueueStatic(link, item.depth + 1);
+        }
       }
     } catch (fallbackErr) {
       logger.warn(`  [SKIP] ${item.url}: ${(fallbackErr as Error).message}`);
@@ -886,10 +900,15 @@ export async function crawl(
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
-            records.push(record);
-            await Promise.resolve(onPage(record));
-            if (currentDepth < opts.depth) {
-              for (const link of links) enqueue(link, currentDepth + 1);
+            // Empty SPA shells stay blank forever once preview kills site JS — prefer skip.
+            if (!isStartUrl && isThinSpaShell(record.html)) {
+              logger.warn(`  [FALLBACK SKIP] ${clean}: static HTML is a thin SPA shell`);
+            } else {
+              records.push(record);
+              await Promise.resolve(onPage(record));
+              if (currentDepth < opts.depth) {
+                for (const link of links) enqueue(link, currentDepth + 1);
+              }
             }
           } catch (fallbackErr) {
             logger.warn(`  [FALLBACK FAIL] ${clean}: ${(fallbackErr as Error).message}`);

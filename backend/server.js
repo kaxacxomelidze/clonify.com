@@ -1924,9 +1924,15 @@ async function loadRouteMapWithRematerialize(outDir) {
 function inferredRouteFromPageFilename(filename) {
   const name = String(filename || '').replace(/\\/g, '/').split('/').pop() || '';
   if (!name.endsWith('.html')) return null;
-  if (name === '__home__.html' || name === 'index.html') return '/';
-  const base = name.slice(0, -5).replace(/^_+|_+$/g, '').replace(/_+/g, '-');
-  return base ? `/${base}` : null;
+  if (name === '__home__.html' || name === 'index.html' || name === '__root__.html') return '/';
+  // Invert generator.safeName: path segments are joined with "__".
+  let base = name.slice(0, -5); // drop .html
+  // Truncated hashed names (name__abcd1234) cannot be reversed — skip them.
+  if (/__[0-9a-f]{8}$/i.test(base) && base.length > 80) return null;
+  base = base.replace(/^_+|_+$/g, '');
+  if (!base || base === 'page') return null;
+  const route = '/' + base.split('__').filter(Boolean).join('/');
+  return route || '/';
 }
 
 async function inferRouteMapFromCapturedPages(outDir) {
@@ -2310,6 +2316,7 @@ function previewVisibilityFix(baseHref = '/') {
 async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   const {
     baseHref = '/',
+    includeBase = true,
     injectPreviewNav = true,
     // Save As level: never re-hide text with fake scroll-reveal unless explicitly opted in.
     injectScrollReveal = process.env.CLONYFY_SCROLL_REVEAL === '1' || process.env.CLONYFY_SCROLL_REVEAL === 'true',
@@ -2326,7 +2333,9 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   // "loading" classes from <html>.
   // <base href="..."> forces relative URLs in cloned HTML to resolve against a
   // stable path (`/` for /api/page preview, `/share/{id}/` for public shares).
-  const visibilityFix = previewVisibilityFix(baseHref);
+  // Subpages with path-relative assets break when base is forced to `/` — callers
+  // can pass includeBase:false (dashboard preview) once assets are absolutized.
+  const visibilityFix = buildVisibilityPatchHtml(baseHref, { includeBase });
   // Inject right after opening <head>, so a captured <base> (if any) doesn't override ours.
   if (out.match(/<head[^>]*>/i)) out = out.replace(/<head[^>]*>/i, m => `${m}${visibilityFix}`);
   else if (out.includes('<html')) out = out.replace(/<html[^>]*>/i, m => `${m}<head>${visibilityFix}</head>`);
@@ -4250,7 +4259,7 @@ async function handleRequest(req, res) {
       // Editor chrome (selection, inline text editing) is injected by the Frontend editor.
       html = html.replace(/(<body\b[^>]*?)\scontenteditable\s*=\s*(["']?)true\2/i, '$1');
     } else {
-      html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map) });
+      html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map), includeBase: false });
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(html);

@@ -7,9 +7,14 @@ export const ATTR_EDITING = "data-clonyfy-editor-editing";
 
 const EDITOR_CSS = `
 [${ATTR_HOVER}]{outline:2px dashed rgba(91,141,239,.85)!important;outline-offset:1px!important;cursor:pointer!important}
-[${ATTR_SELECTED}]{outline:2px solid #5b8def!important;outline-offset:2px!important}
-[${ATTR_EDITING}]{outline:2px solid #22c55e!important;outline-offset:2px!important;cursor:text!important;-webkit-user-modify:read-write}
-[${ATTR_EDITING}] *{cursor:text!important}
+[${ATTR_SELECTED}]{outline:2px solid #5b8def!important;outline-offset:2px!important;cursor:text!important}
+[${ATTR_EDITING}]{outline:2px solid #22c55e!important;outline-offset:2px!important;cursor:text!important;-webkit-user-modify:read-write!important}
+[${ATTR_EDITING}],[${ATTR_EDITING}] *{
+  cursor:text!important;
+  user-select:text!important;
+  -webkit-user-select:text!important;
+  -webkit-user-modify:read-write!important;
+}
 html{scroll-behavior:auto!important}
 `;
 

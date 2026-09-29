@@ -478,8 +478,12 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
         await page.waitForTimeout(SETTLE_MS);
 
         if (page.url() !== startUrl) {
-          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; skipping interactions`);
+          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
           raw = [];
+          try {
+            await page.goto(startUrl, { waitUntil: 'load', timeout: 15_000 });
+            await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+          } catch { /* best-effort restore */ }
           break;
         }
 
@@ -505,5 +509,12 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
     logger.debug(`  [NAV INTERACTIONS WARN] ${(err as Error).message}`);
     await teardownRecorder(page, keep);
     return '';
+  } finally {
+    // Always leave the browser on the page we were asked to capture.
+    try {
+      if (page.url() !== startUrl) {
+        await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 12_000 }).catch(() => {});
+      }
+    } catch { /* ignore */ }
   }
 }
