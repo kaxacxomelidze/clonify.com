@@ -21,6 +21,7 @@ import {
   domAssetUrlScore,
   normalizeAllMotionStacksInDocument,
 } from './carouselFix.js';
+import { injectInteractionsScript, recordNavInteractions } from './interactionRecorder.js';
 
 /** Hover / expand nav menus so product links (e.g. /payments) appear in the DOM. */
 async function revealNavDropdownLinks(page: Page): Promise<void> {
@@ -1975,6 +1976,12 @@ export async function capturePage(
     logger.debug(`  [CAROUSEL NORMALIZE WARN] ${(err as Error).message}`);
   });
 
+  // Record how nav menus open so the clone can replay them without site JS.
+  const interactionsScript = await Promise.race([
+    recordNavInteractions(page, pageUrl),
+    new Promise<string>((resolve) => setTimeout(() => resolve(''), IS_FAST ? 12_000 : 22_000)),
+  ]).catch(() => '');
+
   const html = await page.content();
 
   // Shopify/Remix/Next sometimes paint an Application Error boundary mid-capture when
@@ -1997,6 +2004,8 @@ export async function capturePage(
       else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
     }
   } catch { /* best-effort */ }
+
+  finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
 
   // Bake generic media visibility so clone preview shows media without site JS.
   finalHtml = bakeStaticMediaVisibility(finalHtml);

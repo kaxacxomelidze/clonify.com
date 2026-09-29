@@ -1,0 +1,820 @@
+/**
+ * Browser runtimes injected into hosted clone previews and share pages.
+ *
+ * - Navigation: every link/button/form stays inside the clone. Cloned routes
+ *   open the cloned page; anything else shows "not cloned yet" instead of
+ *   leaving for the live site.
+ * - Interactions: replays nav menus recorded at capture time
+ *   (#__clonyfy_interactions__) and emulates common UI patterns (aria-controls,
+ *   tabs, Bootstrap, hover submenus, hamburger menus) since original site JS is
+ *   neutralized in previews.
+ *
+ * The in-page code is written as plain functions and serialized with
+ * Function#toString, so it must not reference anything from this module.
+ */
+
+function safeJson(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
+/* ------------------------------------------------------------------ toast */
+
+function installToast() {
+  if (window.__clonyfyToast) return;
+  var host = null;
+  var box = null;
+  var timer = 0;
+  function ensure() {
+    if (host && host.isConnected) return;
+    host = document.createElement('div');
+    host.id = '__clonyfy_toast_host__';
+    host.setAttribute('data-clonyfy-ui', '');
+    host.style.cssText = 'position:fixed;left:0;right:0;bottom:24px;z-index:2147483647;display:flex;justify-content:center;pointer-events:none;';
+    var root = host.attachShadow ? host.attachShadow({ mode: 'open' }) : host;
+    var style = document.createElement('style');
+    style.textContent = '.t{font:500 14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;color:#fff;background:rgba(17,17,20,.95);'
+      + 'border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:10px 16px;max-width:min(92vw,460px);'
+      + 'box-shadow:0 10px 30px rgba(0,0,0,.35);opacity:0;transform:translateY(8px);transition:opacity .18s ease,transform .18s ease;text-align:center}'
+      + '.t.on{opacity:1;transform:none}.s{display:block;margin-top:2px;font-weight:400;font-size:12px;color:rgba(255,255,255,.72);word-break:break-all}';
+    box = document.createElement('div');
+    box.className = 't';
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    root.appendChild(style);
+    root.appendChild(box);
+    (document.body || document.documentElement).appendChild(host);
+  }
+  window.__clonyfyToast = function (title, detail) {
+    try {
+      ensure();
+      box.textContent = '';
+      box.appendChild(document.createTextNode(title));
+      if (detail) {
+        var s = document.createElement('span');
+        s.className = 's';
+        s.textContent = detail;
+        box.appendChild(s);
+      }
+      requestAnimationFrame(function () { box.classList.add('on'); });
+      clearTimeout(timer);
+      timer = setTimeout(function () { box.classList.remove('on'); }, 2800);
+    } catch (e) { /* ignore */ }
+  };
+}
+
+/* ------------------------------------------------------------- navigation */
+
+function navigationRuntime(CFG) {
+  if (window.__clonyfyNavRuntime) return;
+  window.__clonyfyNavRuntime = true;
+  var toast = window.__clonyfyToast || function () {};
+  var isShare = CFG.mode === 'share';
+
+  function norm(p) {
+    var s = String(p == null ? '/' : p);
+    try { s = decodeURIComponent(s); } catch (e) { /* keep raw */ }
+    s = s.split('#')[0].split('?')[0].replace(/\/{2,}/g, '/');
+    if (s.charAt(0) !== '/') s = '/' + s;
+    s = s.replace(/\/index(?:\.html?)?$/i, '/').replace(/\.html?$/i, '');
+    if (s.length > 1) s = s.replace(/\/+$/, '');
+    return (s || '/').toLowerCase();
+  }
+  var routeIndex = {};
+  for (var i = 0; i < CFG.routes.length; i++) {
+    var key = norm(CFG.routes[i]);
+    if (!Object.prototype.hasOwnProperty.call(routeIndex, key)) routeIndex[key] = CFG.routes[i];
+  }
+
+  var params = new URLSearchParams(location.search);
+  var currentRoute = params.get('route') || CFG.defaultRoute || '/';
+  var authQuery = '';
+  if (!isShare) {
+    var tok = params.get('access_token') || params.get('authToken');
+    if (tok) authQuery = '&access_token=' + encodeURIComponent(tok);
+  }
+  function bareHost(h) { return String(h || '').toLowerCase().replace(/^www\./, ''); }
+  var targetHost = '';
+  try { targetHost = CFG.targetOrigin ? bareHost(new URL(CFG.targetOrigin).host) : ''; } catch (e) { /* ignore */ }
+  var siteBase = (CFG.targetOrigin || location.origin) + (currentRoute.charAt(0) === '/' ? currentRoute : '/' + currentRoute);
+
+  var nativePush = history.pushState;
+  var nativeReplace = history.replaceState;
+  var nativeOpen = window.open;
+
+  function pageUrl(routeKey, hash) {
+    return CFG.pageBase + encodeURIComponent(routeKey) + authQuery + (hash || '');
+  }
+  function newTabUrl(d) {
+    if (isShare) return CFG.sharePathBase + (d.route === '/' ? '/' : d.route) + (d.hash || '');
+    return d.url;
+  }
+  function lookup(route, hash) {
+    var k = routeIndex[norm(route)];
+    if (k == null) return { kind: 'missing', route: String(route).split('?')[0] || '/' };
+    if (hash && norm(k) === norm(currentRoute)) return { kind: 'hash', hash: hash };
+    return { kind: 'cloned', route: k, hash: hash || '', url: pageUrl(k, hash) };
+  }
+  function classify(raw) {
+    var value = String(raw == null ? '' : raw).trim();
+    if (!value || /^#!?$/.test(value) || /^javascript:/i.test(value)) return { kind: 'noop' };
+    if (/^(mailto|tel|sms|data|blob):/i.test(value)) return { kind: 'native' };
+    if (value.charAt(0) === '#') return { kind: 'hash', hash: value };
+    var url;
+    try {
+      // Clonyfy-served paths resolve against the API host; site links against the original page URL.
+      url = /^\/(api|_assets|share)\//.test(value) ? new URL(value, location.origin) : new URL(value, siteBase);
+    } catch (e) { return { kind: 'native' }; }
+    if (!/^https?:$/.test(url.protocol)) return { kind: 'native' };
+    var sameApi = url.origin === location.origin;
+    if (sameApi && (url.pathname === '/api/page' || url.pathname === '/api/share-page')) {
+      return lookup(url.searchParams.get('route') || '/', url.hash);
+    }
+    if (sameApi && /^\/(api|_assets|share)\//.test(url.pathname)) return { kind: 'native' };
+    var sameSite = sameApi || (targetHost && bareHost(url.host) === targetHost);
+    if (!sameSite) return { kind: 'external', host: url.host, href: url.href };
+    return lookup(url.pathname + url.search, url.hash);
+  }
+
+  function scrollToHash(hash) {
+    var id = String(hash || '').slice(1);
+    try { id = decodeURIComponent(id); } catch (e) { /* keep raw */ }
+    var el = id ? (document.getElementById(id) || document.getElementsByName(id)[0]) : null;
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else if (!id || id === 'top') window.scrollTo({ top: 0, behavior: 'smooth' });
+    try { nativeReplace.call(history, history.state, '', location.pathname + location.search + hash); } catch (e) { /* ignore */ }
+  }
+  function notify(type, extra) {
+    try {
+      var msg = { type: type };
+      for (var k in extra) msg[k] = extra[k];
+      window.parent.postMessage(msg, '*');
+    } catch (e) { /* ignore */ }
+  }
+  function syncShareUrl(d) {
+    if (!isShare) return;
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.history.replaceState(null, '', CFG.sharePathBase + (d.route === '/' ? '/' : d.route) + (d.hash || ''));
+      }
+    } catch (e) { /* ignore */ }
+  }
+  function go(d, newTab) {
+    if (newTab) {
+      nativeOpen.call(window, newTabUrl(d), '_blank', 'noopener');
+      return;
+    }
+    notify('clonyfy-preview-nav', { route: d.route });
+    syncShareUrl(d);
+    location.href = d.url;
+  }
+  function explain(d) {
+    if (d.kind === 'missing') toast('This page is not cloned yet', d.route);
+    else if (d.kind === 'external') toast('External link \u2014 not cloned yet', d.host);
+    notify('clonyfy-preview-nav-blocked', { reason: d.kind, target: d.route || d.href || '' });
+  }
+  window.__clonyfyNav = { classify: classify, go: go, explain: explain, scrollToHash: scrollToHash };
+
+  function inlineNavTarget(el) {
+    var code = el.getAttribute && el.getAttribute('onclick');
+    if (!code) return null;
+    var m = code.match(/(?:location(?:\.href)?\s*=|location\.(?:assign|replace)\(|window\.open\()\s*['"]([^'"]+)['"]/);
+    return m ? m[1] : null;
+  }
+  function linkFromEvent(e) {
+    var t = e.target;
+    if (!t || !t.closest) return null;
+    if (t.closest('[data-clonyfy-ui]')) return null;
+    var a = t.closest('a[href], area[href]');
+    if (a) {
+      return {
+        href: a.getAttribute('href'),
+        blank: /^_(blank|new)$/i.test(a.getAttribute('target') || ''),
+        download: a.hasAttribute('download'),
+      };
+    }
+    var d = t.closest('[data-href], [data-url], [data-link], [role="link"][href]');
+    if (d) {
+      return { href: d.getAttribute('data-href') || d.getAttribute('data-url') || d.getAttribute('data-link') || d.getAttribute('href') };
+    }
+    var n = t.closest('[onclick]');
+    if (n) {
+      var h = inlineNavTarget(n);
+      if (h) return { href: h };
+    }
+    return null;
+  }
+  function onActivate(e, forceNewTab) {
+    var link = linkFromEvent(e);
+    if (!link) return;
+    var d = classify(link.href);
+    if (d.kind === 'native') return;
+    if (link.download && /^\/(api|_assets)\//.test(String(link.href || ''))) return;
+    if (d.kind === 'noop') {
+      // "#" / javascript: links are usually JS buttons - let the interaction runtime handle them.
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (d.kind === 'hash') { scrollToHash(d.hash); return; }
+    if (d.kind === 'cloned') {
+      go(d, forceNewTab || link.blank || e.metaKey || e.ctrlKey || e.shiftKey);
+      return;
+    }
+    explain(d);
+  }
+  document.addEventListener('click', function (e) { onActivate(e, false); }, true);
+  document.addEventListener('auxclick', function (e) { if (e.button === 1) onActivate(e, true); }, true);
+
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || !form.getAttribute) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var method = String(form.getAttribute('method') || 'get').toLowerCase();
+    var action = form.getAttribute('action');
+    var d = action ? classify(action) : { kind: 'none' };
+    if (d.kind === 'cloned' && method === 'get') { go(d, false); return; }
+    if (method === 'get' && (d.kind === 'external' || d.kind === 'missing')) { explain(d); return; }
+    toast('Form submission is not cloned yet', 'Forms are disabled in the cloned preview.');
+  }, true);
+
+  function wrapHistory(native) {
+    return function (state, title, url) {
+      if (url == null || url === '') return native.call(this, state, title);
+      var d = classify(url);
+      if (d.kind === 'hash') return native.call(this, state, title, location.pathname + location.search + d.hash);
+      if (d.kind === 'cloned') {
+        notify('clonyfy-preview-nav', { route: d.route });
+        syncShareUrl(d);
+        return native.call(this, state, title, d.url);
+      }
+      // Never point the address bar at a URL this preview can't serve.
+      return native.call(this, state, title);
+    };
+  }
+  history.pushState = wrapHistory(nativePush);
+  history.replaceState = wrapHistory(nativeReplace);
+
+  window.open = function (url, target, features) {
+    if (url == null || url === '') return nativeOpen.apply(window, arguments);
+    var d = classify(url);
+    if (d.kind === 'native') return nativeOpen.apply(window, arguments);
+    if (d.kind === 'cloned') return nativeOpen.call(window, newTabUrl(d), target || '_blank', features);
+    if (d.kind === 'hash') { scrollToHash(d.hash); return null; }
+    if (d.kind !== 'noop') explain(d);
+    return null;
+  };
+
+  try {
+    var L = window.Location && window.Location.prototype;
+    if (L) {
+      var nativeAssign = L.assign;
+      var nativeLocReplace = L.replace;
+      var guarded = function (native) {
+        return function (url) {
+          var d = classify(url);
+          if (d.kind === 'native') return native.call(this, url);
+          if (d.kind === 'cloned') return native.call(this, d.url);
+          if (d.kind === 'hash') return scrollToHash(d.hash);
+          if (d.kind !== 'noop') explain(d);
+          return undefined;
+        };
+      };
+      L.assign = guarded(nativeAssign);
+      L.replace = guarded(nativeLocReplace);
+    }
+  } catch (e) { /* ignore */ }
+
+  // Safety net (Chromium Navigation API): catches `location.href = ...` and any other
+  // navigation the handlers above could not see.
+  try {
+    var navApi = window.navigation;
+    if (navApi && typeof navApi.addEventListener === 'function') {
+      navApi.addEventListener('navigate', function (e) {
+        if (e.hashChange || e.downloadRequest != null) return;
+        if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
+        var dest;
+        try { dest = new URL(e.destination.url); } catch (x) { return; }
+        if (dest.origin === location.origin && /^\/(api|_assets|share)\//.test(dest.pathname)) return;
+        var d = classify(dest.href);
+        if (d.kind === 'native' || d.kind === 'noop') return;
+        if (!e.cancelable) return;
+        e.preventDefault();
+        if (d.kind === 'cloned') { go(d, false); return; }
+        if (d.kind === 'hash') { scrollToHash(d.hash); return; }
+        explain(d);
+      });
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ----------------------------------------------------------- interactions */
+
+function interactionRuntime() {
+  if (window.__clonyfyIxRuntime) return;
+  window.__clonyfyIxRuntime = true;
+  var toast = window.__clonyfyToast || function () {};
+  var handled = typeof WeakSet === 'function' ? new WeakSet() : null;
+  function markHandled(e) { try { if (handled) handled.add(e); } catch (x) { /* ignore */ } }
+  function wasHandled(e) { try { return !!(handled && handled.has(e)); } catch (x) { return false; } }
+
+  /* Mutation noise tracker: tickers/carousels mutate constantly; ignore them when
+     deciding whether a click "did something". */
+  var lastMutated = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var clickWatch = null;
+  try {
+    new MutationObserver(function (list) {
+      var now = Date.now();
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i].target;
+        if (t && t.closest && t.closest('[data-clonyfy-ui]')) continue;
+        if (t && t.nodeType === 3 && t.parentElement && t.parentElement.closest('[data-clonyfy-ui]')) continue;
+        var prev = lastMutated ? lastMutated.get(t) : 0;
+        if (clickWatch && (!prev || now - prev > 1500) && now >= clickWatch.since) clickWatch.changed = true;
+        if (lastMutated) lastMutated.set(t, now);
+      }
+    }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  } catch (e) { /* ignore */ }
+
+  function isHidden(el) {
+    if (!el || !el.isConnected) return true;
+    if (el.hidden) return true;
+    var cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) return true;
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 && r.height < 1) return true;
+    return r.height < 1 && (cs.overflow === 'hidden' || cs.overflowY === 'hidden');
+  }
+
+  var saved = typeof WeakMap === 'function' ? new WeakMap() : null;
+  function reveal(el) {
+    if (!el) return;
+    if (saved && !saved.has(el)) {
+      saved.set(el, {
+        style: el.getAttribute('style'),
+        hidden: el.hasAttribute('hidden'),
+        ariaHidden: el.getAttribute('aria-hidden'),
+        state: el.getAttribute('data-state'),
+        inert: el.hasAttribute('inert'),
+      });
+    }
+    el.removeAttribute('hidden');
+    el.removeAttribute('inert');
+    if (el.getAttribute('aria-hidden') === 'true') el.setAttribute('aria-hidden', 'false');
+    if (el.hasAttribute('data-state')) el.setAttribute('data-state', 'open');
+    var cs = getComputedStyle(el);
+    if (cs.display === 'none') el.style.setProperty('display', 'block', 'important');
+    if (cs.visibility === 'hidden') el.style.setProperty('visibility', 'visible', 'important');
+    if (parseFloat(cs.opacity) < 0.05) el.style.setProperty('opacity', '1', 'important');
+    if (cs.pointerEvents === 'none') el.style.setProperty('pointer-events', 'auto', 'important');
+    var r = el.getBoundingClientRect();
+    if (r.height < 1 && (cs.overflow === 'hidden' || cs.overflowY === 'hidden' || cs.maxHeight === '0px')) {
+      el.style.setProperty('max-height', 'none', 'important');
+      el.style.setProperty('height', 'auto', 'important');
+      el.style.setProperty('overflow', 'visible', 'important');
+    }
+  }
+  function conceal(el) {
+    if (!el) return;
+    var s = saved ? saved.get(el) : null;
+    if (!s) {
+      el.setAttribute('hidden', '');
+      if (el.hasAttribute('data-state')) el.setAttribute('data-state', 'closed');
+      return;
+    }
+    if (s.style == null) el.removeAttribute('style'); else el.setAttribute('style', s.style);
+    if (s.hidden) el.setAttribute('hidden', '');
+    if (s.ariaHidden == null) el.removeAttribute('aria-hidden'); else el.setAttribute('aria-hidden', s.ariaHidden);
+    if (s.state == null) el.removeAttribute('data-state'); else el.setAttribute('data-state', s.state);
+    if (s.inert) el.setAttribute('inert', '');
+    saved.delete(el);
+  }
+  function isRealLink(el) {
+    if (!el || el.tagName !== 'A') return false;
+    var h = String(el.getAttribute('href') || '').trim();
+    return !!h && !/^#/.test(h) && !/^javascript:/i.test(h);
+  }
+
+  /* ---- recorded nav menus (captured on the live site) ---- */
+  var data = null;
+  try {
+    var dataEl = document.getElementById('__clonyfy_interactions__');
+    if (dataEl) data = JSON.parse(dataEl.textContent || 'null');
+  } catch (e) { data = null; }
+  var items = (data && data.items) || [];
+  var open = {};
+
+  function refEl(ref, trigger) {
+    if (ref === 'html') return document.documentElement;
+    if (ref === 'body') return document.body;
+    if (ref === 'head') return document.head;
+    if (ref === 'self') return trigger;
+    if (typeof ref === 'string' && ref.indexOf('t:') === 0) {
+      return document.querySelector('[data-clonyfy-ixt="' + ref.slice(2) + '"]');
+    }
+    return null;
+  }
+  function setAttr(el, name, value) {
+    try { if (value === null) el.removeAttribute(name); else el.setAttribute(name, value); } catch (e) { /* ignore */ }
+  }
+  function closeItem(id) {
+    var st = open[id];
+    if (!st) return;
+    clearTimeout(st.timer);
+    var ops = st.item.ops;
+    for (var i = ops.length - 1; i >= 0; i--) {
+      var op = ops[i];
+      var el;
+      if (op.k === 'attr') {
+        el = refEl(op.t, st.trigger);
+        if (el) setAttr(el, op.n, op.off);
+      } else if (op.k === 'cls') {
+        el = refEl(op.t, st.trigger);
+        if (el) {
+          for (var a = 0; a < op.a.length; a++) el.classList.remove(op.a[a]);
+          for (var r = 0; r < op.r.length; r++) el.classList.add(op.r[r]);
+        }
+      }
+    }
+    for (var n = 0; n < st.added.length; n++) st.added[n].remove();
+    delete open[id];
+  }
+  function closeAll(except) {
+    for (var id in open) if (String(id) !== String(except)) closeItem(id);
+  }
+  function inZones(st, node) {
+    if (!node) return false;
+    for (var i = 0; i < st.zones.length; i++) if (st.zones[i] && st.zones[i].contains(node)) return true;
+    return false;
+  }
+  function openItem(item, trigger) {
+    if (open[item.i]) return;
+    for (var id in open) {
+      if (!inZones(open[id], trigger)) closeItem(id);
+    }
+    var added = [];
+    var zones = [trigger];
+    var li = trigger.closest('li');
+    if (li) zones.push(li);
+    for (var i = 0; i < item.ops.length; i++) {
+      var op = item.ops[i];
+      var el;
+      if (op.k === 'attr' || op.k === 'cls') {
+        el = refEl(op.t, trigger);
+        if (!el) continue;
+        if (op.k === 'attr') setAttr(el, op.n, op.on);
+        else {
+          for (var r = 0; r < op.r.length; r++) el.classList.remove(op.r[r]);
+          for (var a = 0; a < op.a.length; a++) el.classList.add(op.a[a]);
+        }
+        if (el !== document.documentElement && el !== document.body && !el.contains(trigger)) zones.push(el);
+      } else if (op.k === 'add') {
+        var parent = refEl(op.p, trigger);
+        if (!parent) continue;
+        var tpl = document.createElement('template');
+        tpl.innerHTML = op.h;
+        var node = tpl.content.firstElementChild;
+        if (!node) continue;
+        node.setAttribute('data-clonyfy-ix-added', String(item.i));
+        var before = op.b ? refEl(op.b, trigger) : null;
+        if (before && before.parentNode === parent) parent.insertBefore(node, before);
+        else parent.appendChild(node);
+        added.push(node);
+        if (node.tagName !== 'STYLE') zones.push(node);
+      }
+    }
+    open[item.i] = { item: item, trigger: trigger, added: added, zones: zones, timer: 0 };
+  }
+  function scheduleClose(id, delay) {
+    var st = open[id];
+    if (!st || st.timer) return;
+    st.timer = setTimeout(function () { closeItem(id); }, delay);
+  }
+
+  items.forEach(function (item) {
+    var trigger = document.querySelector('[data-clonyfy-ix="' + item.i + '"]');
+    if (!trigger) return;
+    if (item.ev === 'hover') {
+      trigger.addEventListener('pointerenter', function (e) {
+        if (e.pointerType === 'touch') return;
+        var st = open[item.i];
+        if (st) { clearTimeout(st.timer); st.timer = 0; return; }
+        openItem(item, trigger);
+      });
+      trigger.addEventListener('focusin', function () { openItem(item, trigger); });
+    }
+    trigger.addEventListener('click', function (e) {
+      // Real links on hover-menus navigate (handled by the navigation runtime).
+      if (item.ev === 'hover' && isRealLink(trigger.closest('a'))) return;
+      e.preventDefault();
+      markHandled(e);
+      if (open[item.i]) closeItem(item.i);
+      else openItem(item, trigger);
+    });
+  });
+
+  if (items.length) {
+    document.addEventListener('pointermove', function (e) {
+      for (var id in open) {
+        var st = open[id];
+        if (st.item.ev !== 'hover') continue;
+        if (inZones(st, e.target)) { clearTimeout(st.timer); st.timer = 0; }
+        else scheduleClose(id, 220);
+      }
+    }, { passive: true });
+    document.documentElement.addEventListener('mouseleave', function () {
+      for (var id in open) if (open[id].item.ev === 'hover') scheduleClose(id, 220);
+    });
+    document.addEventListener('focusin', function (e) {
+      for (var id in open) if (!inZones(open[id], e.target)) closeItem(id);
+    });
+  }
+
+  /* ---- Bootstrap ---- */
+  function bsTarget(el) {
+    var sel = el.getAttribute('data-bs-target') || el.getAttribute('data-target') || el.getAttribute('href') || '';
+    if (!sel || sel === '#') return null;
+    try { return document.querySelector(sel); } catch (e) { return null; }
+  }
+  var backdrop = null;
+  function showModal(m) {
+    m.style.display = 'block';
+    m.classList.add('show');
+    m.removeAttribute('aria-hidden');
+    m.setAttribute('aria-modal', 'true');
+    document.body.classList.add('modal-open');
+    if (!backdrop) {
+      backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop fade show';
+      document.body.appendChild(backdrop);
+    }
+  }
+  function hideModal(m) {
+    m.style.display = '';
+    m.classList.remove('show');
+    m.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    if (backdrop) { backdrop.remove(); backdrop = null; }
+  }
+  function closeBsDropdowns(except) {
+    document.querySelectorAll('.dropdown-menu.show').forEach(function (m) {
+      if (m === except) return;
+      m.classList.remove('show');
+      var t = m.parentElement && m.parentElement.querySelector('[data-bs-toggle="dropdown"],[data-toggle="dropdown"]');
+      if (t) { t.classList.remove('show'); t.setAttribute('aria-expanded', 'false'); }
+    });
+  }
+  function bootstrap(el, kind) {
+    var t;
+    var isOpen;
+    if (kind === 'collapse') {
+      t = bsTarget(el);
+      if (!t) return false;
+      isOpen = !t.classList.contains('show');
+      t.classList.toggle('show', isOpen);
+      el.classList.toggle('collapsed', !isOpen);
+      el.setAttribute('aria-expanded', String(isOpen));
+      return true;
+    }
+    if (kind === 'dropdown') {
+      var menu = (el.parentElement && el.parentElement.querySelector('.dropdown-menu')) || el.nextElementSibling;
+      if (!menu) return false;
+      isOpen = !menu.classList.contains('show');
+      closeBsDropdowns(menu);
+      menu.classList.toggle('show', isOpen);
+      el.classList.toggle('show', isOpen);
+      el.setAttribute('aria-expanded', String(isOpen));
+      return true;
+    }
+    if (kind === 'modal') {
+      t = bsTarget(el);
+      if (!t) return false;
+      showModal(t);
+      return true;
+    }
+    if (kind === 'offcanvas') {
+      t = bsTarget(el);
+      if (!t) return false;
+      isOpen = !t.classList.contains('show');
+      t.classList.toggle('show', isOpen);
+      t.style.visibility = isOpen ? 'visible' : '';
+      return true;
+    }
+    if (kind === 'tab' || kind === 'pill' || kind === 'list') {
+      var nav = el.closest('.nav, .list-group, [role="tablist"]') || el.parentElement;
+      if (nav) {
+        nav.querySelectorAll('.active').forEach(function (x) {
+          if (x.matches('[data-bs-toggle],[data-toggle],.nav-link,.list-group-item')) x.classList.remove('active');
+        });
+      }
+      el.classList.add('active');
+      t = bsTarget(el);
+      if (t && t.parentElement) {
+        Array.prototype.forEach.call(t.parentElement.children, function (p) {
+          if (p.classList.contains('tab-pane')) p.classList.remove('active', 'show');
+        });
+        t.classList.add('active', 'show');
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /* ---- ARIA tabs / disclosures ---- */
+  function activateTab(tab) {
+    var list = tab.closest('[role="tablist"]') || tab.parentElement;
+    var tabs = list ? list.querySelectorAll('[role="tab"]') : [tab];
+    var activeClass = null;
+    Array.prototype.forEach.call(tabs, function (t) {
+      ['active', 'is-active', 'selected', 'is-selected', 'current'].forEach(function (c) {
+        if (!activeClass && t.classList.contains(c)) activeClass = c;
+      });
+    });
+    Array.prototype.forEach.call(tabs, function (t) {
+      var sel = t === tab;
+      t.setAttribute('aria-selected', sel ? 'true' : 'false');
+      if (t.hasAttribute('data-state')) t.setAttribute('data-state', sel ? 'active' : 'inactive');
+      if (activeClass) t.classList.toggle(activeClass, sel);
+      var pid = t.getAttribute('aria-controls');
+      var panel = pid ? document.getElementById(pid) : null;
+      if (!panel) return;
+      if (sel) reveal(panel); else conceal(panel);
+      if (panel.hasAttribute('data-state')) panel.setAttribute('data-state', sel ? 'active' : 'inactive');
+    });
+  }
+  function toggleControlled(trigger, target) {
+    var expanded = trigger.getAttribute('aria-expanded');
+    var makeOpen = expanded === 'true' ? false : (expanded === 'false' ? true : isHidden(target));
+    if (makeOpen) reveal(target); else conceal(target);
+    if (trigger.hasAttribute('aria-expanded')) trigger.setAttribute('aria-expanded', makeOpen ? 'true' : 'false');
+    if (trigger.hasAttribute('data-state')) trigger.setAttribute('data-state', makeOpen ? 'open' : 'closed');
+  }
+
+  /* ---- hamburger / mobile menu ---- */
+  var BURGER_RE = /(hamburger|burger|menu|navigation|nav-?toggle|navbar-?toggler|drawer|mobile-?nav|toggle-?nav|open nav)/i;
+  function burgerMenuFor(btn) {
+    var label = [
+      btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.id,
+      typeof btn.className === 'string' ? btn.className : '',
+      (btn.textContent || '').trim().slice(0, 30),
+    ].join(' ');
+    if (!BURGER_RE.test(label)) return null;
+    var scope = btn.closest('header, nav, [role="banner"]') || document.body;
+    var sel = 'nav, [role="dialog"], [role="menu"], [class*="menu" i], [class*="drawer" i], [class*="mobile" i], [id*="menu" i], [id*="nav" i], ul';
+    var scopes = scope === document.body ? [document.body] : [scope, document.body];
+    for (var s = 0; s < scopes.length; s++) {
+      var cands = scopes[s].querySelectorAll(sel);
+      for (var i = 0; i < cands.length; i++) {
+        var c = cands[i];
+        if (c === btn || c.contains(btn) || btn.contains(c)) continue;
+        if (c.querySelectorAll('a[href]').length < 2) continue;
+        if (!isHidden(c)) continue;
+        return c;
+      }
+    }
+    return null;
+  }
+  var burgerOpen = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+  /* ---- hover submenus driven by site JS ---- */
+  var hoverOpen = null;
+  var hoverTimer = 0;
+  function closeHover() {
+    if (!hoverOpen) return;
+    conceal(hoverOpen.sub);
+    hoverOpen = null;
+  }
+  function hiddenSubmenu(li) {
+    if (li.querySelector('[data-clonyfy-ix]')) return null;
+    for (var i = 0; i < li.children.length; i++) {
+      var c = li.children[i];
+      if (!/^(UL|OL|DIV|SECTION|NAV)$/.test(c.tagName) && c.getAttribute('role') !== 'menu') continue;
+      if (!c.querySelector('a[href]')) continue;
+      if (isHidden(c)) return c;
+    }
+    return null;
+  }
+  document.addEventListener('pointerover', function (e) {
+    if (e.pointerType === 'touch') return;
+    var t = e.target;
+    if (!t || !t.closest) return;
+    if (hoverOpen) {
+      if (hoverOpen.li.contains(t)) { clearTimeout(hoverTimer); hoverTimer = 0; return; }
+      if (!hoverTimer) hoverTimer = setTimeout(function () { hoverTimer = 0; closeHover(); }, 200);
+    }
+    var li = t.closest('nav li, header li, [role="menubar"] > li, [role="menubar"] > [role="none"]');
+    if (!li || (hoverOpen && hoverOpen.li === li)) return;
+    requestAnimationFrame(function () {
+      if (!li.matches(':hover')) return;
+      var sub = hiddenSubmenu(li);
+      if (!sub) return;
+      closeHover();
+      clearTimeout(hoverTimer);
+      hoverTimer = 0;
+      reveal(sub);
+      hoverOpen = { li: li, sub: sub };
+    });
+  });
+
+  /* ---- click dispatcher (bubble phase: recorded triggers run first) ---- */
+  var BUTTON_SEL = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], a[href="#"], a[href="#!"], a[href^="javascript:"]';
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest('[data-clonyfy-ui]')) return;
+
+    for (var id in open) {
+      if (!inZones(open[id], t)) closeItem(id);
+    }
+    if (!t.closest('.dropdown-menu, [data-bs-toggle="dropdown"], [data-toggle="dropdown"]')) closeBsDropdowns(null);
+    if (wasHandled(e)) return;
+
+    var el = t.closest('[data-bs-dismiss="modal"], [data-dismiss="modal"]');
+    if (el) {
+      var m = el.closest('.modal');
+      if (m) { hideModal(m); e.preventDefault(); return; }
+    }
+    if (t.classList && t.classList.contains('modal') && t.classList.contains('show')) { hideModal(t); return; }
+
+    el = t.closest('[data-bs-toggle], [data-toggle]');
+    if (el && bootstrap(el, el.getAttribute('data-bs-toggle') || el.getAttribute('data-toggle'))) { e.preventDefault(); return; }
+
+    el = t.closest('[role="tab"]');
+    if (el) { activateTab(el); e.preventDefault(); return; }
+
+    el = t.closest('[aria-controls]');
+    if (el && !isRealLink(el)) {
+      var cid = String(el.getAttribute('aria-controls') || '').split(/\s+/)[0];
+      var target = cid ? document.getElementById(cid) : null;
+      if (target) { toggleControlled(el, target); e.preventDefault(); return; }
+    }
+
+    var btn = t.closest(BUTTON_SEL);
+    if (!btn) return;
+    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
+    if (btn.form && (btn.type === 'submit' || btn.type === 'reset')) return;
+    if (btn.tagName !== 'A' && isRealLink(btn.closest('a'))) return;
+    if (btn.closest('label, summary')) return;
+
+    var menu = burgerOpen ? burgerOpen.get(btn) : null;
+    if (menu) {
+      conceal(menu);
+      burgerOpen.delete(btn);
+      if (btn.hasAttribute('aria-expanded')) btn.setAttribute('aria-expanded', 'false');
+      e.preventDefault();
+      return;
+    }
+    menu = burgerMenuFor(btn);
+    if (menu) {
+      reveal(menu);
+      if (burgerOpen) burgerOpen.set(btn, menu);
+      if (btn.hasAttribute('aria-expanded')) btn.setAttribute('aria-expanded', 'true');
+      e.preventDefault();
+      return;
+    }
+
+    // Nothing above applied: tell the user instead of silently doing nothing.
+    var scrollY = window.scrollY;
+    clickWatch = { changed: false, since: Date.now() };
+    var watch = clickWatch;
+    setTimeout(function () {
+      if (clickWatch === watch) clickWatch = null;
+      if (!watch.changed && Math.abs(window.scrollY - scrollY) < 2) toast("This button's action is not cloned yet");
+    }, 450);
+  }, false);
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    closeAll(null);
+    closeHover();
+    closeBsDropdowns(null);
+    document.querySelectorAll('.modal.show').forEach(hideModal);
+  });
+}
+
+/* ---------------------------------------------------------------- builders */
+
+/**
+ * @param {{ mode?: 'preview'|'share', outDir?: string, shareId?: string, targetOrigin?: string, routes?: string[], defaultRoute?: string }} opts
+ */
+export function buildPreviewNavigationScript(opts = {}) {
+  const mode = opts.mode === 'share' ? 'share' : 'preview';
+  const shareId = String(opts.shareId || '');
+  const config = {
+    mode,
+    pageBase: mode === 'share'
+      ? `/api/share-page?shareId=${encodeURIComponent(shareId)}&route=`
+      : `/api/page?outDir=${encodeURIComponent(String(opts.outDir || ''))}&route=`,
+    sharePathBase: mode === 'share' ? `/share/${shareId}` : '',
+    targetOrigin: String(opts.targetOrigin || '').replace(/\/$/, ''),
+    routes: Array.isArray(opts.routes) ? opts.routes.slice(0, 5000).map(String) : [],
+    defaultRoute: String(opts.defaultRoute || '/'),
+  };
+  const attr = mode === 'share' ? 'data-clonyfy-share-nav' : 'data-clonyfy-preview-nav';
+  return `<script ${attr}>(${installToast.toString()})();(${navigationRuntime.toString()})(${safeJson(config)});</script>`;
+}
+
+export function buildInteractionRuntimeScript() {
+  return `<script data-clonyfy-interactions-runtime>(${installToast.toString()})();(${interactionRuntime.toString()})();</script>`;
+}
