@@ -1,6 +1,6 @@
 ﻿import { useSiteLanguage } from "@/hooks/use-site-language";
 import { useAuth } from "@/hooks/use-auth";
-import { ApiError, ensureApiAwake, googleAuthUrl } from "@/lib/api";
+import { ApiError, ensureApiAwake, githubAuthUrl, googleAuthUrl } from "@/lib/api";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -40,9 +40,12 @@ export function AuthShell({
       const params = new URLSearchParams(window.location.search);
       const oauthError = params.get("oauth_error");
       if (oauthError) {
-        setError(oauthErrorMessage(oauthError, params.get("ban_reason"), tr));
+        setError(
+          oauthErrorMessage(oauthError, params.get("ban_reason"), params.get("provider"), tr),
+        );
         params.delete("oauth_error");
         params.delete("ban_reason");
+        params.delete("provider");
         const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}`;
         window.history.replaceState({}, "", next);
       }
@@ -149,6 +152,13 @@ export function AuthShell({
               icon={<GoogleMark />}
               onClick={() => {
                 window.location.href = googleAuthUrl();
+              }}
+            />
+            <SocialButton
+              label="GitHub"
+              icon={<GitHubMark />}
+              onClick={() => {
+                window.location.href = githubAuthUrl();
               }}
             />
           </div>
@@ -288,26 +298,50 @@ function GoogleMark() {
   );
 }
 
+function GitHubMark() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.52 2.87 8.35 6.84 9.7.5.1.68-.22.68-.48 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.57 2.34 1.12 2.91.86.09-.66.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.31.1-2.73 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85.01 1.71.12 2.51.34 1.9-1.32 2.74-1.05 2.74-1.05.55 1.42.2 2.47.1 2.73.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.38-.01 2.49-.01 2.83 0 .26.18.58.69.48A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z" />
+    </svg>
+  );
+}
+
 function oauthErrorMessage(
   code: string,
   banReason: string | null,
+  provider: string | null,
   tr: (text: string) => string,
 ): string {
+  const isGithub = provider === "github";
   switch (code) {
     case "cancelled":
-      return tr("Google sign-in was cancelled.");
+      return isGithub
+        ? tr("GitHub sign-in was cancelled.")
+        : tr("Google sign-in was cancelled.");
     case "not_configured":
-      return tr("Google sign-in is not available yet. Please use email and password.");
+      return isGithub
+        ? tr("GitHub sign-in is not available yet. Please use email and password.")
+        : tr("Google sign-in is not available yet. Please use email and password.");
     case "email_unverified":
-      return tr("Your Google account email is not verified.");
+      return isGithub
+        ? tr("Your GitHub account email is not verified.")
+        : tr("Your Google account email is not verified.");
+    case "email_missing":
+      return tr(
+        "Your GitHub account has no public email. Add a verified email on GitHub, then try again.",
+      );
     case "invalid_state":
-      return tr("Google sign-in expired. Please try again.");
+      return isGithub
+        ? tr("GitHub sign-in expired. Please try again.")
+        : tr("Google sign-in expired. Please try again.");
     case "blocked":
       return banReason
         ? `${tr("This account has been blocked.")} ${banReason}`
         : tr("This account has been blocked.");
     case "server_error":
-      return tr("Google sign-in failed. Please try again.");
+      return isGithub
+        ? tr("GitHub sign-in failed. Please try again.")
+        : tr("Google sign-in failed. Please try again.");
     default:
       return code;
   }
