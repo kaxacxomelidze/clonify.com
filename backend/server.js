@@ -260,7 +260,7 @@ function planRank(plan) {
 function hasGrowthFeatures(plan) {
   return planRank(plan) >= PLAN_RANK.growth;
 }
-const GROWTH_FEATURE_ERROR = (feature) => `${feature} is available on the Growth and Scale plans. Upgrade to use it.`;
+const GROWTH_FEATURE_ERROR = (feature) => `${feature}: available on the Growth and Scale plans. Upgrade to use it.`;
 /** Clones counted against the monthly quota (deleting a clone does not give it back). */
 function clonesUsedThisPeriod(user) {
   return countUsageEventsSince(user.id, 'clone', planPeriodStart(user).toISOString());
