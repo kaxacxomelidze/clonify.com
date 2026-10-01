@@ -9,8 +9,9 @@ import {
   ApiError,
   cancelSubscription,
   fetchBillingHistory,
-  openStripePortal,
-  startStripeCheckout,
+  openBillingPortal,
+  startWhopCheckout,
+  syncWhopCheckout,
 } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -63,6 +64,34 @@ function BillingPage() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Back from Whop checkout: activate now instead of waiting for the webhook.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("whop") !== "success") return;
+    params.delete("whop");
+    const rest = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
+    let cancelled = false;
+    void (async () => {
+      setNotice("Payment received — activating your plan…");
+      for (let attempt = 0; attempt < 8 && !cancelled; attempt++) {
+        const res = await syncWhopCheckout().catch(() => null);
+        if (res?.user && res.user.plan && res.user.plan !== "free") {
+          await refresh();
+          setNotice("Your plan is active. Thank you!");
+          toast.success("Plan activated.");
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+      await refresh();
+      if (!cancelled) setNotice("Payment received. Your plan will activate within a minute — refresh if it doesn't.");
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -142,8 +171,7 @@ function BillingPage() {
         <p className="eyebrow">Account</p>
         <h1 className="mt-2 display-lg">Subscription</h1>
         <p className="mt-2 max-w-xl text-sm text-muted-foreground">
-          Manage your plan, usage, and billing. Upgrades open Stripe Checkout when payments are
-          configured.
+          Manage your plan, usage, and billing. Upgrades open a secure Whop checkout.
         </p>
       </header>
       <p role="status" className="text-sm text-muted-foreground">
@@ -251,7 +279,7 @@ function BillingPage() {
               <CreditCard className="h-5 w-5" />
             </span>
             <span className="min-w-0">
-              <span className="block text-sm">Managed in Stripe Customer Portal</span>
+              <span className="block text-sm">Managed securely by Whop</span>
               <span className="block text-xs text-muted-foreground">
                 Update cards, invoices, and tax details securely
               </span>
@@ -261,9 +289,9 @@ function BillingPage() {
             onClick={() => {
               void (async () => {
                 try {
-                  const { url } = await openStripePortal();
+                  const { url } = await openBillingPortal();
                   if (url) window.location.href = url;
-                  else toast.error("Billing portal unavailable. Configure Stripe first.");
+                  else toast.error("Billing portal unavailable.");
                 } catch (err) {
                   toast.error(
                     err instanceof ApiError ? err.message : "Could not open billing portal.",
@@ -333,20 +361,19 @@ function BillingPage() {
               disabled={p.current}
               onClick={() => {
                 void (async () => {
-                  setPreviewPlan(p.name);
-                  setCancelled(false);
                   if (p.name === "Free" || planApiKey(p.name) === String(user?.plan || "")) {
+                    setPreviewPlan(p.name);
                     setNotice(`Showing ${p.name}.`);
                     return;
                   }
                   try {
-                    const { url } = await startStripeCheckout(planApiKey(p.name), "monthly");
+                    const { url } = await startWhopCheckout(planApiKey(p.name), "monthly");
                     if (url) {
                       window.location.href = url;
                       return;
                     }
                     setNotice("Checkout did not return a URL.");
-                    toast.error("Checkout unavailable. Configure Stripe keys on the Backend.");
+                    toast.error("Checkout is unavailable right now. Please try again later.");
                   } catch (err) {
                     const message =
                       err instanceof ApiError
@@ -406,7 +433,7 @@ function BillingPage() {
             <Link to="/dashboard/billing" className="underline underline-offset-4">
               Upgrade a plan
             </Link>{" "}
-            to start billing history, or open Manage billing for Stripe receipts.
+            to start billing history, or open Manage billing for Whop receipts.
           </p>
         )}
       </motion.section>

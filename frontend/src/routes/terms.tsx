@@ -31,7 +31,7 @@ function TermsPage() {
         </p>
         <p>
           Accounts may be suspended for abuse, scraping that harms third parties, or payment fraud.
-          Subscriptions renew until cancelled through billing settings or Stripe Customer Portal.
+          Subscriptions renew until cancelled through billing settings or the Whop billing page.
         </p>
         <p>
           Questions:{" "}

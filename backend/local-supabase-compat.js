@@ -726,6 +726,41 @@ export function createClient() {
 }
 
 
+/**
+ * Idempotent schema additions the code depends on. *.sql files are gitignored, so
+ * columns added by new features must be created here or they never reach a server.
+ */
+export async function ensureLocalSchema() {
+  const pool = getPool();
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id text;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_github_id_key ON users (github_id);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_membership_id text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
+    CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      id text PRIMARY KEY,
+      source text NOT NULL,
+      received_at timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+}
+
+/** Records a webhook delivery id; false if it was already processed (at-least-once delivery). */
+export async function claimWebhookEvent(source, id) {
+  const result = await getPool().query(
+    'INSERT INTO webhook_events (id, source) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id',
+    [`${source}:${id}`, source],
+  );
+  return result.rowCount > 0;
+}
+
+/** Forget a claimed delivery so the provider's retry is processed (handler failed). */
+export async function releaseWebhookEvent(source, id) {
+  await getPool().query('DELETE FROM webhook_events WHERE id = $1', [`${source}:${id}`]);
+}
+
 export async function closeLocalDatabase() {
   if (_pool) {
     const pool = _pool;

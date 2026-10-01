@@ -14,10 +14,11 @@ import { runClone, regenerateCloneProject } from './packages/cloner/dist/runClon
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
-  getUserByGoogleId, getUserByGithubId, getUserByStripeCustomerId, insertOAuthUser,
+  getUserByGoogleId, getUserByGithubId, getUserByStripeCustomerId, getUserByWhopMembershipId, insertOAuthUser,
   getSession, insertSession, deleteSession, deleteUserSessions, cleanExpiredSessions,
   insertClone, updateCloneLabel, updateCloneStatus, getClonesByUser, getAllClones, deleteCloneById, deleteUserClones, getCloneCountThisMonth,
   getAllPayments, getPaymentsByUser, getPaymentById, insertPayment, updatePayment, getPendingPaymentByUserPlan, getAdminStats,
+  getPaymentByTxId, updatePaymentFields,
   getSettings, saveSettings,
   getUserBlockReason, getUserBlockReasons, setUserBlockReason,
   getShare, insertShare, insertUsageEvent, countUsageEventsSince,
@@ -35,6 +36,11 @@ import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFile
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
 import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './lib/clonePreviewRuntime.js';
+import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent } from './local-supabase-compat.js';
+import {
+  whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
+  retrieveWhopMembership, cancelWhopMembership, listRecentWhopMemberships, whopManageUrl, verifyWhopWebhook,
+} from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
 let bcrypt = null, nodemailer = null, StripeLib = null;
@@ -444,7 +450,7 @@ function planFromStripePriceId(priceId) {
   }
   return 'free';
 }
-async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', renewsAt = null, stripeSubscriptionId = null, cancelAtPeriodEnd = 0 } = {}) {
+async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', renewsAt = null, stripeSubscriptionId = null, whopMembershipId = null, whopUserId = null, cancelAtPeriodEnd = 0 } = {}) {
   const confirmedPlan = normalizePlan(plan);
   if (!isPaidPlan(confirmedPlan)) return null;
   const fields = {
@@ -456,6 +462,8 @@ async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', ren
   };
   if (renewsAt) fields.plan_renews_at = renewsAt instanceof Date ? renewsAt.toISOString() : String(renewsAt);
   if (stripeSubscriptionId) fields.stripe_subscription_id = stripeSubscriptionId;
+  if (whopMembershipId) fields.whop_membership_id = whopMembershipId;
+  if (whopUserId) fields.whop_user_id = whopUserId;
   await updateUser(userId, fields);
   _invalidateUserSessions(userId);
   return confirmedPlan;
@@ -469,6 +477,133 @@ function stripeSubscriptionPlan(sub, fallbackPlan = 'free') {
     if (isPaidPlan(pricePlan)) return pricePlan;
   }
   return 'free';
+}
+
+// ── Whop billing ─────────────────────────────────────────────────────────────
+/** Which of our users a Whop membership/payment belongs to. */
+async function resolveWhopUser(obj, membershipId) {
+  const userId = obj?.metadata?.userId;
+  if (userId) { const u = await getUserById(userId); if (u) return { user: u, pending: null }; }
+  const checkoutId = obj?.checkout_configuration_id;
+  if (checkoutId) {
+    const pending = await getPaymentByTxId(checkoutId);
+    if (pending?.user_id) { const u = await getUserById(pending.user_id); if (u) return { user: u, pending }; }
+  }
+  if (membershipId) { const u = await getUserByWhopMembershipId(membershipId); if (u) return { user: u, pending: null }; }
+  const email = obj?.user?.email || obj?.member?.email;
+  if (email) { const u = await getUserByEmail(String(email).toLowerCase()); if (u) return { user: u, pending: null }; }
+  return { user: null, pending: null };
+}
+
+function whopPlanFor(obj, fallbackPlan, fallbackInterval) {
+  const mapped = planFromWhopPlanId(obj?.plan?.id);
+  if (mapped) return mapped;
+  const metaPlan = normalizePlan(obj?.metadata?.plan || fallbackPlan);
+  return { plan: metaPlan, interval: obj?.metadata?.interval || fallbackInterval || 'monthly' };
+}
+
+/** Grant the paid plan for an active Whop membership. Idempotent. */
+async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fallbackInterval = null } = {}) {
+  let user = userId ? await getUserById(userId) : null;
+  let pending = null;
+  if (!user) ({ user, pending } = await resolveWhopUser(m, m.id));
+  if (!user) throw new Error(`No Clonyfy user for Whop membership ${m.id}`);
+  const { plan, interval } = whopPlanFor(m, fallbackPlan || pending?.plan, fallbackInterval || pending?.interval);
+  if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${m?.plan?.id})`);
+  const renewsAt = m.renewal_period_end ? new Date(m.renewal_period_end) : null;
+  await activatePaidPlanForUser(user.id, {
+    plan, interval, renewsAt,
+    whopMembershipId: m.id, whopUserId: m.user?.id || null,
+    cancelAtPeriodEnd: m.cancel_at_period_end ? 1 : 0,
+  });
+  if (m.checkout_configuration_id) {
+    const p = pending || await getPaymentByTxId(m.checkout_configuration_id);
+    if (p && p.status === 'pending') {
+      await updatePaymentFields(p.id, { status: 'confirmed', processed_at: new Date().toISOString(), note: `Whop membership ${m.id}` });
+    }
+  }
+  return { user, plan, interval, renewsAt };
+}
+
+async function handleWhopEvent(event) {
+  const type = event?.type || '';
+  const data = event?.data || {};
+
+  if (type === 'membership.activated') {
+    if (!['active', 'trialing'].includes(data.status)) return;
+    const { user, plan, renewsAt } = await applyWhopMembership(data);
+    audit(user.id, user.name, 'whop_membership_activated', `plan=${plan} membership=${data.id}`, null);
+    sendEmail(user.email, `Your ${getPlanLabel(plan)} plan is active`,
+      renderEmail('payment-confirmed', { SUBJECT: `${getPlanLabel(plan)} plan activated`, NAME: user.name, PLAN: getPlanLabel(plan), AMOUNT: '', INTERVAL: '', RENEWS_AT: renewsAt ? renewsAt.toLocaleDateString() : '' })
+    ).catch(() => {});
+    return;
+  }
+
+  if (type === 'payment.succeeded') {
+    const membershipId = data.membership?.id || null;
+    const { user } = await resolveWhopUser(data, membershipId);
+    if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
+    if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
+    const { plan, interval } = whopPlanFor(data, user.plan, user.billing_interval);
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
+      amount: Number(data.total ?? data.usd_total ?? data.subtotal ?? 0) || 0,
+      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
+      txId: data.id || null, note: membershipId ? `Whop membership ${membershipId}` : '',
+      promoCode: null, discountPercent: 0, interval, status: 'confirmed',
+      submittedAt: new Date().toISOString(),
+    });
+    // Renewals: refresh the paid period from the membership itself.
+    if (membershipId) {
+      try {
+        const m = await retrieveWhopMembership(membershipId);
+        if (['active', 'trialing'].includes(m?.status)) await applyWhopMembership(m, { userId: user.id });
+      } catch (err) { console.error('[whop] membership refresh failed:', err.message); }
+    }
+    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${data.total}`, null);
+    return;
+  }
+
+  if (type === 'membership.cancel_at_period_end_changed') {
+    const user = data.id ? await getUserByWhopMembershipId(data.id) : null;
+    if (user) {
+      await updateUser(user.id, { cancel_at_period_end: data.cancel_at_period_end ? 1 : 0 });
+      _invalidateUserSessions(user.id);
+    }
+    return;
+  }
+
+  if (type === 'membership.deactivated') {
+    const user = data.id ? await getUserByWhopMembershipId(data.id) : null;
+    if (!user) return; // a membership we never linked (or already replaced)
+    await updateUser(user.id, { plan: 'free', plan_renews_at: null, whop_membership_id: null, cancel_at_period_end: 0, renewal_reminder_sent: 0, usage_alert_sent: 0 });
+    _invalidateUserSessions(user.id);
+    sendEmail(user.email, 'Your account has been downgraded to Free',
+      renderEmail('downgraded', { SUBJECT: 'Account downgraded to Free', NAME: user.name })
+    ).catch(() => {});
+    audit(user.id, user.name, 'whop_membership_deactivated', `membership=${data.id}`, null);
+    return;
+  }
+
+  if (type === 'payment.failed') {
+    const membershipId = data.membership?.id || null;
+    const { user } = await resolveWhopUser(data, membershipId);
+    if (!user) return;
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: normalizePlan(user.plan), amount: Number(data.total ?? 0) || 0,
+      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
+      txId: data.id || null, note: 'Payment failed', promoCode: null, discountPercent: 0,
+      interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
+    }).catch(() => {});
+    let portalUrl = publicAppUrl() + '/dashboard/billing';
+    if (membershipId) { try { portalUrl = whopManageUrl(await retrieveWhopMembership(membershipId)); } catch {} }
+    sendEmail(user.email, 'Payment failed — action required',
+      renderEmail('payment-failed', { SUBJECT: 'Payment failed', NAME: user.name, PLAN: getPlanLabel(user.plan), PORTAL_URL: portalUrl })
+    ).catch(() => {});
+    audit(user.id, user.name, 'whop_payment_failed', `payment=${data.id}`, null);
+  }
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -6096,6 +6231,7 @@ async function handleRequest(req, res) {
       stripe_ready: !stripeReason,
       stripe_error: stripeReason,
       stripe_publishable_key: s.stripe_publishable_key || '',
+      whop_enabled: whopConfigured(),
       google_oauth_enabled: !!getGoogleOAuthSettings(s).google_client_id,
       github_oauth_enabled: !!getGithubOAuthSettings(s).github_client_id,
     });
@@ -6579,7 +6715,13 @@ async function handleRequest(req, res) {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(user.plan)) return json(res, { error: 'No active subscription to cancel' }, 400);
-    if (user.stripe_subscription_id) {
+    if (user.whop_membership_id) {
+      try {
+        await cancelWhopMembership(user.whop_membership_id, 'at_period_end');
+      } catch (err) {
+        return json(res, { error: `Whop cancellation failed: ${err.message}` }, 502);
+      }
+    } else if (user.stripe_subscription_id) {
       const stripe = getStripe();
       if (!stripe) return json(res, { error: stripeUnavailableReason() || 'Stripe is not configured. Contact support.' }, 503);
       try {
@@ -6968,6 +7110,100 @@ async function handleRequest(req, res) {
   // ── Stripe ────────────────────────────────────────────────────────────────────
 
   // POST /api/payments/stripe/checkout — create a Stripe Checkout session
+  // ── Whop payments ──────────────────────────────────────────────────────────
+  // POST /api/payments/whop/checkout — hosted Whop checkout for a paid plan
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/checkout') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Sign in first.' }, 401);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const plan = normalizePlan(body.plan);
+    if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
+    const bi = body.interval === 'annual' || body.interval === 'yearly' ? 'annual' : 'monthly';
+    const reason = whopUnavailableReason(plan, bi);
+    if (reason) return json(res, { error: reason }, 503);
+    const appUrl = publicAppUrl(req);
+    let checkout;
+    try {
+      checkout = await createWhopCheckout({
+        planId: whopPlanId(plan, bi),
+        metadata: { userId: user.id, plan, interval: bi, email: user.email },
+        redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+      });
+    } catch (err) {
+      return json(res, { error: `Whop checkout failed: ${err.message}` }, 502);
+    }
+    // Pending row keyed by the checkout id: the webhook uses it to find who paid.
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan, amount: PLAN_PRICES[plan]?.[bi] || 0, currency: 'USD', method: 'whop',
+      txId: checkout.id, note: 'Whop checkout started', promoCode: null, discountPercent: 0,
+      interval: bi, status: 'pending', submittedAt: new Date().toISOString(),
+    }).catch((err) => console.error('[whop checkout] pending payment insert failed:', err.message));
+    audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}`, ip);
+    return json(res, { url: checkout.url });
+  }
+
+  // POST /api/payments/whop/sync — activate right after returning from checkout,
+  // without waiting for the webhook (which still arrives and is idempotent).
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/sync') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    if (whopUnavailableReason()) return json(res, { error: whopUnavailableReason() }, 503);
+    try {
+      const pending = (await getPaymentsByUser(user.id))
+        .filter((p) => p.method === 'whop' && p.status === 'pending' && String(p.tx_id || '').startsWith('ch_'));
+      if (!pending.length) return json(res, { ok: true, user: userPublic(user) });
+      const list = await listRecentWhopMemberships();
+      for (const p of pending) {
+        const m = list.find((x) => x.checkout_configuration_id === p.tx_id);
+        if (m && ['active', 'trialing'].includes(m.status)) {
+          await applyWhopMembership(m, { userId: user.id, fallbackPlan: p.plan, fallbackInterval: p.interval });
+          break;
+        }
+      }
+      return json(res, { ok: true, user: userPublic(await getUserById(user.id)) });
+    } catch (err) {
+      return json(res, { error: `Whop sync failed: ${err.message}` }, 502);
+    }
+  }
+
+  // POST /api/payments/whop/portal — Whop's own page for card/plan/cancel management
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/portal') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    if (!user.whop_membership_id) return json(res, { error: 'No Whop subscription found' }, 400);
+    try {
+      return json(res, { url: whopManageUrl(await retrieveWhopMembership(user.whop_membership_id)) });
+    } catch {
+      return json(res, { url: whopManageUrl(null) });
+    }
+  }
+
+  // POST /api/whop/webhook — Whop events (Standard Webhooks signature, raw body)
+  if (req.method === 'POST' && url.pathname === '/api/whop/webhook') {
+    const rawBody = await readRawBody(req);
+    let verified;
+    try {
+      verified = verifyWhopWebhook(rawBody, req.headers);
+    } catch (err) {
+      const status = /not configured/.test(err.message) ? 503 : 400;
+      try { await insertError({ id: randomUUID(), userId: null, userName: 'whop-webhook', url: '/api/whop/webhook', errorSummary: 'Webhook rejected: ' + err.message, logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString() }); await pruneErrors(); } catch {}
+      res.writeHead(status); res.end(err.message); return;
+    }
+    const { id: deliveryId, event } = verified;
+    if (!(await claimWebhookEvent('whop', deliveryId))) { res.writeHead(200); res.end('duplicate'); return; }
+    try {
+      await handleWhopEvent(event);
+    } catch (err) {
+      console.error('[Whop webhook handler]', err.message);
+      await releaseWebhookEvent('whop', deliveryId).catch(() => {});
+      try { await insertError({ id: randomUUID(), userId: null, userName: 'whop-webhook', url: '/api/whop/webhook', errorSummary: `Webhook handler error (${event?.type}): ` + err.message, logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString() }); await pruneErrors(); } catch {}
+      // 500 so Whop retries; an acked event is never resent.
+      res.writeHead(500); res.end('handler error'); return;
+    }
+    res.writeHead(200); res.end('ok'); return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/payments/stripe/checkout') {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Sign in first.' }, 401);
@@ -7432,6 +7668,7 @@ async function ensureInit() {
   _initialized = true;
 
   try {
+    await ensureLocalSchema();
     const users = await getAllUsers();
     console.log(`[DB] Local PostgreSQL connected (${users.length} users).`);
   } catch (dbErr) {
