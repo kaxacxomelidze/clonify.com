@@ -72,6 +72,110 @@ type WhopElementsFactory = (options?: unknown) => {
   checkout: { create: (options: Record<string, unknown>) => WhopCheckoutGroup };
 };
 
+/** Styling for Whop's checkout frame (Whop only applies a safe subset of CSS). */
+const CHECKOUT_CLASSES: Record<string, Record<string, string>> = {
+  "whop-CheckoutDetails": { display: "none" },
+  "whop-CheckoutCollection": { background: "transparent", padding: "0" },
+  "whop-Email": { display: "none" },
+  "whop-CheckoutCompanyPurchase": { display: "none" },
+  "whop-Payment": { background: "transparent", border: "none", padding: "0" },
+  "whop-PaymentMethods": {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: "12px",
+    border: "none",
+    background: "transparent",
+    padding: "0",
+  },
+  "whop-PaymentMethod": { display: "contents" },
+  "whop-PaymentMethodRow": {
+    gridRow: "1",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    justifyContent: "center",
+    gap: "10px",
+    minHeight: "96px",
+    padding: "18px 22px",
+    borderRadius: "20px",
+    background: "#3a3a3a",
+    border: "2px solid transparent",
+    order: "0",
+  },
+  "whop-PaymentMethodRowSelected": { background: "#232323", border: "2px solid #a3a3a3" },
+  "whop-PaymentMethodRadio": { display: "none" },
+  "whop-PaymentMethodLabel": { fontSize: "20px", fontWeight: "600" },
+  "whop-PaymentMethodDetail": {
+    gridColumn: "1 / -1",
+    gridRow: "2",
+    padding: "0",
+    border: "none",
+    background: "transparent",
+  },
+  "whop-CardLabel": { display: "none" },
+  "whop-PaymentMethodIcon": { transform: "scale(1.15)" },
+  "whop-CheckoutExpressButtons": { gap: "12px" },
+  "whop-CheckoutExpressDivider": { margin: "18px 0", color: "#9a9a9a" },
+  "whop-PaymentBillingBlock": {
+    marginTop: "6px",
+    border: "none",
+    padding: "0",
+    background: "transparent",
+  },
+  "whop-PaymentDetailRegion": { padding: "14px 0 0", border: "none", background: "transparent" },
+  "whop-PaymentCardFields": { padding: "0", border: "none" },
+  "whop-CardField": { columnGap: "12px", gap: "12px" },
+  "whop-CardFieldGroup": {
+    border: "none",
+    background: "transparent",
+    gap: "12px",
+    boxShadow: "none",
+  },
+  "whop-CardFieldRow": { gap: "12px", border: "none" },
+  "whop-CardFieldInput": {
+    margin: "0 0 12px 0",
+    background: "#323232",
+    border: "none",
+    borderRadius: "20px",
+    minHeight: "72px",
+    padding: "0 24px",
+    fontSize: "19px",
+    boxShadow: "none",
+  },
+  "whop-AddressField": { border: "none", height: "auto" },
+  "whop-AddressFieldInput": {
+    background: "#323232",
+    border: "none",
+    borderRadius: "20px",
+    minHeight: "64px",
+    padding: "0 24px",
+    fontSize: "18px",
+  },
+  "whop-AddressFieldSelect": {
+    background: "#323232",
+    border: "none",
+    borderRadius: "20px",
+    minHeight: "64px",
+    padding: "0 24px",
+    fontSize: "18px",
+  },
+  "whop-Address": {
+    gap: "12px",
+    border: "none",
+    background: "transparent",
+    boxShadow: "none",
+    padding: "0",
+  },
+  "whop-CheckoutPayButton": {
+    background: "#ffffff",
+    color: "#000000",
+    borderRadius: "999px",
+    minHeight: "60px",
+    fontSize: "18px",
+    fontWeight: "600",
+  },
+};
+
 const ELEMENTS_SRC = "https://cdn.whop.com/elements/amber/elements.js";
 let elementsLoader: Promise<WhopElementsFactory> | null = null;
 
@@ -160,9 +264,10 @@ function CheckoutPage() {
           returnUrl: `${window.location.origin}/checkout?plan=${selected}`,
           appearance: {
             theme: { appearance: "dark", accentColor: "gray", grayColor: "gray" },
-            variables: { "--radius": "14px" },
-            // Our summary card already shows the plan and price.
-            classes: { "whop-CheckoutDetails": { display: "none" } },
+            variables: { "--radius": "16px" },
+            // Big filled fields, method tiles and a white pill button. Whop's own summary
+            // and email field are hidden: our summary card and the signed-in email cover them.
+            classes: CHECKOUT_CLASSES,
           },
           onComplete: () => {
             void navigate({ to: "/dashboard/billing", search: { whop: "success" } as never });
@@ -171,6 +276,7 @@ function CheckoutPage() {
         group = checkoutGroup;
         const checkoutElement = checkoutGroup.create("checkout", {
           buyerEmail: user?.email || "",
+          lockBuyerEmail: true,
           onReady: () => !cancelled && setMounting(false),
           onError: () => {
             if (!cancelled) {

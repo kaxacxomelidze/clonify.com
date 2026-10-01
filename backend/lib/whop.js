@@ -99,6 +99,13 @@ export async function createWhopCheckout({ planId, metadata, redirectUrl }) {
     plan_id: planId,
     metadata,
     redirect_url: redirectUrl,
+    // Instant methods only: bank transfers (ACH) take days to clear, and plans
+    // are granted only once the money has arrived.
+    payment_method_configuration: {
+      enabled: ['card', 'apple_pay', 'google_pay'],
+      disabled: [],
+      include_platform_defaults: false,
+    },
   });
   const url = absoluteWhopUrl(data?.purchase_url);
   if (!url) throw new Error('Whop did not return a checkout URL');
