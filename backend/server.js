@@ -3161,6 +3161,8 @@ function userPublic(u) {
     emailVerified: u.email_verified === 1 || u.email_verified === true,
     cancelAtPeriodEnd: u.cancel_at_period_end === 1,
     hasWhopBilling: !!u.whop_membership_id,
+    // Paid plan with no subscription behind it = granted by hand (team, comp, support).
+    billingSource: !isPaidPlan(plan) ? null : u.whop_membership_id ? 'whop' : u.stripe_subscription_id ? 'stripe' : 'manual',
     createdAt: u.created_at,
   };
 }

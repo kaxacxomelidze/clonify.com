@@ -261,6 +261,8 @@ export type AuthUser = {
   cancelAtPeriodEnd?: boolean;
   /** Has a Whop subscription whose card/invoices can be managed on Whop. */
   hasWhopBilling?: boolean;
+  /** Where a paid plan comes from; "manual" means granted without a subscription. */
+  billingSource?: "whop" | "stripe" | "manual" | null;
   createdAt?: string;
 };
 
