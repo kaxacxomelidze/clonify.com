@@ -50,6 +50,9 @@ cd packages/cloner && npx tsx src/cli.ts clone <url> [options]
 | `WHOP_API_KEY` | For payments | Whop company API key (Dashboard → Developer) |
 | `WHOP_WEBHOOK_SECRET` | For payments | `ws_…` secret of the Whop webhook |
 | `WHOP_PLAN_{STARTER,GROWTH,SCALE}_{MONTHLY,ANNUAL}` | For payments | Whop plan ids (`plan_…`) for each plan/interval |
+| `WHOP_LEGACY_PLANS` | No | Retired plan ids still mapped for renewals, e.g. `plan_x:starter,plan_y:growth` |
+
+Each plan must live in its **own Whop product**: Whop allows one membership per product, so plans sharing a product block upgrades ("You already have an active membership to this product").
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | For email | Fallback when SMTP isn't set in admin settings; without it no email is sent (reset, verify, receipts) |
 | `STRIPE_*` | No | Legacy payments (replaced by Whop) |
 
