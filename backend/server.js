@@ -567,6 +567,18 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   return { user, plan, interval, renewsAt };
 }
 
+/** Whop money fields come either as numbers or as { amount: "19.99", currency } objects. */
+function whopAmount(...values) {
+  for (const v of values) {
+    const n = Number(v && typeof v === 'object' ? v.amount : v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+function whopCurrency(data) {
+  return String(data?.currency || data?.total?.currency || 'usd').toUpperCase();
+}
+
 async function handleWhopEvent(event) {
   const type = event?.type || '';
   const data = event?.data || {};
@@ -588,15 +600,25 @@ async function handleWhopEvent(event) {
     if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
     if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
     const { plan, interval } = whopPlanFor(data, user.plan, user.billing_interval);
-    await insertPayment({
-      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
-      amount: Number(data.total ?? data.usd_total ?? data.subtotal ?? 0) || 0,
-      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
-      txId: data.id || null, note: membershipId ? `Whop membership ${membershipId}` : '',
-      promoCode: null, discountPercent: 0, interval, status: 'confirmed',
-      submittedAt: new Date().toISOString(),
-    });
+    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
+    const note = membershipId ? `Whop membership ${membershipId}` : '';
+    // First payment of a checkout: complete that checkout's row instead of adding a second one.
+    const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
+    if (checkoutRow && checkoutRow.user_id === user.id) {
+      await updatePaymentFields(checkoutRow.id, {
+        status: 'confirmed', amount, currency: whopCurrency(data), tx_id: data.id || checkoutRow.tx_id,
+        processed_at: new Date().toISOString(), note,
+      });
+    } else {
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
+        amount, currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note,
+        promoCode: null, discountPercent: 0, interval, status: 'confirmed',
+        submittedAt: new Date().toISOString(),
+      });
+    }
     // Renewals: refresh the paid period from the membership itself (only the current one).
     if (membershipId && (!user.whop_membership_id || user.whop_membership_id === membershipId)) {
       try {
@@ -604,7 +626,7 @@ async function handleWhopEvent(event) {
         if (['active', 'trialing'].includes(m?.status)) await applyWhopMembership(m, { userId: user.id });
       } catch (err) { console.error('[whop] membership refresh failed:', err.message); }
     }
-    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${data.total}`, null);
+    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${whopAmount(data.total, data.usd_total, data.subtotal)}`, null);
     return;
   }
 
@@ -635,8 +657,8 @@ async function handleWhopEvent(event) {
     if (!user) return;
     await insertPayment({
       id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: normalizePlan(user.plan), amount: Number(data.total ?? 0) || 0,
-      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
+      plan: normalizePlan(user.plan), amount: whopAmount(data.total, data.usd_total, data.subtotal),
+      currency: whopCurrency(data), method: 'whop',
       txId: data.id || null, note: 'Payment failed', promoCode: null, discountPercent: 0,
       interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
     }).catch(() => {});
@@ -6778,7 +6800,10 @@ async function handleRequest(req, res) {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Not authenticated' }, 401);
     if (user.blocked) return await blockedUserResponse(res, user);
-    return json(res, { payments: await getPaymentsByUser(user.id) });
+    // Whop 'pending' rows only mark a checkout that was opened; hide the ones never paid.
+    const payments = (await getPaymentsByUser(user.id))
+      .filter((p) => !(p.method === 'whop' && p.status === 'pending'));
+    return json(res, { payments });
   }
 
   if (req.method === 'PUT' && url.pathname === '/api/user/profile') {
