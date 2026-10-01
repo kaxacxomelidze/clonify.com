@@ -17,6 +17,10 @@ COPY . .
 
 RUN npm run build
 RUN npx playwright-core install --with-deps chromium
+# The cloner resolves its own (newer) playwright-core; install the matching browser too,
+# otherwise it silently falls back to the serverless @sparticuz Chromium (--single-process),
+# which crashes under concurrent page captures and drops pages.
+RUN cd packages/cloner && npx --no-install playwright-core install --with-deps chromium
 
 RUN mkdir -p /data/output /ms-playwright && \
     chown -R node:node /app /data /ms-playwright
