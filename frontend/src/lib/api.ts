@@ -426,7 +426,7 @@ export async function fetchBillingHistory() {
 }
 
 export async function startWhopCheckout(plan: string, interval: "monthly" | "annual" = "monthly") {
-  return apiFetch<{ url: string }>("/api/payments/whop/checkout", {
+  return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/checkout", {
     method: "POST",
     body: { plan, interval },
   });
