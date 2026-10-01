@@ -39,7 +39,7 @@ import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneAr
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
   retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
-  listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS,
+  listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS, lookupWhopUser,
 } from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
@@ -1016,8 +1016,19 @@ async function ensureStripePrice(stripe, plan, interval) {
 }
 
 // ── Google OAuth state ────────────────────────────────────────────────────────
-const _oauthStates = new Map(); // state → expiresAt
-setInterval(() => { const now = Date.now(); for (const [k, v] of _oauthStates) if (now > v) _oauthStates.delete(k); }, 300000);
+const _oauthStates = new Map(); // state → { exp, affiliate }
+setInterval(() => { const now = Date.now(); for (const [k, v] of _oauthStates) if (now > v.exp) _oauthStates.delete(k); }, 300000);
+
+/** Saves the Whop affiliate who referred a new sign-up (or a user with no live referral). */
+async function rememberSignupAffiliate(user, code) {
+  const clean = cleanWhopAffiliateCode(code);
+  if (!user || !clean || clean.toLowerCase() === String(user.whop_username || '').toLowerCase()) return;
+  const live = user.whop_affiliate_code
+    && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+  if (live) return;
+  await updateUser(user.id, { whop_affiliate_code: clean, whop_affiliate_at: new Date().toISOString() }).catch(() => {});
+  _invalidateUserSessions(user.id);
+}
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 let _mailerTransport = null;
@@ -4253,7 +4264,7 @@ async function handleRequest(req, res) {
     await insertUser(user);
     await updateUser(user.id, { email_verified: 1 });
     // Whop affiliate who sent this visitor; passed to Whop at checkout so they earn the commission.
-    if (affiliateCode) await updateUser(user.id, { whop_affiliate_code: affiliateCode, whop_affiliate_at: user.createdAt });
+    await rememberSignupAffiliate(user, affiliateCode);
     const token = randomUUID();
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
@@ -6281,6 +6292,7 @@ async function handleRequest(req, res) {
       ).trim(),
       google_oauth_enabled: !!google.google_client_id,
       github_oauth_enabled: !!github.github_client_id,
+      affiliate_commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
     });
   }
 
@@ -6755,7 +6767,7 @@ async function handleRequest(req, res) {
       return;
     }
     const state = randomUUID().replace(/-/g, '');
-    _oauthStates.set(state, Date.now() + 10 * 60 * 1000); // 10 min
+    _oauthStates.set(state, { exp: Date.now() + 10 * 60 * 1000, affiliate: cleanWhopAffiliateCode(url.searchParams.get('a')) }); // 10 min
     const apiUrl = apiPublicUrl(req);
     const redirectUri = `${apiUrl}/api/auth/google/callback`;
     const params = new URLSearchParams({
@@ -6780,7 +6792,8 @@ async function handleRequest(req, res) {
     const state = url.searchParams.get('state');
     const errParam = url.searchParams.get('error');
     if (errParam || !code || !state) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=cancelled&provider=google` }); res.end(); return; }
-    if (!_oauthStates.has(state)) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=google` }); res.end(); return; }
+    const oauthState = _oauthStates.get(state);
+    if (!oauthState || Date.now() > oauthState.exp) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=google` }); res.end(); return; }
     _oauthStates.delete(state);
     try {
       const redirectUri = `${apiUrl}/api/auth/google/callback`;
@@ -6822,6 +6835,8 @@ async function handleRequest(req, res) {
         audit(newId, googleName, 'register_google', null, ip);
       }
 
+      await rememberSignupAffiliate(dbUser, oauthState.affiliate);
+
       if (dbUser.blocked) {
         const reason = encodeURIComponent(await userBlockedReason(dbUser));
         res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=google&ban_reason=${reason}` });
@@ -6853,7 +6868,7 @@ async function handleRequest(req, res) {
       return;
     }
     const state = randomUUID().replace(/-/g, '');
-    _oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+    _oauthStates.set(state, { exp: Date.now() + 10 * 60 * 1000, affiliate: cleanWhopAffiliateCode(url.searchParams.get('a')) });
     const apiUrl = apiPublicUrl(req);
     const redirectUri = `${apiUrl}/api/auth/github/callback`;
     const params = new URLSearchParams({
@@ -6880,7 +6895,8 @@ async function handleRequest(req, res) {
       res.end();
       return;
     }
-    if (!_oauthStates.has(state)) {
+    const oauthState = _oauthStates.get(state);
+    if (!oauthState || Date.now() > oauthState.exp) {
       res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=github` });
       res.end();
       return;
@@ -6975,6 +6991,8 @@ async function handleRequest(req, res) {
         audit(newId, githubName, 'register_github', null, ip);
       }
 
+      await rememberSignupAffiliate(dbUser, oauthState.affiliate);
+
       if (dbUser.blocked) {
         const reason = encodeURIComponent(await userBlockedReason(dbUser));
         res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=github&ban_reason=${reason}` });
@@ -7007,6 +7025,43 @@ async function handleRequest(req, res) {
   // POST /api/payments/stripe/checkout — create a Stripe Checkout session
   // ── Whop payments ──────────────────────────────────────────────────────────
   // POST /api/payments/whop/checkout — hosted Whop checkout for a paid plan
+  // GET/PUT /api/affiliate — the signed-in user's own Whop affiliate link.
+  if (url.pathname === '/api/affiliate' && (req.method === 'GET' || req.method === 'PUT')) {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    const view = (u) => {
+      const username = u.whop_username || '';
+      return {
+        username,
+        link: username ? `${publicAppUrl(req)}/?a=${encodeURIComponent(username)}` : '',
+        commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
+        whopUrl: 'https://whop.com',
+      };
+    };
+    if (req.method === 'GET') return json(res, view(user));
+    if (!checkRateLimit(`affiliate_save:${user.id}`, 10, 600000)) return json(res, { error: 'Too many attempts. Try again in a few minutes.' }, 429);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const raw = String(body.username || '').trim();
+    if (!raw) {
+      await updateUser(user.id, { whop_username: null });
+      _invalidateUserSessions(user.id);
+      return json(res, view({ ...user, whop_username: '' }));
+    }
+    const wanted = cleanWhopAffiliateCode(raw.replace(/^https?:\/\/(www\.)?whop\.com\/(@)?/i, '').replace(/\/.*$/, ''));
+    if (!wanted) return json(res, { error: 'Enter your Whop username (letters, numbers, dots, dashes or underscores).' }, 400);
+    let whopUser;
+    try {
+      whopUser = await lookupWhopUser(wanted);
+    } catch (err) {
+      return json(res, { error: `Could not reach Whop to check that username: ${err.message}` }, 502);
+    }
+    if (!whopUser) return json(res, { error: `No Whop account is called "${wanted}". Check the username on your Whop profile.`, code: 'whop_user_not_found' }, 400);
+    await updateUser(user.id, { whop_username: whopUser.username });
+    _invalidateUserSessions(user.id);
+    audit(user.id, user.name, 'affiliate_username_set', whopUser.username, ip);
+    return json(res, { ...view({ ...user, whop_username: whopUser.username }), whopName: whopUser.name });
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/payments/whop/checkout') {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Sign in first.' }, 401);
@@ -7029,7 +7084,9 @@ async function handleRequest(req, res) {
     const linkedCode = cleanWhopAffiliateCode(body.affiliate);
     const savedFresh = user.whop_affiliate_code
       && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
-    const affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
+    let affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
+    // Affiliates don't earn commission on their own purchases.
+    if (affiliateCode && affiliateCode.toLowerCase() === String(user.whop_username || '').toLowerCase()) affiliateCode = '';
     let checkout;
     try {
       checkout = await createWhopCheckout({
@@ -7044,6 +7101,7 @@ async function handleRequest(req, res) {
     // Remember a link code only once Whop has accepted it as a real affiliate.
     if (linkedCode && checkout.affiliateCode === linkedCode && linkedCode !== user.whop_affiliate_code) {
       await updateUser(user.id, { whop_affiliate_code: linkedCode, whop_affiliate_at: new Date().toISOString() }).catch(() => {});
+      _invalidateUserSessions(user.id);
     }
     // Pending row keyed by the checkout id: the webhook uses it to find who paid.
     await insertPayment({
@@ -7404,6 +7462,7 @@ async function handleRequest(req, res) {
       { loc: `${host}/`,           changefreq: 'weekly',  priority: '1.0' },
       { loc: `${host}/fr`,         changefreq: 'weekly',  priority: '0.8' },
       { loc: `${host}/register`,   changefreq: 'monthly', priority: '0.6' },
+      { loc: `${host}/affiliates`, changefreq: 'monthly', priority: '0.5' },
       { loc: `${host}/login`,      changefreq: 'monthly', priority: '0.4' },
       { loc: `${host}/privacy`,    changefreq: 'monthly', priority: '0.3' },
       { loc: `${host}/terms`,      changefreq: 'monthly', priority: '0.3' },

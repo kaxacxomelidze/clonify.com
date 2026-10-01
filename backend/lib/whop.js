@@ -134,6 +134,19 @@ export async function createWhopCheckout({ planId, metadata, redirectUrl, affili
   return { id: data.id, url, affiliateCode };
 }
 
+/** Public profile of a Whop user by username, or null when no such user exists. */
+export async function lookupWhopUser(username) {
+  const name = cleanWhopAffiliateCode(username);
+  if (!name) return null;
+  try {
+    const u = await whopRequest('GET', `/users/${encodeURIComponent(name)}`);
+    return u?.username ? { id: u.id, username: u.username, name: u.name || '' } : null;
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+}
+
 export function retrieveWhopMembership(membershipId) {
   return whopRequest('GET', `/memberships/${encodeURIComponent(membershipId)}`);
 }

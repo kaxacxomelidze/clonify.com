@@ -18,6 +18,7 @@ const COLS = [
   {
     title: "Company",
     links: [
+      { label: "Affiliates", href: "/affiliates" },
       { label: "Support", href: "mailto:support@clonyfy.com" },
       { label: "Privacy", href: "/privacy" },
       { label: "Terms", href: "/terms" },

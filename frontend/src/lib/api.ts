@@ -323,12 +323,35 @@ export async function logoutRequest() {
   }
 }
 
+/** Carries the Whop affiliate code through OAuth so it is saved on the new account. */
+function oauthAffiliateQuery() {
+  const code = getAffiliateCode();
+  return code ? `?a=${encodeURIComponent(code)}` : "";
+}
+
 export function googleAuthUrl() {
-  return `${getApiBaseUrl()}/api/auth/google`;
+  return `${getApiBaseUrl()}/api/auth/google${oauthAffiliateQuery()}`;
 }
 
 export function githubAuthUrl() {
-  return `${getApiBaseUrl()}/api/auth/github`;
+  return `${getApiBaseUrl()}/api/auth/github${oauthAffiliateQuery()}`;
+}
+
+export type AffiliateInfo = {
+  username: string;
+  link: string;
+  commission: string;
+  whopUrl: string;
+  whopName?: string;
+};
+
+export async function fetchAffiliate() {
+  return apiFetch<AffiliateInfo>("/api/affiliate");
+}
+
+/** Validates the Whop username with Whop and saves it; empty string removes it. */
+export async function saveAffiliateUsername(username: string) {
+  return apiFetch<AffiliateInfo>("/api/affiliate", { method: "PUT", body: { username } });
 }
 
 export type CloneJobResponse = {
@@ -654,6 +677,7 @@ export async function fetchPublicConfig() {
     figma_community_plugin_url?: string;
     google_oauth_enabled?: boolean;
     github_oauth_enabled?: boolean;
+    affiliate_commission?: string;
   }>("/api/public-config", { auth: false });
 }
 
