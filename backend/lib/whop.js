@@ -115,6 +115,27 @@ export async function listRecentWhopMemberships(limit = 50) {
   return Array.isArray(data?.data) ? data.data : [];
 }
 
+let accountIdPromise = null;
+/** The biz_ account this API key belongs to (list endpoints need it). */
+export function whopAccountId() {
+  if (process.env.WHOP_ACCOUNT_ID) return Promise.resolve(process.env.WHOP_ACCOUNT_ID);
+  accountIdPromise ??= whopRequest('GET', '/accounts/me')
+    .then((a) => a?.id)
+    .catch((err) => { accountIdPromise = null; throw err; });
+  return accountIdPromise;
+}
+
+/** Most recent payments (newest first), with their status and checkout id. */
+export async function listRecentWhopPayments(limit = 50) {
+  const accountId = await whopAccountId();
+  const data = await whopRequest('GET', `/payments?account_id=${encodeURIComponent(accountId)}&first=${limit}`);
+  return Array.isArray(data?.data) ? data.data : [];
+}
+
+export function retrieveWhopPayment(paymentId) {
+  return whopRequest('GET', `/payments/${encodeURIComponent(paymentId)}`);
+}
+
 export function cancelWhopMembership(membershipId, mode = 'at_period_end') {
   return whopRequest('POST', `/memberships/${encodeURIComponent(membershipId)}/cancel`, {
     cancellation_mode: mode,

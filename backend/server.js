@@ -39,7 +39,8 @@ import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './l
 import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
-  retrieveWhopMembership, cancelWhopMembership, listRecentWhopMemberships, whopManageUrl, verifyWhopWebhook,
+  retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
+  listRecentWhopPayments, retrieveWhopPayment,
 } from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
@@ -537,6 +538,13 @@ async function retireReplacedWhopMembership(user, oldMembershipId, newMembership
   }
 }
 
+/** True once Whop reported a settled payment for this membership (recorded by payment.succeeded). */
+async function hasPaidWhopPayment(userId, membershipId) {
+  const rows = await getPaymentsByUser(userId).catch(() => []);
+  return rows.some((p) => p.method === 'whop' && p.status === 'confirmed' && Number(p.amount) > 0
+    && String(p.tx_id || '').startsWith('pay_') && String(p.note || '').includes(membershipId));
+}
+
 /** Grant the paid plan for an active Whop membership. Idempotent. */
 async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fallbackInterval = null } = {}) {
   let user = userId ? await getUserById(userId) : null;
@@ -584,23 +592,30 @@ async function handleWhopEvent(event) {
   const data = event?.data || {};
 
   if (type === 'membership.activated') {
+    // A membership alone is not money: the plan is granted from payment.succeeded. This
+    // event only refreshes dates when that payment was already recorded (events can arrive
+    // in either order).
     if (!['active', 'trialing'].includes(data.status)) return;
-    const { user, plan, renewsAt, ignored } = await applyWhopMembership(data);
-    if (ignored) return;
-    audit(user.id, user.name, 'whop_membership_activated', `plan=${plan} membership=${data.id}`, null);
-    sendEmail(user.email, `Your ${getPlanLabel(plan)} plan is active`,
-      renderEmail('payment-confirmed', { SUBJECT: `${getPlanLabel(plan)} plan activated`, NAME: user.name, PLAN: getPlanLabel(plan), AMOUNT: '', INTERVAL: '', RENEWS_AT: renewsAt ? renewsAt.toLocaleDateString() : '' })
-    ).catch(() => {});
+    const { user } = await resolveWhopUser(data, data.id);
+    if (!user || !(await hasPaidWhopPayment(user.id, data.id))) return;
+    await applyWhopMembership(data, { userId: user.id });
     return;
   }
 
   if (type === 'payment.succeeded') {
     const membershipId = data.membership?.id || null;
+    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
+    // Only money that actually arrived upgrades anyone: paid status, a real amount, one of our plans.
+    const settled = (data.status ? data.status === 'paid' : true) && (data.substatus ? data.substatus === 'succeeded' : true);
+    const mappedPlan = planFromWhopPlanId(data.plan?.id);
+    if (!settled || amount <= 0 || !mappedPlan) {
+      console.log(`[whop] payment ${data.id} ignored (status=${data.status}/${data.substatus} amount=${amount} plan=${data.plan?.id})`);
+      return;
+    }
     const { user } = await resolveWhopUser(data, membershipId);
     if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
     if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
-    const { plan, interval } = whopPlanFor(data, user.plan, user.billing_interval);
-    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
+    const { plan, interval } = mappedPlan;
     const note = membershipId ? `Whop membership ${membershipId}` : '';
     // First payment of a checkout: complete that checkout's row instead of adding a second one.
     const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
@@ -619,12 +634,16 @@ async function handleWhopEvent(event) {
         submittedAt: new Date().toISOString(),
       });
     }
-    // Renewals: refresh the paid period from the membership itself (only the current one).
-    if (membershipId && (!user.whop_membership_id || user.whop_membership_id === membershipId)) {
-      try {
-        const m = await retrieveWhopMembership(membershipId);
-        if (['active', 'trialing'].includes(m?.status)) await applyWhopMembership(m, { userId: user.id });
-      } catch (err) { console.error('[whop] membership refresh failed:', err.message); }
+    // Paid: grant/extend the plan. Prefer the membership's own dates; if Whop hasn't
+    // exposed it yet, use the payment (applyWhopMembership never lowers a plan).
+    if (membershipId) {
+      let m = null;
+      try { m = await retrieveWhopMembership(membershipId); } catch (err) { console.error('[whop] membership fetch failed:', err.message); }
+      if (!m || !['active', 'trialing'].includes(m.status)) {
+        m = { id: membershipId, status: 'active', plan: data.plan, user: data.user, metadata: data.metadata,
+          checkout_configuration_id: data.checkout_configuration_id, renewal_period_end: null, cancel_at_period_end: false };
+      }
+      await applyWhopMembership(m, { userId: user.id, fallbackPlan: plan, fallbackInterval: interval });
     }
     audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${whopAmount(data.total, data.usd_total, data.subtotal)}`, null);
     return;
@@ -6209,8 +6228,23 @@ async function handleRequest(req, res) {
     const user = await getUserById(userId);
     if (!user) return json(res, { error: 'User not found' }, 404);
     const fields = {};
-    if (body.plan !== undefined) fields.plan = normalizePlan(body.plan);
-    if (body.planRenewsAt !== undefined) fields.plan_renews_at = body.planRenewsAt;
+    // Paid access comes only from a settled Whop payment: admins may lower a plan or
+    // shorten paid time, never raise or extend it.
+    if (body.plan !== undefined) {
+      const nextPlan = normalizePlan(body.plan);
+      if (planRank(nextPlan) > planRank(user.plan)) {
+        return json(res, { error: 'Plans can only be upgraded by a confirmed Whop payment.' }, 403);
+      }
+      fields.plan = nextPlan;
+    }
+    if (body.planRenewsAt !== undefined) {
+      const next = body.planRenewsAt ? Date.parse(body.planRenewsAt) : null;
+      const current = user.plan_renews_at ? Date.parse(user.plan_renews_at) : null;
+      if (next !== null && (Number.isNaN(next) || current === null || next > current)) {
+        return json(res, { error: 'Paid time can only be extended by a confirmed Whop payment.' }, 403);
+      }
+      fields.plan_renews_at = body.planRenewsAt;
+    }
     if (body.billingInterval !== undefined) fields.billing_interval = body.billingInterval;
     if (body.blocked !== undefined) {
       fields.blocked = body.blocked ? 1 : 0;
@@ -6475,43 +6509,8 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/payments/submit') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to submit a payment.' }, 401);
-    if (!checkRateLimit(`pay_submit:${ip}`, 5, 3600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const body = await readJsonBody(req);
-    const plan = normalizePlan(body.plan);
-    const { method, txId, note, promoCode, interval } = body;
-    if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
-    const billingInterval = interval === 'annual' ? 'annual' : 'monthly';
-    const validMethods = ['paypal', 'crypto_btc', 'crypto_eth', 'crypto_usdt'];
-    if (!method || !validMethods.includes(method)) return json(res, { error: 'Invalid payment method.' }, 400);
-    if (!txId || String(txId).trim().length < 4) return json(res, { error: 'Transaction ID is required.' }, 400);
-    if (await getPendingPaymentByUserPlan(user.id, plan, 'pending')) return json(res, { error: 'You already have a pending payment for this plan. Please wait for confirmation.' }, 409);
-    let discountPercent = 0, appliedCode = null;
-    if (promoCode) {
-      const codeRow = await getPromoCode(String(promoCode).toUpperCase().trim());
-      if (codeRow &&
-          (!codeRow.valid_until || new Date(codeRow.valid_until) > new Date()) &&
-          (!codeRow.max_uses || codeRow.used_count < codeRow.max_uses) &&
-          (!codeRow.plans || codeRow.plans === '[]' || safeJsonParse(codeRow.plans).includes(plan))) {
-        discountPercent = codeRow.discount_percent || 0;
-        appliedCode = codeRow.code;
-        await incrementPromoUsed(codeRow.code);
-      }
-    }
-    const prices = getPlanPrices(plan);
-    const baseAmount = prices[billingInterval] || 0;
-    const amount = Math.round(Math.max(0, baseAmount * (1 - discountPercent / 100)) * 100) / 100;
-    const payment = {
-      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan, amount, currency: 'USD', method, txId: String(txId).trim(),
-      note: String(note || '').trim().slice(0, 500),
-      promoCode: appliedCode, discountPercent, interval: billingInterval,
-      status: 'pending', submittedAt: new Date().toISOString(),
-    };
-    await insertPayment(payment);
-    audit(user.id, user.name, 'payment_submit', `plan=${plan} interval=${billingInterval} amount=${amount}`, ip);
-    return json(res, { ok: true, id: payment.id });
+    // Manual (crypto/PayPal) payments are discontinued: every purchase goes through Whop.
+    return json(res, { error: 'Payments are processed by Whop. Choose a plan on the Billing page.' }, 410);
   }
 
   if (req.method === 'GET' && url.pathname === '/api/admin/payments') {
@@ -6541,6 +6540,10 @@ async function handleRequest(req, res) {
     if (!['confirmed', 'rejected'].includes(status)) return json(res, { error: 'Invalid status' }, 400);
     const payment = await getPaymentById(payId);
     if (!payment) return json(res, { error: 'Payment not found' }, 404);
+    // Confirming by hand would grant a plan without money: Whop confirms its own payments.
+    if (status === 'confirmed') {
+      return json(res, { error: 'Payments are confirmed automatically when Whop reports the money arrived.' }, 403);
+    }
     const processedAt = new Date().toISOString();
     await updatePayment({ id: payId, status, processedAt, reason: String(reason || '').trim().slice(0, 500) });
     if (status === 'confirmed' && payment.user_id) {
@@ -7284,11 +7287,12 @@ async function handleRequest(req, res) {
       const pending = (await getPaymentsByUser(user.id))
         .filter((p) => p.method === 'whop' && p.status === 'pending' && String(p.tx_id || '').startsWith('ch_'));
       if (!pending.length) return json(res, { ok: true, user: userPublic(user) });
-      const list = await listRecentWhopMemberships();
+      // Same gate as the webhook: only a settled Whop payment for this checkout counts.
+      const payments = await listRecentWhopPayments();
       for (const p of pending) {
-        const m = list.find((x) => x.checkout_configuration_id === p.tx_id);
-        if (m && ['active', 'trialing'].includes(m.status)) {
-          await applyWhopMembership(m, { userId: user.id, fallbackPlan: p.plan, fallbackInterval: p.interval });
+        const paid = payments.find((x) => x.checkout_configuration_id === p.tx_id && x.status === 'paid' && x.substatus === 'succeeded');
+        if (paid) {
+          await handleWhopEvent({ type: 'payment.succeeded', data: await retrieveWhopPayment(paid.id) });
           break;
         }
       }
