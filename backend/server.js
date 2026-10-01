@@ -1025,10 +1025,23 @@ setInterval(() => { const now = Date.now(); for (const [k, v] of _oauthStates) i
 // ── Email ─────────────────────────────────────────────────────────────────────
 let _mailerTransport = null;
 let _mailerKey = '';
+/** SMTP config: admin settings first, then SMTP_* env vars (as for the OAuth keys). */
+function getMailSettings(raw = getCachedSettings()) {
+  return {
+    smtp_host: cleanSettingValue(raw.smtp_host) || envFirst('SMTP_HOST'),
+    smtp_port: cleanSettingValue(raw.smtp_host) ? raw.smtp_port : (envFirst('SMTP_PORT') || raw.smtp_port),
+    smtp_user: cleanSettingValue(raw.smtp_user) || envFirst('SMTP_USER'),
+    smtp_pass: cleanSettingValue(raw.smtp_pass) || envFirst('SMTP_PASS'),
+    smtp_from: cleanSettingValue(raw.smtp_from) || envFirst('SMTP_FROM'),
+    smtp_secure: raw.smtp_secure || envFirst('SMTP_SECURE'),
+  };
+}
+
 async function sendEmail(to, subject, html) {
-  const s = getCachedSettings();
+  const s = getMailSettings();
   if (!s.smtp_host || !nodemailer) {
-    console.log(`\n[Email → ${to}]\nSubject: ${subject}\n${html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()}\n`);
+    // Never log the body: it can carry password-reset and verification tokens.
+    console.log(`[Email not sent — SMTP not configured] to=${to} subject=${JSON.stringify(subject)}`);
     return;
   }
   const key = `${s.smtp_host}:${s.smtp_port}:${s.smtp_user}:${s.smtp_pass}:${s.smtp_secure}`;
@@ -1036,7 +1049,7 @@ async function sendEmail(to, subject, html) {
     _mailerTransport = nodemailer.createTransport({
       host: s.smtp_host,
       port: parseInt(s.smtp_port, 10) || 587,
-      secure: s.smtp_secure === true || s.smtp_secure === '1' || s.smtp_secure === 'true' || s.smtp_port === '465',
+      secure: s.smtp_secure === true || s.smtp_secure === '1' || s.smtp_secure === 'true' || String(s.smtp_port) === '465',
       auth: s.smtp_user ? { user: s.smtp_user, pass: s.smtp_pass } : undefined,
     });
     _mailerKey = key;
@@ -7634,7 +7647,7 @@ async function handleRequest(req, res) {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     return json(res, {
       adminPasswordSet: !!ADMIN_PASSWORD,
-      smtpConfigured: !!(getCachedSettings().smtp_host),
+      smtpConfigured: !!getMailSettings().smtp_host,
       stripeConfigured: !!(getStripeSettings().stripe_secret_key),
       stripeError: stripeUnavailableReason(),
       appUrlConfigured: !!(getCachedSettings().app_url),
