@@ -657,9 +657,10 @@ async function handleWhopEvent(event) {
     if (!user) return;
     await insertPayment({
       id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: normalizePlan(user.plan), amount: whopAmount(data.total, data.usd_total, data.subtotal),
+      plan: (() => { const p = whopPlanFor(data, user.plan, user.billing_interval).plan; return isPaidPlan(p) ? p : normalizePlan(user.plan); })(),
+      amount: whopAmount(data.total, data.usd_total, data.subtotal),
       currency: whopCurrency(data), method: 'whop',
-      txId: data.id || null, note: 'Payment failed', promoCode: null, discountPercent: 0,
+      txId: data.id || null, note: data.failure_message ? `Payment failed: ${String(data.failure_message).slice(0, 200)}` : 'Payment failed', promoCode: null, discountPercent: 0,
       interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
     }).catch(() => {});
     let portalUrl = publicAppUrl() + '/dashboard/billing';
