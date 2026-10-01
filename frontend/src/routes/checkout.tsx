@@ -11,7 +11,6 @@ import {
   Lock,
   PenTool,
   Plug,
-  ShieldCheck,
 } from "lucide-react";
 import { BrandMark } from "@/components/site/brand";
 import { PLAN_RANK, PLANS } from "@/components/dashboard/data";
@@ -34,12 +33,6 @@ export const Route = createFileRoute("/checkout")({
   }),
   component: CheckoutPage,
 });
-
-const TAGLINES: Record<PlanKey, string> = {
-  starter: "For testing on real projects",
-  growth: "For teams shipping every week",
-  unlimited: "For high-volume cloning",
-};
 
 /** The summary card's "top features", with an icon each. */
 const TOP_FEATURES: Record<PlanKey, Array<{ icon: typeof Check; text: string }>> = {
@@ -72,108 +65,53 @@ type WhopElementsFactory = (options?: unknown) => {
   checkout: { create: (options: Record<string, unknown>) => WhopCheckoutGroup };
 };
 
-/** Styling for Whop's checkout frame (Whop only applies a safe subset of CSS). */
+/**
+ * Stripe-style compact form inside Whop's frame (Whop applies only a safe subset of CSS).
+ * Whop's own summary, email and company checkbox are hidden: the left column and the
+ * signed-in email cover them.
+ */
 const CHECKOUT_CLASSES: Record<string, Record<string, string>> = {
   "whop-CheckoutDetails": { display: "none" },
   "whop-CheckoutCollection": { background: "transparent", padding: "0" },
   "whop-Email": { display: "none" },
   "whop-CheckoutCompanyPurchase": { display: "none" },
   "whop-Payment": { background: "transparent", border: "none", padding: "0" },
-  "whop-PaymentMethods": {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: "12px",
-    border: "none",
-    background: "transparent",
-    padding: "0",
-  },
-  "whop-PaymentMethod": { display: "contents" },
+  "whop-PaymentMethods": { border: "none", background: "transparent", padding: "0", gap: "10px" },
   "whop-PaymentMethodRow": {
-    gridRow: "1",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    justifyContent: "center",
-    gap: "10px",
-    minHeight: "96px",
-    padding: "18px 22px",
-    borderRadius: "20px",
-    background: "#3a3a3a",
-    border: "2px solid transparent",
-    order: "0",
+    minHeight: "44px",
+    padding: "10px 14px",
+    borderRadius: "10px",
+    border: "1px solid #2a2a2a",
+    background: "transparent",
   },
-  "whop-PaymentMethodRowSelected": { background: "#232323", border: "2px solid #a3a3a3" },
+  "whop-PaymentMethodRowSelected": { border: "1px solid #3a3a3a", background: "#141414" },
   "whop-PaymentMethodRadio": { display: "none" },
-  "whop-PaymentMethodLabel": { fontSize: "20px", fontWeight: "600" },
-  "whop-PaymentMethodDetail": {
-    gridColumn: "1 / -1",
-    gridRow: "2",
-    padding: "0",
-    border: "none",
-    background: "transparent",
-  },
-  "whop-CardLabel": { display: "none" },
-  "whop-PaymentMethodIcon": { transform: "scale(1.15)" },
-  "whop-CheckoutExpressButtons": { gap: "12px" },
-  "whop-CheckoutExpressDivider": { margin: "18px 0", color: "#9a9a9a" },
-  "whop-PaymentBillingBlock": {
-    marginTop: "6px",
-    border: "none",
-    padding: "0",
-    background: "transparent",
-  },
-  "whop-PaymentDetailRegion": { padding: "14px 0 0", border: "none", background: "transparent" },
-  "whop-PaymentCardFields": { padding: "0", border: "none" },
-  "whop-CardField": { columnGap: "12px", gap: "12px" },
+  "whop-PaymentMethodLabel": { fontSize: "14px", fontWeight: "500" },
+  "whop-PaymentMethodDetail": { padding: "0", border: "none", background: "transparent" },
+  "whop-PaymentDetailRegion": { padding: "16px 0 0", border: "none", background: "transparent" },
+  "whop-CardLabel": { fontSize: "13px", color: "#a1a1a1", fontWeight: "500" },
   "whop-CardFieldGroup": {
-    border: "none",
-    background: "transparent",
-    gap: "12px",
-    boxShadow: "none",
+    borderRadius: "10px",
+    border: "1px solid #2a2a2a",
+    background: "#0f0f0f",
   },
-  "whop-CardFieldRow": { gap: "12px", border: "none" },
-  "whop-CardFieldInput": {
-    margin: "0 0 12px 0",
-    background: "#323232",
-    border: "none",
-    borderRadius: "20px",
-    minHeight: "72px",
-    padding: "0 24px",
-    fontSize: "19px",
-    boxShadow: "none",
-  },
-  "whop-AddressField": { border: "none", height: "auto" },
-  "whop-AddressFieldInput": {
-    background: "#323232",
-    border: "none",
-    borderRadius: "20px",
-    minHeight: "64px",
-    padding: "0 24px",
-    fontSize: "18px",
-  },
-  "whop-AddressFieldSelect": {
-    background: "#323232",
-    border: "none",
-    borderRadius: "20px",
-    minHeight: "64px",
-    padding: "0 24px",
-    fontSize: "18px",
-  },
-  "whop-Address": {
-    gap: "12px",
-    border: "none",
-    background: "transparent",
-    boxShadow: "none",
-    padding: "0",
-  },
+  "whop-CardFieldInput": { minHeight: "44px", fontSize: "15px" },
+  "whop-PaymentBillingBlock": { border: "none", padding: "0", background: "transparent" },
+  "whop-AddressField": { background: "#0f0f0f" },
+  "whop-AddressFieldInput": { minHeight: "44px", fontSize: "15px", background: "transparent" },
+  "whop-AddressFieldSelect": { minHeight: "44px", fontSize: "15px", background: "transparent" },
+  "whop-AddressManualEntry": { fontSize: "12px", color: "#8a8a8a" },
+  "whop-CheckoutExpressButtons": { gap: "10px" },
+  "whop-CheckoutExpressDivider": { color: "#7a7a7a", fontSize: "12px" },
   "whop-CheckoutPayButton": {
-    background: "#ffffff",
-    color: "#000000",
-    borderRadius: "999px",
-    minHeight: "60px",
-    fontSize: "18px",
+    background: "#fafafa",
+    color: "#0a0a0a",
+    borderRadius: "10px",
+    minHeight: "48px",
+    fontSize: "15px",
     fontWeight: "600",
   },
+  "whop-CheckoutTerms": { fontSize: "12px", color: "#8a8a8a" },
 };
 
 const ELEMENTS_SRC = "https://cdn.whop.com/elements/amber/elements.js";
@@ -264,7 +202,7 @@ function CheckoutPage() {
           returnUrl: `${window.location.origin}/checkout?plan=${selected}`,
           appearance: {
             theme: { appearance: "dark", accentColor: "gray", grayColor: "gray" },
-            variables: { "--radius": "16px" },
+            variables: { "--radius": "10px" },
             // Big filled fields, method tiles and a white pill button. Whop's own summary
             // and email field are hidden: our summary card and the signed-in email cover them.
             classes: CHECKOUT_CLASSES,
@@ -302,177 +240,185 @@ function CheckoutPage() {
   }, [selected, user?.email, navigate]);
 
   const plan = PLANS.find((p) => p.key === selected) ?? PLANS[0]!;
+  const planKey = plan.key as PlanKey;
   const price = plan.price.replace("$", "");
+  const goBack = () =>
+    window.history.length > 1 ? window.history.back() : void navigate({ to: "/dashboard/billing" });
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <header className="px-5 py-5 md:px-8">
-        <Link to="/" aria-label="Clonyfy home" className="inline-flex">
-          <BrandMark className="h-8 w-8" />
-        </Link>
-      </header>
-
-      <div className="mx-auto grid max-w-6xl gap-10 px-5 pb-20 lg:grid-cols-[minmax(0,1fr)_420px] lg:gap-16">
-        <section className="min-w-0">
-          <div className="flex items-center gap-4">
+    <main className="min-h-screen bg-background text-foreground lg:grid lg:grid-cols-2">
+      {/* Order summary — Stripe Checkout layout: what you buy on the left, how you pay on the right. */}
+      <section className="px-5 pb-8 pt-6 sm:px-8 lg:flex lg:justify-end lg:px-16 lg:py-14">
+        <div className="mx-auto w-full max-w-[420px] lg:mx-0">
+          <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={() =>
-                window.history.length > 1
-                  ? window.history.back()
-                  : void navigate({ to: "/dashboard/billing" })
-              }
+              onClick={goBack}
               aria-label="Back"
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full transition-colors hover:bg-accent"
+              className="-ml-2 grid h-9 w-9 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
-              <ArrowLeft className="h-5 w-5" />
+              <ArrowLeft className="h-[18px] w-[18px]" />
             </button>
-            <h1 className="font-display text-3xl tracking-tight md:text-4xl">
-              Configure your plan
-            </h1>
+            <Link to="/" aria-label="Clonyfy home" className="flex items-center gap-2">
+              <BrandMark className="h-6 w-6" />
+              <span className="text-sm font-medium">Clonyfy</span>
+            </Link>
           </div>
 
-          <div className="mt-10">
-            <h2 className="text-lg font-medium">Clonyfy plan</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Choose how much you clone. You can upgrade again any time.
-            </p>
-            <div role="radiogroup" aria-label="Plan" className="mt-5 grid grid-cols-3 gap-3">
-              {PLANS.map((p) => {
-                const key = p.key as PlanKey;
-                const rank = PLAN_RANK[key] ?? 0;
-                const locked = rank <= userRank;
-                const active = key === selected;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    disabled={locked}
-                    onClick={() => {
-                      setError("");
-                      setSelected(key);
-                    }}
-                    className={cn(
-                      "rounded-2xl border px-3 py-4 text-center transition-colors md:py-5",
-                      active
-                        ? "border-foreground bg-accent"
-                        : "border-transparent bg-accent/50 hover:bg-accent",
-                      locked && "cursor-not-allowed opacity-45 hover:bg-accent/50",
-                    )}
-                  >
-                    <span className="block text-lg font-semibold md:text-xl">{p.price}</span>
-                    <span className="mt-0.5 block text-sm text-muted-foreground">{p.name}</span>
-                    {locked && (
-                      <span className="mt-1 block text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                        {rank === userRank ? "Current plan" : "Included"}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+          <p className="mt-10 text-[15px] text-muted-foreground">
+            Subscribe to Clonyfy {plan.name}
+          </p>
+          <div className="mt-1 flex items-end gap-2">
+            <span className="text-[2.5rem] font-semibold leading-none tracking-tight">
+              ${price}
+            </span>
+            <span className="pb-1 text-sm leading-tight text-muted-foreground">
+              per
+              <br />
+              month
+            </span>
           </div>
 
-          <div className="mt-10">
-            <h2 className="text-lg font-medium">Pay with</h2>
-            {!selected && !loading ? (
-              <p className="mt-4 rounded-2xl bg-accent/50 p-5 text-sm text-muted-foreground">
-                You're on Scale, our top plan — there's nothing to upgrade to.{" "}
-                <Link
-                  to="/dashboard/billing"
-                  className="text-foreground underline underline-offset-4"
+          <div
+            role="radiogroup"
+            aria-label="Plan"
+            className="mt-8 grid grid-cols-3 gap-1 rounded-xl border border-border p-1"
+          >
+            {PLANS.map((p) => {
+              const key = p.key as PlanKey;
+              const rank = PLAN_RANK[key] ?? 0;
+              const locked = rank <= userRank;
+              const active = key === selected;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  disabled={locked}
+                  title={
+                    locked
+                      ? rank === userRank
+                        ? "Your current plan"
+                        : "Included in your plan"
+                      : undefined
+                  }
+                  onClick={() => {
+                    setError("");
+                    setSelected(key);
+                  }}
+                  className={cn(
+                    "rounded-lg px-2 py-2 text-sm transition-colors",
+                    active
+                      ? "bg-foreground font-medium text-background"
+                      : "text-muted-foreground hover:text-foreground",
+                    locked &&
+                      "cursor-not-allowed line-through opacity-40 hover:text-muted-foreground",
+                  )}
                 >
-                  Back to billing
-                </Link>
-              </p>
-            ) : (
-              <>
-                {error && (
-                  <div role="alert" className="mt-4 rounded-2xl border border-border p-4 text-sm">
-                    <p>{error}</p>
-                    {checkoutUrl && (
-                      <a
-                        href={checkoutUrl}
-                        className="mt-3 inline-flex rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground"
-                      >
-                        Continue on Whop
-                      </a>
-                    )}
-                  </div>
-                )}
-                {mounting && (
-                  <div aria-hidden className="mt-4 space-y-3">
-                    <div className="h-14 animate-pulse rounded-2xl bg-accent/60" />
-                    <div className="h-40 animate-pulse rounded-2xl bg-accent/60" />
-                    <div className="h-12 animate-pulse rounded-full bg-accent/60" />
-                  </div>
-                )}
-                <div ref={mountRef} className="mt-4 min-h-[1px] overflow-hidden rounded-3xl" />
-              </>
-            )}
-            <p className="mt-5 flex items-center gap-2 text-xs text-muted-foreground">
-              <Lock className="h-3.5 w-3.5" />
-              Card details go straight to Whop, our payment processor. Clonyfy never sees them.
+                  {p.name}
+                </button>
+              );
+            })}
+          </div>
+
+          <ul className="mt-8 space-y-3">
+            {TOP_FEATURES[planKey].map(({ icon: Icon, text }) => (
+              <li key={text} className="flex items-center gap-3 text-sm">
+                <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {text}
+              </li>
+            ))}
+          </ul>
+
+          <dl className="mt-8 space-y-3 border-t border-border pt-6 text-sm">
+            <div className="flex justify-between gap-4">
+              <dt>
+                Clonyfy {plan.name}
+                <span className="block text-xs text-muted-foreground">Billed monthly</span>
+              </dt>
+              <dd>${price}</dd>
+            </div>
+            <div className="flex justify-between gap-4 border-t border-border pt-3">
+              <dt className="text-muted-foreground">Subtotal</dt>
+              <dd>${price}</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-muted-foreground">Tax</dt>
+              <dd className="text-muted-foreground">Calculated at payment</dd>
+            </div>
+            <div className="flex justify-between gap-4 border-t border-border pt-3 font-medium">
+              <dt>Total due today</dt>
+              <dd>${price} + tax</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      {/* Payment */}
+      <section className="border-t border-border bg-[#0b0b0b] px-5 py-8 sm:px-8 lg:border-l lg:border-t-0 lg:px-16 lg:py-14">
+        <div className="mx-auto w-full max-w-[420px] lg:mx-0">
+          <h1 className="text-lg font-medium">Pay with card</h1>
+          <p className="mt-1 text-xs text-muted-foreground">Signed in as {user?.email}</p>
+
+          {!selected && !loading ? (
+            <p className="mt-6 rounded-xl border border-border p-4 text-sm text-muted-foreground">
+              You're on Scale, our top plan — there's nothing to upgrade to.{" "}
+              <Link
+                to="/dashboard/billing"
+                className="text-foreground underline underline-offset-4"
+              >
+                Back to billing
+              </Link>
             </p>
-          </div>
-        </section>
+          ) : (
+            <>
+              {error && (
+                <div role="alert" className="mt-6 rounded-xl border border-border p-4 text-sm">
+                  <p>{error}</p>
+                  {checkoutUrl && (
+                    <a
+                      href={checkoutUrl}
+                      className="mt-3 inline-flex rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+                    >
+                      Continue on Whop
+                    </a>
+                  )}
+                </div>
+              )}
+              {mounting && (
+                <div aria-hidden className="mt-6 space-y-3">
+                  <div className="h-11 animate-pulse rounded-[10px] bg-accent/60" />
+                  <div className="h-24 animate-pulse rounded-[10px] bg-accent/60" />
+                  <div className="h-32 animate-pulse rounded-[10px] bg-accent/60" />
+                  <div className="h-12 animate-pulse rounded-[10px] bg-accent/60" />
+                </div>
+              )}
+              <div ref={mountRef} className="mt-6 min-h-[1px]" />
+            </>
+          )}
 
-        <aside className="lg:sticky lg:top-8 lg:self-start">
-          <div className="rounded-[2rem] border border-border bg-accent/40 p-7 md:p-8">
-            <h2 className="font-display text-3xl tracking-tight">Clonyfy {plan.name}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">{TAGLINES[plan.key as PlanKey]}</p>
-
-            <p className="mt-7 text-sm font-medium">Top features</p>
-            <ul className="mt-4 space-y-4">
-              {TOP_FEATURES[plan.key as PlanKey].map(({ icon: Icon, text }) => (
-                <li key={text} className="flex items-center gap-3 text-[0.95rem]">
-                  <Icon className="h-[18px] w-[18px] shrink-0 text-muted-foreground" />
-                  {text}
-                </li>
-              ))}
-            </ul>
-
-            <div className="my-7 h-px bg-border" />
-
-            <dl className="space-y-3 text-sm">
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Monthly subscription</dt>
-                <dd>${price}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt className="text-muted-foreground">Estimated tax</dt>
-                <dd className="text-right text-muted-foreground">Based on your country</dd>
-              </div>
-              <div className="flex justify-between gap-4 pt-2 text-base font-semibold">
-                <dt>Due today</dt>
-                <dd>${price} + tax</dd>
-              </div>
-            </dl>
-          </div>
-
-          <p className="mt-5 px-2 text-xs leading-relaxed text-muted-foreground">
-            Renews monthly until canceled. US${price}/month plus any applicable tax will be charged.
-            Cancel anytime in{" "}
-            <Link to="/dashboard/billing" className="underline underline-offset-2">
-              Billing
-            </Link>
-            . By subscribing, you agree to our{" "}
-            <Link to="/terms" className="underline underline-offset-2">
-              Terms
-            </Link>{" "}
-            and{" "}
-            <Link to="/privacy" className="underline underline-offset-2">
-              Privacy Policy
-            </Link>
-            .
+          <p className="mt-6 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+            <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              Renews monthly until canceled. Cancel anytime in{" "}
+              <Link to="/dashboard/billing" className="underline underline-offset-2">
+                Billing
+              </Link>
+              . Card details go straight to Whop, our payment processor — Clonyfy never sees them.
+              By subscribing you agree to our{" "}
+              <Link to="/terms" className="underline underline-offset-2">
+                Terms
+              </Link>{" "}
+              and{" "}
+              <Link to="/privacy" className="underline underline-offset-2">
+                Privacy Policy
+              </Link>
+              .
+            </span>
           </p>
-          <p className="mt-3 flex items-center gap-2 px-2 text-xs text-muted-foreground">
-            <ShieldCheck className="h-3.5 w-3.5" /> Payments processed securely by Whop
-          </p>
-        </aside>
-      </div>
+        </div>
+      </section>
     </main>
   );
 }
