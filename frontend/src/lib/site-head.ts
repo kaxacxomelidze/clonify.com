@@ -45,7 +45,7 @@ const pages = {
 export function siteHead(language: SiteLanguage, page: keyof typeof pages = "home") {
   const { title, description } = pages[page][language];
   const url = (locale: SiteLanguage) =>
-    `https://www.clonyfy.com${localizePath(pages[page].path, locale)}`;
+    `https://clonyfy.com${localizePath(pages[page].path, locale)}`;
   return {
     meta: [
       { title },

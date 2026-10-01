@@ -24,7 +24,7 @@ import {
   getShare, insertShare, insertUsageEvent, deleteUsageEvent, countUsageEventsSince,
   getAllPromoCodes, getPromoCode, insertPromoCode, incrementPromoUsed, deletePromoCode,
   getAllErrors, insertError, deleteError, clearErrors, pruneErrors,
-  insertAudit, getAuditLog, getAuditCount, pruneAuditLog, audit,
+  insertAudit, getAuditLog, getAuditCount, pruneAuditLog, pruneAbandonedWhopCheckouts, audit,
   insertAnnouncement, getAllAnnouncements,
   insertContactSubmission, getContactSubmissions,
   getCloneByOutDir, uploadCloneFile, downloadCloneFile, saveCloneTextFile, getCloneTextFile,
@@ -233,6 +233,7 @@ function refundRateLimit(key) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of rateLimits) { if (now > v.resetAt) rateLimits.delete(k); } }, 300000);
 setInterval(async () => { try { await cleanExpiredSessions(Date.now()); } catch {} }, 3600000);
 setInterval(async () => { try { await pruneAuditLog(); } catch {} }, 3600000);
+setInterval(async () => { try { await pruneAbandonedWhopCheckouts(); } catch {} }, 3600000);
 // Evict finished jobs older than 4 hours from memory; they remain in DB and on disk.
 setInterval(() => {
   const cutoff = Date.now() - 4 * 60 * 60 * 1000;

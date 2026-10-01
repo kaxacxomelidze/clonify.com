@@ -520,6 +520,14 @@ export const getAuditLog = async (limit, offset) => {
 // forever, which is the most likely cause of an unbounded-growth Supabase
 // storage warning on a long-running install. Called on the same hourly timer
 // as session cleanup. Keeps the most recent 5000 rows.
+// Pending rows of Whop checkouts nobody finished; a late payment still finds its
+// user through the checkout metadata, so the row isn't needed after a week.
+export const pruneAbandonedWhopCheckouts = async () => {
+  const cutoff = new Date(Date.now() - 7 * 864e5).toISOString();
+  await supabase.from('payments').delete()
+    .eq('method', 'whop').eq('status', 'pending').lt('submitted_at', cutoff);
+};
+
 export const pruneAuditLog = async () => {
   const { data } = await supabase.from('audit_log')
     .select('id')

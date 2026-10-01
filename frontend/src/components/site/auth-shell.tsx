@@ -95,7 +95,7 @@ export function AuthShell({
         err instanceof ApiError
           ? err.message
           : err instanceof TypeError || (err instanceof Error && /Failed to fetch|NetworkError|abort/i.test(err.message))
-            ? tr("Cannot reach the API. The Backend may be waking up (Render free tier) — wait ~30–90s and try again. Prefer https://www.clonyfy.com.")
+            ? tr("Cannot reach the server. Check your connection and try again.")
             : mode === "login"
               ? tr("Could not log in. Check your email and password.")
               : tr("Could not create your account. Please try again.");
