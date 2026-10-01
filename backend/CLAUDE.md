@@ -51,6 +51,7 @@ cd packages/cloner && npx tsx src/cli.ts clone <url> [options]
 | `WHOP_WEBHOOK_SECRET` | For payments | `ws_…` secret of the Whop webhook |
 | `WHOP_PLAN_{STARTER,GROWTH,SCALE}_{MONTHLY,ANNUAL}` | For payments | Whop plan ids (`plan_…`) for each plan/interval |
 | `WHOP_LEGACY_PLANS` | No | Retired plan ids still mapped for renewals, e.g. `plan_x:starter,plan_y:growth` |
+| `WHOP_AFFILIATE_COMMISSION` | No | Commission shown on the affiliate pages, e.g. `30% recurring` (set the real rate in Whop) |
 
 Each plan must live in its **own Whop product**: Whop allows one membership per product, so plans sharing a product block upgrades ("You already have an active membership to this product").
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | For email | Fallback when SMTP isn't set in admin settings; without it no email is sent (reset, verify, receipts) |
@@ -62,7 +63,9 @@ Whop webhook URL: `https://<host>/api/whop/webhook` — subscribe to `membership
 Affiliates run on Whop (Dashboard → Marketing → Affiliates sets the commission; Whop pays it).
 Affiliates share `https://clonyfy.com/?a=<whop-username>`: the frontend keeps the code 30 days
 (`src/lib/affiliate.ts`), the backend saves it on the user at sign-up and sends it to Whop as
-`affiliate_code` on checkout. Whop rejects unknown usernames, so the checkout retries without one.
+`affiliate_code` on checkout (OAuth sign-ups carry it in the `state`). Whop rejects unknown usernames,
+so the checkout retries without one. Users link their own Whop username on `/dashboard/affiliates`
+(checked with `GET /users/{username}`); their own purchases never carry their code.
 
 Schema additions the code needs are applied at startup by `ensureLocalSchema()` in
 `local-supabase-compat.js` (`*.sql` is gitignored, so don't rely on migration files).

@@ -738,6 +738,8 @@ export async function ensureLocalSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_membership_id text;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_affiliate_code text;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_affiliate_at text;
+    -- The user's own Whop username when they promote Clonyfy as an affiliate.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_username text;
     -- Retired Affonso/local referral settings (affiliates now run through Whop).
     DELETE FROM settings WHERE key LIKE 'affiliate%';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;

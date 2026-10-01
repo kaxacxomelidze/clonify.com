@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AffiliatesRouteImport } from './routes/affiliates'
 import { Route as CheckoutRouteImport } from './routes/checkout'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
@@ -21,6 +22,7 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as TermsRouteImport } from './routes/terms'
 import { Route as DashboardIndexRouteImport } from './routes/dashboard.index'
 import { Route as DashboardActivityRouteImport } from './routes/dashboard.activity'
+import { Route as DashboardAffiliatesRouteImport } from './routes/dashboard.affiliates'
 import { Route as DashboardAnalyticsRouteImport } from './routes/dashboard.analytics'
 import { Route as DashboardBillingRouteImport } from './routes/dashboard.billing'
 import { Route as DashboardCalendarRouteImport } from './routes/dashboard.calendar'
@@ -39,6 +41,11 @@ import { Route as FrRegisterRouteImport } from './routes/fr.register'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AffiliatesRoute = AffiliatesRouteImport.update({
+  id: '/affiliates',
+  path: '/affiliates',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CheckoutRoute = CheckoutRouteImport.update({
@@ -94,6 +101,11 @@ const DashboardIndexRoute = DashboardIndexRouteImport.update({
 const DashboardActivityRoute = DashboardActivityRouteImport.update({
   id: '/activity',
   path: '/activity',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardAffiliatesRoute = DashboardAffiliatesRouteImport.update({
+  id: '/affiliates',
+  path: '/affiliates',
   getParentRoute: () => DashboardRoute,
 } as any)
 const DashboardAnalyticsRoute = DashboardAnalyticsRouteImport.update({
@@ -169,6 +181,7 @@ const FrRegisterRoute = FrRegisterRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/affiliates': typeof AffiliatesRoute
   '/checkout': typeof CheckoutRoute
   '/dashboard': typeof DashboardRouteWithChildren
   '/forgot-password': typeof ForgotPasswordRoute
@@ -179,6 +192,7 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/terms': typeof TermsRoute
   '/dashboard/activity': typeof DashboardActivityRoute
+  '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
   '/dashboard/calendar': typeof DashboardCalendarRoute
@@ -197,6 +211,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/affiliates': typeof AffiliatesRoute
   '/checkout': typeof CheckoutRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
@@ -205,6 +220,7 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/terms': typeof TermsRoute
   '/dashboard/activity': typeof DashboardActivityRoute
+  '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
   '/dashboard/calendar': typeof DashboardCalendarRoute
@@ -224,6 +240,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/affiliates': typeof AffiliatesRoute
   '/checkout': typeof CheckoutRoute
   '/dashboard': typeof DashboardRouteWithChildren
   '/forgot-password': typeof ForgotPasswordRoute
@@ -234,6 +251,7 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/terms': typeof TermsRoute
   '/dashboard/activity': typeof DashboardActivityRoute
+  '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
   '/dashboard/calendar': typeof DashboardCalendarRoute
@@ -254,6 +272,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/affiliates'
     | '/checkout'
     | '/dashboard'
     | '/forgot-password'
@@ -264,6 +283,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/terms'
     | '/dashboard/activity'
+    | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
     | '/dashboard/calendar'
@@ -282,6 +302,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/affiliates'
     | '/checkout'
     | '/forgot-password'
     | '/login'
@@ -290,6 +311,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/terms'
     | '/dashboard/activity'
+    | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
     | '/dashboard/calendar'
@@ -308,6 +330,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/affiliates'
     | '/checkout'
     | '/dashboard'
     | '/forgot-password'
@@ -318,6 +341,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/terms'
     | '/dashboard/activity'
+    | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
     | '/dashboard/calendar'
@@ -337,6 +361,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AffiliatesRoute: typeof AffiliatesRoute
   CheckoutRoute: typeof CheckoutRoute
   DashboardRoute: typeof DashboardRouteWithChildren
   ForgotPasswordRoute: typeof ForgotPasswordRoute
@@ -355,6 +380,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/affiliates': {
+      id: '/affiliates'
+      path: '/affiliates'
+      fullPath: '/affiliates'
+      preLoaderRoute: typeof AffiliatesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/checkout': {
@@ -432,6 +464,13 @@ declare module '@tanstack/react-router' {
       path: '/activity'
       fullPath: '/dashboard/activity'
       preLoaderRoute: typeof DashboardActivityRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/affiliates': {
+      id: '/dashboard/affiliates'
+      path: '/affiliates'
+      fullPath: '/dashboard/affiliates'
+      preLoaderRoute: typeof DashboardAffiliatesRouteImport
       parentRoute: typeof DashboardRoute
     }
     '/dashboard/analytics': {
@@ -537,6 +576,7 @@ declare module '@tanstack/react-router' {
 
 interface DashboardRouteChildren {
   DashboardActivityRoute: typeof DashboardActivityRoute
+  DashboardAffiliatesRoute: typeof DashboardAffiliatesRoute
   DashboardAnalyticsRoute: typeof DashboardAnalyticsRoute
   DashboardBillingRoute: typeof DashboardBillingRoute
   DashboardCalendarRoute: typeof DashboardCalendarRoute
@@ -553,6 +593,7 @@ interface DashboardRouteChildren {
 
 const DashboardRouteChildren: DashboardRouteChildren = {
   DashboardActivityRoute: DashboardActivityRoute,
+  DashboardAffiliatesRoute: DashboardAffiliatesRoute,
   DashboardAnalyticsRoute: DashboardAnalyticsRoute,
   DashboardBillingRoute: DashboardBillingRoute,
   DashboardCalendarRoute: DashboardCalendarRoute,
@@ -587,6 +628,7 @@ const FrRouteWithChildren = FrRoute._addFileChildren(FrRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AffiliatesRoute: AffiliatesRoute,
   CheckoutRoute: CheckoutRoute,
   DashboardRoute: DashboardRouteWithChildren,
   ForgotPasswordRoute: ForgotPasswordRoute,
