@@ -25,6 +25,17 @@ export function whopPlanId(plan, interval = 'monthly') {
   return envName ? String(process.env[envName] || '').trim() : '';
 }
 
+/**
+ * Retired plan ids that existing memberships may still renew on, as
+ * "plan_x:starter,plan_y:growth:annual" (interval defaults to monthly).
+ */
+function legacyWhopPlans() {
+  return String(process.env.WHOP_LEGACY_PLANS || '')
+    .split(',')
+    .map((entry) => entry.trim().split(':'))
+    .filter(([id, plan]) => id && PLAN_ENV[plan]);
+}
+
 /** Reverse lookup: which of our plans/intervals a Whop plan id belongs to. */
 export function planFromWhopPlanId(whopPlan) {
   const id = String(whopPlan || '').trim();
@@ -33,6 +44,9 @@ export function planFromWhopPlanId(whopPlan) {
     for (const [interval, envName] of Object.entries(intervals)) {
       if (String(process.env[envName] || '').trim() === id) return { plan, interval };
     }
+  }
+  for (const [legacyId, plan, interval] of legacyWhopPlans()) {
+    if (legacyId === id) return { plan, interval: interval === 'annual' ? 'annual' : 'monthly' };
   }
   return null;
 }
