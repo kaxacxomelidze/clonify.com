@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, extname } from 'path';
 import mime from 'mime-types';
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext, Page } from 'playwright-core';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
 import { logger } from './logger.js';
 import { isPublicUrl, safeFetch } from './ssrfGuard.js';
@@ -548,7 +548,7 @@ export async function capturePage(
   pageUrl: string,
   assetsDir: string,
   hooks: CaptureHooks = {},
-): Promise<{ record: PageRecord; links: string[] }> {
+): Promise<{ record: PageRecord; links: string[]; navLinks: string[] }> {
   ensurePlaceholderAsset(assetsDir);
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
   // Marketing/deep pages need deeper scroll even on hosted fast clones.
@@ -577,7 +577,7 @@ export async function capturePage(
       if (!IO) return;
       window.IntersectionObserver = class ForcedIntersectingObserver {
         readonly root: Element | Document | null = null;
-        readonly rootMargin = '0px';
+        readonly rootMargin: string = '0px';
         readonly thresholds: ReadonlyArray<number> = [0];
         private readonly cb: IntersectionObserverCallback;
         constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
@@ -1875,7 +1875,7 @@ export async function capturePage(
     }
   }
 
-  await page.evaluate(async (fast: boolean, carouselSkip: string, _shopifyDeep: boolean) => {
+  await page.evaluate(async ({ fast, carouselSkip }: { fast: boolean; carouselSkip: string }) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await delay(fast ? 500 : 1500);
 
@@ -1987,7 +1987,7 @@ export async function capturePage(
         style.setProperty('transform', 'none', 'important');
       }
     });
-  }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
+  }, { fast: fastScroll, carouselSkip: CAROUSEL_SKIP_SELECTOR }).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
 

@@ -30,10 +30,16 @@ export function AuthShell({
   footer: ReactNode;
 }) {
   const { t: tr, language } = useSiteLanguage();
-  const { login, register } = useAuth();
+  const { login, register, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Already signed in (e.g. clicked "Log in" or "Get started" from the landing page):
+  // skip the form instead of making the user log in again.
+  useEffect(() => {
+    if (isAuthenticated && !busy) void navigate({ to: "/dashboard", replace: true });
+  }, [isAuthenticated, busy, navigate]);
 
   useEffect(() => {
     try {
