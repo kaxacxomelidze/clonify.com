@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Check, CreditCard, Sparkles } from "lucide-react";
-import { FREE_PLAN, PLANS } from "@/components/dashboard/data";
+import { FREE_PLAN, PLAN_RANK, PLANS } from "@/components/dashboard/data";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -134,8 +134,14 @@ function BillingPage() {
   }, []);
 
   const plans = PLANS.map((plan) => ({ ...plan, current: plan.name === previewPlan }));
+  const userRank = PLAN_RANK[String(user?.plan || "free").toLowerCase()] ?? 0;
+  /** Only higher plans can be bought; the current and cheaper ones are locked. */
+  const cardState = (p: { key: string; current: boolean }) =>
+    p.current ? "current" : (PLAN_RANK[p.key] ?? 0) < userRank ? "lower" : "upgrade";
   const plan = plans.find((item) => item.current) || FREE_PLAN;
   const isPaid = planLabel !== "Free";
+  const currentKey = plan.key;
+  const hasWhopBilling = !!user?.hasWhopBilling;
   const renewsOn = user?.planRenewsAt
     ? new Date(user.planRenewsAt).toLocaleDateString("en-US", {
         month: "long",
@@ -230,15 +236,17 @@ function BillingPage() {
           </div>
 
           <div className="mt-8 flex flex-wrap gap-3">
-            <button
-              onClick={() =>
-                document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
-              }
-              className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03]"
-            >
-              <Sparkles className="h-4 w-4" />
-              Upgrade plan
-            </button>
+            {currentKey !== "unlimited" && (
+              <button
+                onClick={() =>
+                  document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
+                }
+                className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03]"
+              >
+                <Sparkles className="h-4 w-4" />
+                Upgrade plan
+              </button>
+            )}
             {isPaid && (
               <button
                 onClick={() => {
@@ -286,30 +294,52 @@ function BillingPage() {
               <CreditCard className="h-5 w-5" />
             </span>
             <span className="min-w-0">
-              <span className="block text-sm">Managed securely by Whop</span>
-              <span className="block text-xs text-muted-foreground">
-                Update cards, invoices, and tax details securely
-              </span>
+              {hasWhopBilling ? (
+                <>
+                  <span className="block text-sm">Managed securely by Whop</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Update your card, see receipts, or cancel on Whop
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="block text-sm">No card on file</span>
+                  <span className="block text-xs text-muted-foreground">
+                    You add your card securely on Whop when you choose a plan
+                  </span>
+                </>
+              )}
             </span>
           </div>
-          <button
-            onClick={() => {
-              void (async () => {
-                try {
-                  const { url } = await openBillingPortal();
-                  if (url) window.location.href = url;
-                  else toast.error("Billing portal unavailable.");
-                } catch (err) {
-                  toast.error(
-                    err instanceof ApiError ? err.message : "Could not open billing portal.",
-                  );
-                }
-              })();
-            }}
-            className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
-          >
-            Manage billing
-          </button>
+          {hasWhopBilling ? (
+            <button
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const { url } = await openBillingPortal();
+                    if (url) window.location.href = url;
+                    else toast.error("Billing portal unavailable.");
+                  } catch (err) {
+                    toast.error(
+                      err instanceof ApiError ? err.message : "Could not open billing portal.",
+                    );
+                  }
+                })();
+              }}
+              className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
+            >
+              Manage billing
+            </button>
+          ) : (
+            <button
+              onClick={() =>
+                document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
+              }
+              className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
+            >
+              {currentKey === "unlimited" ? "You're on the top plan" : "Choose a plan"}
+            </button>
+          )}
 
           <p className="eyebrow mt-8">Billing contact</p>
           <div className="mt-4 space-y-3 text-sm">
@@ -319,7 +349,7 @@ function BillingPage() {
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-muted-foreground">Plan</span>
-              <span>{user?.planLabel || planLabel}</span>
+              <span>{plan.name}</span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-muted-foreground">Next charge</span>
@@ -362,10 +392,10 @@ function BillingPage() {
               ))}
             </ul>
             <button
-              disabled={p.current}
+              disabled={cardState(p) !== "upgrade"}
               onClick={() => {
                 void (async () => {
-                  if (p.current) return;
+                  if (cardState(p) !== "upgrade") return;
                   try {
                     const { url } = await startWhopCheckout(p.key, "monthly");
                     if (url) {
@@ -386,12 +416,16 @@ function BillingPage() {
               }}
               className={cn(
                 "mt-7 w-full rounded-full py-3 text-sm transition-colors",
-                p.current
+                cardState(p) !== "upgrade"
                   ? "cursor-default border border-border text-muted-foreground"
                   : "bg-primary font-medium text-primary-foreground hover:opacity-90",
               )}
             >
-              {p.current ? "Your plan" : `Upgrade to ${p.name}`}
+              {cardState(p) === "current"
+                ? "Already purchased · your plan"
+                : cardState(p) === "lower"
+                  ? "Included in your plan"
+                  : `Upgrade to ${p.name}`}
             </button>
           </motion.div>
         ))}

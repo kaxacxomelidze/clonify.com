@@ -250,3 +250,6 @@ export const PLANS = [
 ];
 
 export const FREE_PLAN = { key: "free", name: "Free", price: "$0", cycle: "forever" };
+
+/** Upgrade order — customers can only move to a higher plan. */
+export const PLAN_RANK: Record<string, number> = { free: 0, starter: 1, growth: 2, unlimited: 3 };

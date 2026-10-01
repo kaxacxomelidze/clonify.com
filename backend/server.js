@@ -251,6 +251,11 @@ const PLAN_LIMITS = {
 };
 const USAGE_KIND_LIMIT_KEY = { edit: 'editsPerMonth', save: 'savesPerMonth', share: 'sharesPerMonth' };
 const PAID_PLAN_KEYS = ['starter', 'growth', 'unlimited'];
+/** Plan order for upgrade rules: a customer may only move to a higher rank. */
+const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
+function planRank(plan) {
+  return PLAN_RANK[normalizePlan(plan)] ?? 0;
+}
 const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', enterprise: 'unlimited' };
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
@@ -502,6 +507,27 @@ function whopPlanFor(obj, fallbackPlan, fallbackInterval) {
   return { plan: metaPlan, interval: obj?.metadata?.interval || fallbackInterval || 'monthly' };
 }
 
+/**
+ * After an upgrade the old membership would keep renewing; stop it at period end. If the
+ * API key may not cancel, record an admin error so it is cancelled by hand (no silent
+ * double billing).
+ */
+async function retireReplacedWhopMembership(user, oldMembershipId, newMembershipId) {
+  try {
+    await cancelWhopMembership(oldMembershipId, 'at_period_end');
+    audit(user.id, user.name, 'whop_membership_replaced', `old=${oldMembershipId} new=${newMembershipId}`, null);
+  } catch (err) {
+    console.error('[whop] could not cancel replaced membership', oldMembershipId, err.message);
+    try {
+      await insertError({
+        id: randomUUID(), userId: user.id, userName: user.name, url: '/api/whop/webhook',
+        errorSummary: `ACTION NEEDED: cancel old Whop membership ${oldMembershipId} for ${user.email} (upgraded to ${newMembershipId}); API cancel failed: ${err.message}`,
+        logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString(),
+      });
+    } catch {}
+  }
+}
+
 /** Grant the paid plan for an active Whop membership. Idempotent. */
 async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fallbackInterval = null } = {}) {
   let user = userId ? await getUserById(userId) : null;
@@ -511,11 +537,18 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   const { plan, interval } = whopPlanFor(m, fallbackPlan || pending?.plan, fallbackInterval || pending?.interval);
   if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${m?.plan?.id})`);
   const renewsAt = m.renewal_period_end ? new Date(m.renewal_period_end) : null;
+  const previousMembershipId = user.whop_membership_id && user.whop_membership_id !== m.id ? user.whop_membership_id : null;
+  // An older, lower membership (e.g. the one replaced by an upgrade) must never pull the user back down.
+  if (previousMembershipId && isPaidPlan(user.plan) && planRank(plan) < planRank(user.plan)) {
+    audit(user.id, user.name, 'whop_membership_ignored', `membership=${m.id} plan=${plan} kept=${normalizePlan(user.plan)}`, null);
+    return { user, plan: normalizePlan(user.plan), interval, renewsAt, ignored: true };
+  }
   await activatePaidPlanForUser(user.id, {
     plan, interval, renewsAt,
     whopMembershipId: m.id, whopUserId: m.user?.id || null,
     cancelAtPeriodEnd: m.cancel_at_period_end ? 1 : 0,
   });
+  if (previousMembershipId) await retireReplacedWhopMembership(user, previousMembershipId, m.id);
   if (m.checkout_configuration_id) {
     const p = pending || await getPaymentByTxId(m.checkout_configuration_id);
     if (p && p.status === 'pending') {
@@ -531,7 +564,8 @@ async function handleWhopEvent(event) {
 
   if (type === 'membership.activated') {
     if (!['active', 'trialing'].includes(data.status)) return;
-    const { user, plan, renewsAt } = await applyWhopMembership(data);
+    const { user, plan, renewsAt, ignored } = await applyWhopMembership(data);
+    if (ignored) return;
     audit(user.id, user.name, 'whop_membership_activated', `plan=${plan} membership=${data.id}`, null);
     sendEmail(user.email, `Your ${getPlanLabel(plan)} plan is active`,
       renderEmail('payment-confirmed', { SUBJECT: `${getPlanLabel(plan)} plan activated`, NAME: user.name, PLAN: getPlanLabel(plan), AMOUNT: '', INTERVAL: '', RENEWS_AT: renewsAt ? renewsAt.toLocaleDateString() : '' })
@@ -554,8 +588,8 @@ async function handleWhopEvent(event) {
       promoCode: null, discountPercent: 0, interval, status: 'confirmed',
       submittedAt: new Date().toISOString(),
     });
-    // Renewals: refresh the paid period from the membership itself.
-    if (membershipId) {
+    // Renewals: refresh the paid period from the membership itself (only the current one).
+    if (membershipId && (!user.whop_membership_id || user.whop_membership_id === membershipId)) {
       try {
         const m = await retrieveWhopMembership(membershipId);
         if (['active', 'trialing'].includes(m?.status)) await applyWhopMembership(m, { userId: user.id });
@@ -3094,6 +3128,7 @@ function userPublic(u) {
     billingInterval: u.billing_interval || 'monthly',
     emailVerified: u.email_verified === 1 || u.email_verified === true,
     cancelAtPeriodEnd: u.cancel_at_period_end === 1,
+    hasWhopBilling: !!u.whop_membership_id,
     createdAt: u.created_at,
   };
 }
@@ -7152,6 +7187,13 @@ async function handleRequest(req, res) {
     const plan = normalizePlan(body.plan);
     if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
     const bi = body.interval === 'annual' || body.interval === 'yearly' ? 'annual' : 'monthly';
+    if (isPaidPlan(user.plan)) {
+      const current = normalizePlan(user.plan);
+      if (plan === current) return json(res, { error: `You already have the ${getPlanLabel(current)} plan.`, code: 'already_on_plan' }, 409);
+      if (planRank(plan) < planRank(current)) {
+        return json(res, { error: `You're on ${getPlanLabel(current)}. You can only upgrade to a higher plan.`, code: 'downgrade_not_allowed' }, 409);
+      }
+    }
     const reason = whopUnavailableReason(plan, bi);
     if (reason) return json(res, { error: reason }, 503);
     const appUrl = publicAppUrl(req);
