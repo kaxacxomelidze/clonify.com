@@ -99,6 +99,13 @@ export async function createWhopCheckout({ planId, metadata, redirectUrl }) {
     plan_id: planId,
     metadata,
     redirect_url: redirectUrl,
+    // Instant methods only: bank transfers (ACH) take days to clear, and plans
+    // are granted only once the money has arrived.
+    payment_method_configuration: {
+      enabled: ['card', 'apple_pay', 'google_pay'],
+      disabled: [],
+      include_platform_defaults: false,
+    },
   });
   const url = absoluteWhopUrl(data?.purchase_url);
   if (!url) throw new Error('Whop did not return a checkout URL');
@@ -113,6 +120,27 @@ export function retrieveWhopMembership(membershipId) {
 export async function listRecentWhopMemberships(limit = 50) {
   const data = await whopRequest('GET', `/memberships?first=${limit}&order=created_at&direction=desc`);
   return Array.isArray(data?.data) ? data.data : [];
+}
+
+let accountIdPromise = null;
+/** The biz_ account this API key belongs to (list endpoints need it). */
+export function whopAccountId() {
+  if (process.env.WHOP_ACCOUNT_ID) return Promise.resolve(process.env.WHOP_ACCOUNT_ID);
+  accountIdPromise ??= whopRequest('GET', '/accounts/me')
+    .then((a) => a?.id)
+    .catch((err) => { accountIdPromise = null; throw err; });
+  return accountIdPromise;
+}
+
+/** Most recent payments (newest first), with their status and checkout id. */
+export async function listRecentWhopPayments(limit = 50) {
+  const accountId = await whopAccountId();
+  const data = await whopRequest('GET', `/payments?account_id=${encodeURIComponent(accountId)}&first=${limit}`);
+  return Array.isArray(data?.data) ? data.data : [];
+}
+
+export function retrieveWhopPayment(paymentId) {
+  return whopRequest('GET', `/payments/${encodeURIComponent(paymentId)}`);
 }
 
 export function cancelWhopMembership(membershipId, mode = 'at_period_end') {

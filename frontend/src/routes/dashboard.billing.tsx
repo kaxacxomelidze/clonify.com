@@ -140,6 +140,8 @@ function BillingPage() {
     p.current ? "current" : (PLAN_RANK[p.key] ?? 0) < userRank ? "lower" : "upgrade";
   const plan = plans.find((item) => item.current) || FREE_PLAN;
   const isPaid = planLabel !== "Free";
+  /** Paid plan granted by hand: nothing is billed, so there is nothing to charge or cancel. */
+  const isComplimentary = isPaid && user?.billingSource === "manual";
   const currentKey = plan.key;
   const hasWhopBilling = !!user?.hasWhopBilling;
   const renewsOn = user?.planRenewsAt
@@ -199,15 +201,25 @@ function BillingPage() {
               <p className="eyebrow">Current plan</p>
               <p className="mt-3 font-display text-5xl tracking-tight">{plan.name}</p>
               <p className="mt-2 text-sm text-muted-foreground">
-                {plan.price} {plan.cycle}
+                {isComplimentary ? "Complimentary access" : `${plan.price} ${plan.cycle}`}
                 {user?.planLimits?.maxPages
                   ? ` · up to ${user.planLimits.maxPages} pages per clone`
                   : ""}
-                {isPaid && renewsOn ? ` · ${cancelled ? "ends" : "renews"} ${renewsOn}` : ""}
+                {isComplimentary
+                  ? ` · ${renewsOn ? `until ${renewsOn}` : "no end date"}`
+                  : isPaid && renewsOn
+                    ? ` · ${cancelled ? "ends" : "renews"} ${renewsOn}`
+                    : ""}
               </p>
             </div>
             <span className="rounded-full bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground">
-              {!isPaid ? "Free" : cancelled ? "Cancels at period end" : "Active"}
+              {!isPaid
+                ? "Free"
+                : isComplimentary
+                  ? "Complimentary"
+                  : cancelled
+                    ? "Cancels at period end"
+                    : "Active"}
             </span>
           </div>
 
@@ -248,7 +260,7 @@ function BillingPage() {
                 Upgrade plan
               </button>
             )}
-            {isPaid && (
+            {isPaid && !isComplimentary && (
               <button
                 onClick={() => {
                   void (async () => {
@@ -353,7 +365,9 @@ function BillingPage() {
             <div className="flex justify-between gap-4">
               <span className="text-muted-foreground">Next charge</span>
               <span>
-                {isPaid && !cancelled ? `${plan.price}${renewsOn ? ` · ${renewsOn}` : ""}` : "—"}
+                {isPaid && !cancelled && !isComplimentary
+                  ? `${plan.price}${renewsOn ? ` · ${renewsOn}` : ""}`
+                  : "—"}
               </span>
             </div>
           </div>

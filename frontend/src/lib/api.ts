@@ -68,7 +68,7 @@ function isTransientNetworkError(err: unknown): boolean {
 }
 
 function wakeUpMessage() {
-  return "The Backend is waking up (common on Render free tier). Wait a moment and try again — usually 30–90 seconds.";
+  return "Cannot reach the server right now. Check your connection and try again in a moment.";
 }
 
 /**
@@ -261,6 +261,8 @@ export type AuthUser = {
   cancelAtPeriodEnd?: boolean;
   /** Has a Whop subscription whose card/invoices can be managed on Whop. */
   hasWhopBilling?: boolean;
+  /** Where a paid plan comes from; "manual" means granted without a subscription. */
+  billingSource?: "whop" | "stripe" | "manual" | null;
   createdAt?: string;
 };
 
