@@ -1,3 +1,5 @@
+import { getAffiliateCode } from "@/lib/affiliate";
+
 /** Browser-facing Backend API base (no trailing slash). */
 export function getApiBaseUrl(): string {
   const raw = String(import.meta.env["VITE_API_BASE_URL"] || "").trim().replace(/\/$/, "");
@@ -301,7 +303,7 @@ export async function registerRequest(name: string, email: string, password: str
   return apiFetch<AuthSession>("/api/auth/register", {
     method: "POST",
     auth: false,
-    body: { name, email, password },
+    body: { name, email, password, affiliate: getAffiliateCode() },
     timeoutMs: 120_000,
     retries: 3,
   });
@@ -430,7 +432,7 @@ export async function fetchBillingHistory() {
 export async function startWhopCheckout(plan: string, interval: "monthly" | "annual" = "monthly") {
   return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/checkout", {
     method: "POST",
-    body: { plan, interval },
+    body: { plan, interval, affiliate: getAffiliateCode() },
   });
 }
 
@@ -650,7 +652,6 @@ export type FigmaScene = {
 export async function fetchPublicConfig() {
   return apiFetch<{
     figma_community_plugin_url?: string;
-    affiliate_enabled?: boolean;
     google_oauth_enabled?: boolean;
     github_oauth_enabled?: boolean;
   }>("/api/public-config", { auth: false });

@@ -59,6 +59,11 @@ Each plan must live in its **own Whop product**: Whop allows one membership per 
 Whop webhook URL: `https://<host>/api/whop/webhook` — subscribe to `membership.activated`,
 `membership.deactivated`, `membership.cancel_at_period_end_changed`, `payment.succeeded`, `payment.failed`.
 
+Affiliates run on Whop (Dashboard → Marketing → Affiliates sets the commission; Whop pays it).
+Affiliates share `https://clonyfy.com/?a=<whop-username>`: the frontend keeps the code 30 days
+(`src/lib/affiliate.ts`), the backend saves it on the user at sign-up and sends it to Whop as
+`affiliate_code` on checkout. Whop rejects unknown usernames, so the checkout retries without one.
+
 Schema additions the code needs are applied at startup by `ensureLocalSchema()` in
 `local-supabase-compat.js` (`*.sql` is gitignored, so don't rely on migration files).
 
