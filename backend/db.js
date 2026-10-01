@@ -67,6 +67,7 @@ export const updateUser = async (id, fields) => {
     'email_verified','verify_token','verify_expiry','reset_token','reset_expiry',
     'blocked','blocked_reason','cancel_at_period_end','renewal_reminder_sent','usage_alert_sent',
     'google_id','github_id','stripe_customer_id','stripe_subscription_id',
+    'whop_membership_id','whop_user_id',
   ];
   const update = {};
   for (const [k, v] of Object.entries(fields)) {
@@ -99,6 +100,9 @@ export const getUserByGoogleId = (googleId) =>
 
 export const getUserByGithubId = (githubId) =>
   one(supabase.from('users').select('*').eq('github_id', String(githubId)));
+
+export const getUserByWhopMembershipId = (membershipId) =>
+  one(supabase.from('users').select('*').eq('whop_membership_id', String(membershipId)));
 
 export const getUserByStripeCustomerId = (customerId) =>
   one(supabase.from('users').select('*').eq('stripe_customer_id', customerId));
@@ -250,6 +254,14 @@ export const insertPayment = async (p) => {
     discount_percent: p.discountPercent, interval: p.interval,
     status: p.status, submitted_at: p.submittedAt,
   });
+  if (error) throw new Error(error.message);
+};
+
+export const getPaymentByTxId = (txId) =>
+  one(supabase.from('payments').select('*').eq('tx_id', String(txId)));
+
+export const updatePaymentFields = async (id, fields) => {
+  const { error } = await supabase.from('payments').update(fields).eq('id', id);
   if (error) throw new Error(error.message);
 };
 

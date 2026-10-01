@@ -47,9 +47,17 @@ cd packages/cloner && npx tsx src/cli.ts clone <url> [options]
 | `CLONYFY_HOSTED` | No | Force hosted preview (`/api/page`); set automatically on Render |
 | `CLONYFY_OUTPUT_DIR` | No | Clone output root (default `./output`; use a persistent disk path on Render) |
 | `CLONYFY_SERVERLESS` | No | Opt-in Lambda-style limits; leave unset on Render |
-| `STRIPE_*` / `SMTP_*` | No | Payments / email |
+| `WHOP_API_KEY` | For payments | Whop company API key (Dashboard → Developer) |
+| `WHOP_WEBHOOK_SECRET` | For payments | `ws_…` secret of the Whop webhook |
+| `WHOP_PLAN_{STARTER,GROWTH,SCALE}_{MONTHLY,ANNUAL}` | For payments | Whop plan ids (`plan_…`) for each plan/interval |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | For email | Fallback when SMTP isn't set in admin settings; without it no email is sent (reset, verify, receipts) |
+| `STRIPE_*` | No | Legacy payments (replaced by Whop) |
 
-Stripe webhook URL: `https://<render-service>/api/stripe/webhook`
+Whop webhook URL: `https://<host>/api/whop/webhook` — subscribe to `membership.activated`,
+`membership.deactivated`, `membership.cancel_at_period_end_changed`, `payment.succeeded`, `payment.failed`.
+
+Schema additions the code needs are applied at startup by `ensureLocalSchema()` in
+`local-supabase-compat.js` (`*.sql` is gitignored, so don't rely on migration files).
 
 Google OAuth (`google_client_id` / `google_client_secret`) is configured via admin settings in the database (not env vars).
 

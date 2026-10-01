@@ -423,15 +423,19 @@ export async function fetchBillingHistory() {
   return apiFetch<{ payments: Array<Record<string, unknown>> }>("/api/user/billing");
 }
 
-export async function startStripeCheckout(plan: string, interval: "monthly" | "yearly" = "monthly") {
-  return apiFetch<{ url: string }>("/api/payments/stripe/checkout", {
+export async function startWhopCheckout(plan: string, interval: "monthly" | "annual" = "monthly") {
+  return apiFetch<{ url: string }>("/api/payments/whop/checkout", {
     method: "POST",
     body: { plan, interval },
   });
 }
 
-export async function openStripePortal() {
-  return apiFetch<{ url: string }>("/api/payments/stripe/portal", { method: "POST" });
+export async function syncWhopCheckout() {
+  return apiFetch<{ ok: boolean; user?: AuthUser }>("/api/payments/whop/sync", { method: "POST" });
+}
+
+export async function openBillingPortal() {
+  return apiFetch<{ url: string }>("/api/payments/whop/portal", { method: "POST" });
 }
 
 export async function cancelSubscription() {

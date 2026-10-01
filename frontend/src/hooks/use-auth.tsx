@@ -135,3 +135,12 @@ export function useAuth() {
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
 }
+
+/** For marketing pages: true once the session is confirmed, and also while it is still
+ *  loading if a saved token exists — so "Log in" doesn't flash for signed-in visitors. */
+export function useSignedIn() {
+  const { isAuthenticated, loading } = useAuth();
+  const [hasToken, setHasToken] = useState(false);
+  useEffect(() => setHasToken(!!getAuthToken()), []);
+  return isAuthenticated || (loading && hasToken);
+}

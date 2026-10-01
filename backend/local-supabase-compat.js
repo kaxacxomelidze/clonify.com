@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { promises as fs } from 'fs';
+import { promises as fs, rmSync } from 'fs';
 import { resolve, join, sep, dirname } from 'path';
 
 const { Pool, types } = pg;
@@ -725,6 +725,63 @@ export function createClient() {
   };
 }
 
+
+/**
+ * Idempotent schema additions the code depends on. *.sql files are gitignored, so
+ * columns added by new features must be created here or they never reach a server.
+ */
+export async function ensureLocalSchema() {
+  const pool = getPool();
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id text;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_github_id_key ON users (github_id);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_membership_id text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
+    CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      id text PRIMARY KEY,
+      source text NOT NULL,
+      received_at timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+}
+
+/** Records a webhook delivery id; false if it was already processed (at-least-once delivery). */
+export async function claimWebhookEvent(source, id) {
+  const result = await getPool().query(
+    'INSERT INTO webhook_events (id, source) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id',
+    [`${source}:${id}`, source],
+  );
+  return result.rowCount > 0;
+}
+
+/** Forget a claimed delivery so the provider's retry is processed (handler failed). */
+export async function releaseWebhookEvent(source, id) {
+  await getPool().query('DELETE FROM webhook_events WHERE id = $1', [`${source}:${id}`]);
+}
+
+/**
+ * Removes everything stored for one clone besides its output folder: stored file
+ * copies, text-file rows, the job snapshot and share links (which would otherwise keep
+ * serving a deleted clone publicly).
+ */
+export async function purgeCloneArtifacts({ outDir, prefixes = [], jobId = null }) {
+  const pool = getPool();
+  const base = String(outDir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+  for (const prefix of prefixes) {
+    if (!/^[a-f0-9]{8,64}$/.test(prefix)) continue;
+    await pool.query("DELETE FROM settings WHERE key LIKE $1", [`clonefile:${prefix}/%`]);
+    rmSync(join(storageBase(), 'clone-files', prefix), { recursive: true, force: true });
+  }
+  if (jobId) await pool.query('DELETE FROM settings WHERE key = $1', [`clonefile:job:${jobId}`]);
+  if (outDir) {
+    await pool.query(
+      "DELETE FROM shares WHERE out_dir = $1 OR ($2 <> '' AND out_dir LIKE '%/' || $2)",
+      [String(outDir), base],
+    );
+  }
+}
 
 export async function closeLocalDatabase() {
   if (_pool) {

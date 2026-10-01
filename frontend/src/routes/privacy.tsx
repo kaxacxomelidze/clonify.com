@@ -31,7 +31,7 @@ function PrivacyPage() {
         </p>
         <p>
           Authentication uses session tokens. Google and GitHub OAuth are optional and only used when you choose
-          Sign in with Google or GitHub. Stripe processes card data when payments are enabled; Clonyfy does
+          Sign in with Google or GitHub. Payments are processed by Whop; Clonyfy does
           not store full card numbers.
         </p>
         <p>
