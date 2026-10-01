@@ -92,9 +92,21 @@ function absoluteWhopUrl(url) {
   return /^https?:\/\//i.test(url) ? url : `https://whop.com${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
-/** Creates a hosted checkout for an existing Whop plan. Returns { id, url }. */
-export async function createWhopCheckout({ planId, metadata, redirectUrl }) {
-  const data = await whopRequest('POST', '/checkout_configurations', {
+/** Attribution window for a Whop affiliate link (`?a=<username>`), matching Whop's cookie. */
+export const WHOP_AFFILIATE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** A Whop username usable as `affiliate_code`, or '' when the value can't be one. */
+export function cleanWhopAffiliateCode(value) {
+  const code = String(value || '').trim().replace(/^@/, '');
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(code) ? code : '';
+}
+
+/**
+ * Creates a hosted checkout for an existing Whop plan. Returns { id, url, affiliateCode }.
+ * An affiliate code Whop doesn't recognise is dropped rather than blocking the purchase.
+ */
+export async function createWhopCheckout({ planId, metadata, redirectUrl, affiliateCode = '' }) {
+  const body = {
     mode: 'payment',
     plan_id: planId,
     metadata,
@@ -106,10 +118,20 @@ export async function createWhopCheckout({ planId, metadata, redirectUrl }) {
       disabled: [],
       include_platform_defaults: false,
     },
-  });
+  };
+  let data;
+  if (affiliateCode) {
+    try {
+      data = await whopRequest('POST', '/checkout_configurations', { ...body, affiliate_code: affiliateCode });
+    } catch (err) {
+      if (!(err.status === 400 && /affiliate/i.test(err.message))) throw err;
+      affiliateCode = '';
+    }
+  }
+  data ??= await whopRequest('POST', '/checkout_configurations', body);
   const url = absoluteWhopUrl(data?.purchase_url);
   if (!url) throw new Error('Whop did not return a checkout URL');
-  return { id: data.id, url };
+  return { id: data.id, url, affiliateCode };
 }
 
 export function retrieveWhopMembership(membershipId) {

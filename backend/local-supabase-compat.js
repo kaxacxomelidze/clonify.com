@@ -736,6 +736,10 @@ export async function ensureLocalSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id text;
     CREATE UNIQUE INDEX IF NOT EXISTS users_github_id_key ON users (github_id);
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_membership_id text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_affiliate_code text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_affiliate_at text;
+    -- Retired Affonso/local referral settings (affiliates now run through Whop).
+    DELETE FROM settings WHERE key LIKE 'affiliate%';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
     CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
     CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);

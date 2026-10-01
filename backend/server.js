@@ -29,7 +29,6 @@ import {
   insertContactSubmission, getContactSubmissions,
   getCloneByOutDir, uploadCloneFile, downloadCloneFile, saveCloneTextFile, getCloneTextFile,
   createCloneFileSignedUrl, uploadExportZipForDownload, isStorageSizeLimitError,
-  getAffiliateOwnerBySlug, saveAffiliateSlug, getAffiliateReferrals, addAffiliateReferral, getAffiliateVisits, addAffiliateVisit,
 } from './db.js';
 import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
@@ -40,7 +39,7 @@ import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneAr
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
   retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
-  listRecentWhopPayments, retrieveWhopPayment,
+  listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS,
 } from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
@@ -61,7 +60,6 @@ const DEFAULT_APP_URL = (
 ).replace(/\/$/, '');
 // Only use an explicit override — never hardcode production domain on preview deploys.
 const CANONICAL_APP_URL = (process.env.PUBLIC_APP_URL || process.env.SHARE_BASE_URL || '').replace(/\/$/, '');
-const DEFAULT_AFFONSO_PUBLIC_ID = 'cmpj1i5tn00087mxngp80ddzy';
 
 const jobs = new Map();
 const ACTIVE_JOB_STATUSES = new Set(['running', 'saving', 'queued']);
@@ -770,8 +768,6 @@ const SETTINGS_DEFAULTS = {
   btc:'', eth:'', usdt_trc20:'', paypal_email:'', paypal_me:'', app_note:'',
   smtp_host:'', smtp_port:'587', smtp_user:'', smtp_pass:'', smtp_from:'',
   smtp_secure: false, app_url: DEFAULT_APP_URL, support_email:'',
-  affiliate_enabled:'true', affiliate_program_url:'https://affonso.io/', affiliate_public_id:DEFAULT_AFFONSO_PUBLIC_ID,
-  affiliate_program_id:'', affiliate_group_id:'', affiliate_api_key:'',
 };
 let _settingsCache = { ...SETTINGS_DEFAULTS };
 async function initSettings() { _settingsCache = await getSettings(); }
@@ -780,91 +776,6 @@ const invalidateSettingsCache = async () => {
   _settingsCache = await getSettings();
   _emailTemplateCache.clear(); // templates may reference APP_URL / SUPPORT_EMAIL from settings
 };
-
-function normalizeAffiliateUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  let parsed;
-  try {
-    parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-  } catch {
-    return null;
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-  return parsed.toString();
-}
-
-function cleanAffiliatePublicId(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  return /^[A-Za-z0-9_-]{3,180}$/.test(raw) ? raw : null;
-}
-
-function splitAffiliateName(nameOrEmail = '') {
-  const raw = String(nameOrEmail || '').trim();
-  const fallback = raw.includes('@') ? raw.split('@')[0] : raw;
-  const parts = (fallback || 'CLONYFY Partner').split(/\s+/).filter(Boolean);
-  return {
-    firstName: parts[0] || 'CLONYFY',
-    lastName: parts.slice(1).join(' ') || 'Partner',
-  };
-}
-
-function affiliateSlug(user) {
-  const raw = `${user.name || user.email || user.id || 'partner'}-${user.id || ''}`.toLowerCase();
-  const slug = raw.replace(/@.*/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-  return slug || `partner-${String(user.id || '').slice(0, 8) || 'clonyfy'}`;
-}
-
-function localReferralLink(req, user) {
-  const host = req?.headers?.['x-forwarded-host'] || req?.headers?.host || '';
-  const isLocal = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(host));
-  const base = isLocal ? `http://${host}` : publicAppUrl(req);
-  return `${String(base).replace(/\/$/, '')}/?via=${encodeURIComponent(affiliateSlug(user))}`;
-}
-
-function cleanReferralCode(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 80);
-}
-
-async function createAffonsoEmbedToken(user, settings) {
-  const names = splitAffiliateName(user.name || user.email);
-  const payload = {
-    programId: settings.affiliate_program_id,
-    partner: {
-      email: user.email,
-      name: user.name || `${names.firstName} ${names.lastName}`.trim(),
-    },
-  };
-  if (settings.affiliate_group_id) payload.groupId = settings.affiliate_group_id;
-  const affonsoRes = await fetch('https://api.affonso.io/v1/embed/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${settings.affiliate_api_key}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await affonsoRes.json().catch(() => ({}));
-  if (!affonsoRes.ok) {
-    throw new Error(data?.message || data?.error || 'Affonso could not create an embed token.');
-  }
-  const root = data.data || data;
-  return {
-    token: root.token || root.embedToken || root.publicToken || data.token || data.publicToken || '',
-    link: root.link || root.referralLink || root.referral_link || data.link || '',
-    partner: root.partner || data.partner || null,
-  };
-}
-
-async function getAffonsoEmbedData(token) {
-  const affonsoRes = await fetch(`https://api.affonso.io/v1/embed/data?token=${encodeURIComponent(token)}`);
-  const data = await affonsoRes.json().catch(() => ({}));
-  if (!affonsoRes.ok) {
-    throw new Error(data?.message || data?.error || 'Affonso dashboard data could not be loaded.');
-  }
-  return data.data || data;
-}
 
 function publicAppUrl(req = null) {
   // Explicit share-host override (optional). Prefer this only when set on purpose.
@@ -1344,22 +1255,6 @@ async function countClonePagesBestEffort(outDir) {
 }
 
 const _fileCache = new Map();
-function affonsoPixelHtml() {
-  const s = getCachedSettings();
-  const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-  const publicId = String(s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID).trim();
-  if (!enabled || !publicId) return '';
-  return `<script async defer src="https://cdn.affonso.io/js/pixel.min.js" data-affonso="${htmlEsc(publicId)}" data-cookie_duration="30"></script>`;
-}
-
-function injectAffonsoPixel(html) {
-  if (!html || /<script\b[^>]*src=["']https:\/\/cdn\.affonso\.io\/js\/pixel\.min\.js["'][^>]*>/i.test(html)) return html;
-  const script = affonsoPixelHtml();
-  if (!script) return html;
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${script}\n</head>`);
-  return `${script}\n${html}`;
-}
-
 /** Inject public frontend config (e.g. Community plugin URL after Figma publish). */
 function injectPublicRuntimeConfig(html) {
   if (!html) return html;
@@ -1384,7 +1279,6 @@ function serveFile(res, filePath, contentType, cacheSecs = 0) {
     }
     if (String(contentType || '').toLowerCase().includes('text/html')) {
       let html = data.toString('utf8');
-      html = injectAffonsoPixel(html);
       html = injectPublicRuntimeConfig(html);
       data = Buffer.from(html, 'utf8');
     }
@@ -3989,7 +3883,7 @@ function contentSecurityPolicyForPath(pathname) {
   }
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' https://cdn.affonso.io",
+    "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' fonts.googleapis.com",
     "font-src 'self' fonts.gstatic.com data:",
     "img-src 'self' data: blob: https:",
@@ -4345,7 +4239,7 @@ async function handleRequest(req, res) {
     if (!await verifyTurnstile(body.turnstileToken, ip)) {
       return json(res, { error: 'Please complete the human verification and try again.' }, 400);
     }
-    const referralCode = cleanReferralCode(body.referral || body.via || '');
+    const affiliateCode = cleanWhopAffiliateCode(body.affiliate);
     if (!name || !email || !password) return json(res, { error: 'Name, email and password are required' }, 400);
     if (password.length < 8) return json(res, { error: 'Password must be at least 8 characters' }, 400);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, { error: 'Invalid email address' }, 400);
@@ -4358,20 +4252,8 @@ async function handleRequest(req, res) {
     };
     await insertUser(user);
     await updateUser(user.id, { email_verified: 1 });
-    await saveAffiliateSlug(affiliateSlug(user), user.id);
-    if (referralCode) {
-      const ownerId = await getAffiliateOwnerBySlug(referralCode);
-      if (ownerId && ownerId !== user.id) {
-        await addAffiliateReferral(ownerId, {
-          userId: user.id,
-          name: user.name,
-          email: user.email,
-          status: 'Signed up',
-          source: referralCode,
-          createdAt: user.createdAt,
-        });
-      }
-    }
+    // Whop affiliate who sent this visitor; passed to Whop at checkout so they earn the commission.
+    if (affiliateCode) await updateUser(user.id, { whop_affiliate_code: affiliateCode, whop_affiliate_at: user.createdAt });
     const token = randomUUID();
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
@@ -6392,12 +6274,7 @@ async function handleRequest(req, res) {
     const s = getCachedSettings();
     const google = getGoogleOAuthSettings(s);
     const github = getGithubOAuthSettings(s);
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
     return json(res, {
-      affiliate_enabled: enabled,
-      affiliate_program_url: s.affiliate_program_url || 'https://affonso.io/',
-      affiliate_public_id: enabled ? (s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID) : '',
-      affiliate_dashboard_enabled: enabled && !!(s.affiliate_api_key && s.affiliate_program_id),
       figma_community_plugin_url: String(
         process.env.FIGMA_COMMUNITY_PLUGIN_URL
         || 'https://www.figma.com/community/plugin/1677522506571131225/Clonyfy-Import',
@@ -6405,98 +6282,6 @@ async function handleRequest(req, res) {
       google_oauth_enabled: !!google.google_client_id,
       github_oauth_enabled: !!github.github_client_id,
     });
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/affiliate/embed-token') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to open the affiliate dashboard.' }, 401);
-    if (!checkRateLimit(`affiliate_embed:${user.id}`, 10, 600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const s = getCachedSettings();
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-    if (!enabled) return json(res, { error: 'Affiliate program is disabled.' }, 404);
-    if (!s.affiliate_api_key || !s.affiliate_program_id) {
-      return json(res, { ok: true, token: '', link: localReferralLink(req, user), configured: false });
-    }
-    try {
-      const embed = await createAffonsoEmbedToken(user, s);
-      if (!embed.token) return json(res, { error: 'Affonso did not return an embed token.' }, 502);
-      return json(res, { ok: true, token: embed.token, link: embed.link || localReferralLink(req, user) });
-    } catch (err) {
-      return json(res, { error: err.message || 'Affonso request failed. Check the API key and program ID.' }, 502);
-    }
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/affiliate/track') {
-    const body = await readJsonBody(req);
-    const referralCode = cleanReferralCode(body.referral || body.via || '');
-    if (!referralCode) return json(res, { ok: false, error: 'Missing referral code' }, 400);
-    if (!checkRateLimit(`affiliate_track:${ip}:${referralCode}`, 30, 3600000)) return json(res, { ok: true, throttled: true });
-    const ownerId = await getAffiliateOwnerBySlug(referralCode);
-    if (!ownerId) return json(res, { ok: true, tracked: false });
-    const visitorId = cleanReferralCode(body.visitorId || createHash('sha256').update(`${ip}:${referralCode}`).digest('hex').slice(0, 32));
-    await addAffiliateVisit(ownerId, {
-      visitorId,
-      source: referralCode,
-      path: String(body.path || '').slice(0, 200),
-      userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
-      createdAt: new Date().toISOString(),
-    });
-    return json(res, { ok: true, tracked: true });
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/affiliate/dashboard') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to view your affiliate dashboard.' }, 401);
-    if (!checkRateLimit(`affiliate_dashboard:${user.id}`, 20, 600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const s = getCachedSettings();
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-    if (!enabled) return json(res, { error: 'Affiliate program is disabled.' }, 404);
-    await saveAffiliateSlug(affiliateSlug(user), user.id).catch(() => {});
-    const localReferrals = await getAffiliateReferrals(user.id).catch(() => []);
-    const localVisits = await getAffiliateVisits(user.id).catch(() => []);
-    if (!s.affiliate_api_key || !s.affiliate_program_id) {
-      return json(res, {
-        ok: true,
-        configured: false,
-        needs: ['Affonso API Key', 'Affonso Program ID'],
-        data: {
-          link: localReferralLink(req, user),
-          referralLink: localReferralLink(req, user),
-          stats: { clicks: localVisits.length, referrals: localReferrals.length, conversions: 0, rewards: 0 },
-          referrals: localReferrals,
-          visits: localVisits,
-          rewards: [],
-        },
-        message: 'Your referral link is ready. Affonso reporting will appear here after the API key and program ID are connected in Admin Settings.',
-      });
-    }
-    try {
-      const embed = await createAffonsoEmbedToken(user, s);
-      if (!embed.token) return json(res, { error: 'Affonso did not return an embed token.' }, 502);
-      const data = await getAffonsoEmbedData(embed.token);
-      const link = data.link || data.referralLink || data.referral_link || data.partner?.referralLink || embed.link || localReferralLink(req, user);
-      const affonsoReferrals = Array.isArray(data.referrals) ? data.referrals : [];
-      return json(res, {
-        ok: true,
-        configured: true,
-        token: embed.token,
-        data: {
-          ...data,
-          link,
-          referralLink: link,
-          referrals: [...localReferrals, ...affonsoReferrals],
-          visits: localVisits,
-          stats: {
-            ...(data.stats || {}),
-            clicks: Math.max(Number(data.stats?.clicks || data.stats?.visits || 0), localVisits.length),
-            referrals: Math.max(Number(data.stats?.referrals || 0), localReferrals.length + affonsoReferrals.length),
-          },
-          partner: { ...(data.partner || embed.partner || {}), referralLink: link },
-        },
-      });
-    } catch (err) {
-      return json(res, { error: err.message || 'Affonso dashboard failed to load.' }, 502);
-    }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/payments/plans') {
@@ -6645,8 +6430,6 @@ async function handleRequest(req, res) {
       'btc', 'eth', 'usdt_trc20', 'paypal_email', 'paypal_me', 'app_note',
       'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'app_url',
       'support_email',
-      'affiliate_enabled', 'affiliate_program_url', 'affiliate_public_id',
-      'affiliate_program_id', 'affiliate_group_id', 'affiliate_api_key',
       'stripe_publishable_key',
       'stripe_price_starter_monthly', 'stripe_price_starter_annual',
       'stripe_price_popular_monthly', 'stripe_price_popular_annual',
@@ -6662,22 +6445,6 @@ async function handleRequest(req, res) {
     for (const k of plainKeys) {
       if (body[k] !== undefined && !isMaskedSecret(body[k])) {
         const value = String(body[k] || '').trim();
-        if (k === 'affiliate_enabled') {
-          current[k] = value === 'true' || value === '1' || value === 'yes' ? 'true' : 'false';
-          continue;
-        }
-        if (k === 'affiliate_program_url') {
-          const cleanUrl = normalizeAffiliateUrl(value);
-          if (cleanUrl === null) return json(res, { error: 'Affiliate program URL must be a valid http(s) URL.' }, 400);
-          current[k] = cleanUrl;
-          continue;
-        }
-        if (['affiliate_public_id', 'affiliate_program_id', 'affiliate_group_id'].includes(k)) {
-          const publicId = cleanAffiliatePublicId(value);
-          if (publicId === null) return json(res, { error: 'Affonso IDs can only contain letters, numbers, underscores, and dashes.' }, 400);
-          current[k] = publicId;
-          continue;
-        }
         const stripeError = validateStripeSetting(k, value);
         if (stripeError) return json(res, { error: stripeError }, 400);
         current[k] = value;
@@ -7257,15 +7024,26 @@ async function handleRequest(req, res) {
     const reason = whopUnavailableReason(plan, bi);
     if (reason) return json(res, { error: reason }, 503);
     const appUrl = publicAppUrl(req);
+    // Whop affiliate attribution: a fresh `?a=` from the browser wins (last click),
+    // otherwise the one saved at sign-up while it's inside Whop's 30-day window.
+    const linkedCode = cleanWhopAffiliateCode(body.affiliate);
+    const savedFresh = user.whop_affiliate_code
+      && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+    const affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
     let checkout;
     try {
       checkout = await createWhopCheckout({
         planId: whopPlanId(plan, bi),
         metadata: { userId: user.id, plan, interval: bi, email: user.email },
         redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+        affiliateCode,
       });
     } catch (err) {
       return json(res, { error: `Whop checkout failed: ${err.message}` }, 502);
+    }
+    // Remember a link code only once Whop has accepted it as a real affiliate.
+    if (linkedCode && checkout.affiliateCode === linkedCode && linkedCode !== user.whop_affiliate_code) {
+      await updateUser(user.id, { whop_affiliate_code: linkedCode, whop_affiliate_at: new Date().toISOString() }).catch(() => {});
     }
     // Pending row keyed by the checkout id: the webhook uses it to find who paid.
     await insertPayment({
@@ -7274,7 +7052,7 @@ async function handleRequest(req, res) {
       txId: checkout.id, note: 'Whop checkout started', promoCode: null, discountPercent: 0,
       interval: bi, status: 'pending', submittedAt: new Date().toISOString(),
     }).catch((err) => console.error('[whop checkout] pending payment insert failed:', err.message));
-    audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}`, ip);
+    audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}${checkout.affiliateCode ? ` affiliate=${checkout.affiliateCode}` : ''}`, ip);
     return json(res, { url: checkout.url, checkoutId: checkout.id });
   }
 

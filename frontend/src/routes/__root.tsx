@@ -14,6 +14,7 @@ import { useSiteLanguage } from "@/hooks/use-site-language";
 import { SiteNotFound } from "@/components/site/not-found";
 import { AuthProvider } from "@/hooks/use-auth";
 import { Toaster } from "@/components/ui/sonner";
+import { captureAffiliateCode } from "@/lib/affiliate";
 
 import appCss from "../styles.css?url";
 import { SmoothScroll } from "../components/smooth-scroll";
@@ -123,6 +124,10 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+
+  useEffect(() => {
+    captureAffiliateCode();
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
