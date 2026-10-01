@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { promises as fs } from 'fs';
+import { promises as fs, rmSync } from 'fs';
 import { resolve, join, sep, dirname } from 'path';
 
 const { Pool, types } = pg;
@@ -759,6 +759,28 @@ export async function claimWebhookEvent(source, id) {
 /** Forget a claimed delivery so the provider's retry is processed (handler failed). */
 export async function releaseWebhookEvent(source, id) {
   await getPool().query('DELETE FROM webhook_events WHERE id = $1', [`${source}:${id}`]);
+}
+
+/**
+ * Removes everything stored for one clone besides its output folder: stored file
+ * copies, text-file rows, the job snapshot and share links (which would otherwise keep
+ * serving a deleted clone publicly).
+ */
+export async function purgeCloneArtifacts({ outDir, prefixes = [], jobId = null }) {
+  const pool = getPool();
+  const base = String(outDir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+  for (const prefix of prefixes) {
+    if (!/^[a-f0-9]{8,64}$/.test(prefix)) continue;
+    await pool.query("DELETE FROM settings WHERE key LIKE $1", [`clonefile:${prefix}/%`]);
+    rmSync(join(storageBase(), 'clone-files', prefix), { recursive: true, force: true });
+  }
+  if (jobId) await pool.query('DELETE FROM settings WHERE key = $1', [`clonefile:job:${jobId}`]);
+  if (outDir) {
+    await pool.query(
+      "DELETE FROM shares WHERE out_dir = $1 OR ($2 <> '' AND out_dir LIKE '%/' || $2)",
+      [String(outDir), base],
+    );
+  }
 }
 
 export async function closeLocalDatabase() {

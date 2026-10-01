@@ -36,7 +36,7 @@ import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFile
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
 import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './lib/clonePreviewRuntime.js';
-import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent } from './local-supabase-compat.js';
+import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
   retrieveWhopMembership, cancelWhopMembership, listRecentWhopMemberships, whopManageUrl, verifyWhopWebhook,
@@ -1457,6 +1457,24 @@ function cloneStoragePrefixes(outDir) {
 
 function cloneStoragePath(outDir, relPath) {
   return `${cloneStoragePrefix(outDir)}/${normalizeCloneRelPath(relPath)}`;
+}
+
+/** Deletes a clone completely: output folder, stored copies, share links, job snapshot, DB row. */
+async function purgeClone({ outDir = null, cloneId = null } = {}) {
+  const dir = outDir ? resolveCloneOutDir(outDir) : '';
+  if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  for (const [id, job] of jobs.entries()) {
+    if ((dir && sameCloneOutDir(job.outDir, dir)) || (cloneId && id === cloneId)) jobs.delete(id);
+  }
+  await purgeCloneArtifacts({ outDir: dir || outDir, prefixes: outDir ? cloneStoragePrefixes(dir || outDir) : [], jobId: cloneId });
+  if (cloneId) await deleteCloneById(cloneId);
+}
+
+async function purgeUserClones(userId) {
+  for (const c of await getClonesByUser(userId).catch(() => [])) {
+    await purgeClone({ outDir: c.out_dir, cloneId: c.id }).catch((err) => console.error('[purge clone]', c.id, err.message));
+  }
+  await deleteUserClones(userId);
 }
 
 function cloneStoragePathCandidates(outDir, relPath) {
@@ -5913,14 +5931,10 @@ async function handleRequest(req, res) {
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(deleteUser, outDir)) return json(res, { error: 'Not found' }, 404);
     try {
-      if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
-      for (const [id, job] of jobs.entries()) {
-        if (sameCloneOutDir(job.outDir, outDir)) jobs.delete(id);
-      }
       const clones = await getClonesByUser(deleteUser.id).catch(() => []);
       const clone = (clones || []).find(c => sameCloneOutDir(c.out_dir, outDir))
         || await getCloneByOutDir(outDir).catch(() => null);
-      if (clone?.id) await deleteCloneById(clone.id);
+      await purgeClone({ outDir, cloneId: clone?.id || null });
       return json(res, { ok: true });
     } catch(err) { return json(res, { error: err.message }, 500); }
   }
@@ -6116,7 +6130,7 @@ async function handleRequest(req, res) {
     if (!user) return json(res, { error: 'User not found' }, 404);
     await deleteUserSessions(userId);
     _invalidateUserSessions(userId);
-    await deleteUserClones(userId);
+    await purgeUserClones(userId);
     await deleteUser(userId);
     audit(null, 'admin', 'admin_delete_user', `userId=${userId} email=${user.email}`, ip);
     return json(res, { ok: true });
@@ -6166,7 +6180,8 @@ async function handleRequest(req, res) {
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/admin/clones/')) {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     const cloneId = url.pathname.slice('/api/admin/clones/'.length);
-    await deleteCloneById(cloneId);
+    const target = (await getAllClones().catch(() => [])).find(c => c.id === cloneId);
+    await purgeClone({ outDir: target?.out_dir || null, cloneId });
     return json(res, { ok: true });
   }
 
@@ -6746,7 +6761,7 @@ async function handleRequest(req, res) {
     const token = user._sessionToken;
     audit(user.id, user.name, 'account_deleted', `email=${user.email}`, ip);
     await deleteUserSessions(user.id);
-    await deleteUserClones(user.id);
+    await purgeUserClones(user.id);
     await deleteUser(user.id);
     return json(res, { ok: true });
   }
