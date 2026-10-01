@@ -7268,7 +7268,7 @@ async function handleRequest(req, res) {
       interval: bi, status: 'pending', submittedAt: new Date().toISOString(),
     }).catch((err) => console.error('[whop checkout] pending payment insert failed:', err.message));
     audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}`, ip);
-    return json(res, { url: checkout.url });
+    return json(res, { url: checkout.url, checkoutId: checkout.id });
   }
 
   // POST /api/payments/whop/sync — activate right after returning from checkout,

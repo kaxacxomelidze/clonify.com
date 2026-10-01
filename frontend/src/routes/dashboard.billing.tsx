@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Check, CreditCard, Sparkles } from "lucide-react";
 import { FREE_PLAN, PLAN_RANK, PLANS } from "@/components/dashboard/data";
@@ -10,7 +10,6 @@ import {
   cancelSubscription,
   fetchBillingHistory,
   openBillingPortal,
-  startWhopCheckout,
   syncWhopCheckout,
 } from "@/lib/api";
 import { toast } from "sonner";
@@ -43,6 +42,7 @@ type InvoiceRow = {
 
 function BillingPage() {
   const { user, usage, refresh } = useAuth();
+  const navigate = useNavigate();
   const [notice, setNotice] = useState("");
   const [cancelled, setCancelled] = useState(!!user?.cancelAtPeriodEnd);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
@@ -241,9 +241,7 @@ function BillingPage() {
           <div className="mt-8 flex flex-wrap gap-3">
             {currentKey !== "unlimited" && (
               <button
-                onClick={() =>
-                  document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
-                }
+                onClick={() => void navigate({ to: "/checkout" })}
                 className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03]"
               >
                 <Sparkles className="h-4 w-4" />
@@ -335,9 +333,7 @@ function BillingPage() {
             </button>
           ) : (
             <button
-              onClick={() =>
-                document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
-              }
+              onClick={() => void navigate({ to: "/checkout" })}
               className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
             >
               {currentKey === "unlimited" ? "You're on the top plan" : "Choose a plan"}
@@ -399,22 +395,7 @@ function BillingPage() {
               onClick={() => {
                 void (async () => {
                   if (cardState(p) !== "upgrade") return;
-                  try {
-                    const { url } = await startWhopCheckout(p.key, "monthly");
-                    if (url) {
-                      window.location.href = url;
-                      return;
-                    }
-                    setNotice("Checkout did not return a URL.");
-                    toast.error("Checkout is unavailable right now. Please try again later.");
-                  } catch (err) {
-                    const message =
-                      err instanceof ApiError
-                        ? err.message
-                        : `Could not start checkout for ${p.name}.`;
-                    setNotice(message);
-                    toast.error(message);
-                  }
+                  void navigate({ to: "/checkout", search: { plan: p.key } as never });
                 })();
               }}
               className={cn(
