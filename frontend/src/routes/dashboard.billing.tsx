@@ -155,22 +155,22 @@ function BillingPage() {
     {
       label: "Clones this month",
       used: clonesUsed,
-      limit: clonesLimit == null ? Math.max(clonesUsed, 1) : clonesLimit,
+      limit: clonesLimit ?? null,
     },
     {
-      label: "Pages captured",
-      used: usage?.totalPages ?? 0,
-      limit: Math.max(usage?.totalPages ?? 0, user?.planLimits?.maxPages ?? 50),
+      label: "Saves",
+      used: usage?.savesThisMonth ?? 0,
+      limit: usage?.limits?.savesPerMonth ?? null,
     },
     {
       label: "Edits",
       used: usage?.editsThisMonth ?? 0,
-      limit: usage?.limits?.editsPerMonth ?? 100,
+      limit: usage?.limits?.editsPerMonth ?? null,
     },
     {
       label: "Shares",
       used: usage?.sharesThisMonth ?? 0,
-      limit: usage?.limits?.sharesPerMonth ?? 50,
+      limit: usage?.limits?.sharesPerMonth ?? null,
     },
   ];
 
@@ -200,6 +200,9 @@ function BillingPage() {
               <p className="mt-3 font-display text-5xl tracking-tight">{plan.name}</p>
               <p className="mt-2 text-sm text-muted-foreground">
                 {plan.price} {plan.cycle}
+                {user?.planLimits?.maxPages
+                  ? ` · up to ${user.planLimits.maxPages} pages per clone`
+                  : ""}
                 {isPaid && renewsOn ? ` · ${cancelled ? "ends" : "renews"} ${renewsOn}` : ""}
               </p>
             </div>
@@ -210,10 +213,10 @@ function BillingPage() {
 
           <div className="mt-8 grid gap-5 sm:grid-cols-2">
             {liveLimits.map((l, i) => {
-              const pct = Math.min(
-                100,
-                Math.round((l.used / Math.max(1, Number(l.limit) || 1)) * 100),
-              );
+              const pct =
+                l.limit == null
+                  ? 0
+                  : Math.min(100, Math.round((l.used / Math.max(1, Number(l.limit) || 1)) * 100));
               return (
                 <div key={l.label}>
                   <div className="mb-2 flex items-center justify-between text-sm">

@@ -21,7 +21,7 @@ import {
   getPaymentByTxId, updatePaymentFields,
   getSettings, saveSettings,
   getUserBlockReason, getUserBlockReasons, setUserBlockReason,
-  getShare, insertShare, insertUsageEvent, countUsageEventsSince,
+  getShare, insertShare, insertUsageEvent, deleteUsageEvent, countUsageEventsSince,
   getAllPromoCodes, getPromoCode, insertPromoCode, incrementPromoUsed, deletePromoCode,
   getAllErrors, insertError, deleteError, clearErrors, pruneErrors,
   insertAudit, getAuditLog, getAuditCount, pruneAuditLog, audit,
@@ -256,6 +256,15 @@ const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
 function planRank(plan) {
   return PLAN_RANK[normalizePlan(plan)] ?? 0;
 }
+/** Figma export and templates are Growth and Scale features. */
+function hasGrowthFeatures(plan) {
+  return planRank(plan) >= PLAN_RANK.growth;
+}
+const GROWTH_FEATURE_ERROR = (feature) => `${feature} is available on the Growth and Scale plans. Upgrade to use it.`;
+/** Clones counted against the monthly quota (deleting a clone does not give it back). */
+function clonesUsedThisPeriod(user) {
+  return countUsageEventsSince(user.id, 'clone', planPeriodStart(user).toISOString());
+}
 const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', enterprise: 'unlimited' };
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
@@ -372,7 +381,7 @@ async function getUserUsageSummary(user) {
     countUsageEventsSince(user.id, 'edit', periodStart),
     countUsageEventsSince(user.id, 'save', periodStart),
     countUsageEventsSince(user.id, 'share', periodStart),
-    getCloneCountThisMonth(user.id, periodStart),
+    countUsageEventsSince(user.id, 'clone', periodStart),
   ]);
   return {
     periodStart,
@@ -1134,7 +1143,7 @@ async function checkUsageAlert(userId) {
     const plan = normalizePlan(user.plan);
     const limits = getEffectivePlanLimits(plan);
     if (limits.clonesPerMonth === Infinity) return;
-    const used = await getCloneCountThisMonth(userId, planPeriodStart(user).toISOString());
+    const used = await clonesUsedThisPeriod(user);
     const pct = used / limits.clonesPerMonth;
     if (pct >= 0.8) {
       await updateUser(userId, { usage_alert_sent: 1 });
@@ -4418,6 +4427,9 @@ async function handleRequest(req, res) {
     readJsonBody(req).then(async ({ templateId }) => {
       const safeId = String(templateId || '').replace(/[^a-z0-9-]/gi, '');
       if (!safeId || !TEMPLATES_META[safeId]) return json(res, { error: 'Template not found' }, 404);
+      if (safeId !== 'blank' && !hasGrowthFeatures(templateUser.plan)) {
+        return json(res, { error: GROWTH_FEATURE_ERROR('Templates') }, 403);
+      }
       const templateFile = join(__dirname, 'templates', 'starter-pages', `${safeId}.html`);
       if (!existsSync(templateFile)) return json(res, { error: 'Template file missing' }, 404);
       const id = randomUUID();
@@ -4698,7 +4710,7 @@ async function handleRequest(req, res) {
         const plan = normalizePlan(cloneUser.plan);
         const limits = getEffectivePlanLimits(plan);
         if (limits.clonesPerMonth !== Infinity) {
-          const used = await getCloneCountThisMonth(cloneUser.id, planPeriodStart(cloneUser).toISOString());
+          const used = await clonesUsedThisPeriod(cloneUser);
           if (used >= limits.clonesPerMonth) {
             return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade to clone more.` }, 429);
           }
@@ -4736,6 +4748,18 @@ async function handleRequest(req, res) {
       if (cloneUser) checkRateLimit(`clone_user:${cloneUser.id}`, cloneHourlyLimit(normalizePlan(cloneUser.plan)), 3600000);
 
       const id = randomUUID();
+      if (cloneUser) {
+        // Reserve the quota now, then re-count: two simultaneous requests can't both slip under the limit.
+        await insertUsageEvent({ id: `clone:${id}`, userId: cloneUser.id, kind: 'clone', outDir: null, createdAt: new Date().toISOString() });
+        const cloneLimit = getEffectivePlanLimits(normalizePlan(cloneUser.plan)).clonesPerMonth;
+        if (cloneLimit !== Infinity) {
+          const usedNow = await clonesUsedThisPeriod(cloneUser);
+          if (usedNow > cloneLimit) {
+            await deleteUsageEvent(`clone:${id}`).catch(() => {});
+            return json(res, { error: `Monthly limit reached (${cloneLimit}/${cloneLimit} for ${normalizePlan(cloneUser.plan)} plan). Upgrade to clone more.` }, 429);
+          }
+        }
+      }
       const hostname = target.hostname.replace(/\./g, '-');
       const outDir = resolve(OUTPUT_DIR, `${hostname}-${id.slice(0, 6)}`);
 
@@ -4922,6 +4946,10 @@ async function handleRequest(req, res) {
           cloneRecordSaved = true;
         } catch (dbErr) {
           job.logs.push(`[WARN] Could not save clone record: ${dbErr?.message || dbErr}`);
+        }
+        // A clone that failed without capturing anything doesn't use up the monthly quota.
+        if (!(exitCode === 0 && cloneReadable?.ok) && !job.pages && job.userId) {
+          await deleteUsageEvent(`clone:${job.id}`).catch(() => {});
         }
         const cloneSucceeded = exitCode === 0 && cloneReadable?.ok;
         if (exitCode === 0) {
@@ -5401,7 +5429,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/render') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     if (!html) return json(res, { error: 'No HTML provided' }, 400);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
@@ -5439,7 +5467,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, svg, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
@@ -5479,7 +5507,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5529,7 +5557,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5584,7 +5612,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma-zip') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
