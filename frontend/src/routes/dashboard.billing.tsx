@@ -247,7 +247,12 @@ function BillingPage() {
                       setNotice("Cancellation already scheduled. Use Manage billing to resume.");
                       return;
                     }
-                    await cancelSubscription();
+                    const result = await cancelSubscription();
+                    if (result.redirectUrl) {
+                      // Cancellation happens on Whop's billing page.
+                      window.location.href = result.redirectUrl;
+                      return;
+                    }
                     setCancelled(true);
                     await refresh();
                     setNotice("Subscription will cancel at the end of the billing period.");

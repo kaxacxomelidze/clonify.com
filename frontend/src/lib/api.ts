@@ -439,7 +439,9 @@ export async function openBillingPortal() {
 }
 
 export async function cancelSubscription() {
-  return apiFetch<{ ok: boolean }>("/api/user/cancel-subscription", { method: "POST" });
+  return apiFetch<{ ok: boolean; redirectUrl?: string }>("/api/user/cancel-subscription", {
+    method: "POST",
+  });
 }
 
 export async function previewClone(outDir: string) {

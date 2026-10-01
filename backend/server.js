@@ -6747,7 +6747,12 @@ async function handleRequest(req, res) {
       try {
         await cancelWhopMembership(user.whop_membership_id, 'at_period_end');
       } catch (err) {
-        return json(res, { error: `Whop cancellation failed: ${err.message}` }, 502);
+        // Key without membership:cancel (or any Whop error): let the customer cancel on
+        // Whop's own page; membership.cancel_at_period_end_changed then syncs it back here.
+        let manageUrl = whopManageUrl(null);
+        try { manageUrl = whopManageUrl(await retrieveWhopMembership(user.whop_membership_id)); } catch {}
+        audit(user.id, user.name, 'cancel_subscription_redirect', `whop error: ${err.message}`, ip);
+        return json(res, { ok: false, redirectUrl: manageUrl });
       }
     } else if (user.stripe_subscription_id) {
       const stripe = getStripe();
