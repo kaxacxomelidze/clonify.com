@@ -194,26 +194,62 @@ export const INVOICES = [
   { id: "INV-2026-06", date: "Jun 7, 2026", amount: "$29.99", status: "Paid" },
 ];
 
+/** Paid plans — must match the landing pricing and the backend plan keys. */
 export const PLANS = [
   {
+    key: "starter",
     name: "Starter",
-    price: "$0",
-    cycle: "forever",
-    features: ["1 clone / month", "10 pages per clone", "Preview only"],
+    price: "$19.99",
+    cycle: "per month",
+    features: [
+      "10 website clones / month",
+      "Unlimited screens",
+      "Code & ZIP export",
+      "Visual builder & editor",
+      "6 days/week support",
+      "Cancel anytime",
+    ],
     current: false,
   },
   {
+    key: "growth",
     name: "Growth",
     price: "$29.99",
     cycle: "per month",
-    features: ["3 clones / month", "60 pages per clone", "Code + Figma export", "GitHub push"],
-    current: true,
+    features: [
+      "25 website clones / month",
+      "Unlimited screens",
+      "Code & ZIP export",
+      "Figma export",
+      "Visual builder & editor",
+      "Access to templates",
+      "API access",
+      "6 days/week support",
+      "Cancel anytime",
+    ],
+    current: false,
   },
   {
-    name: "Studio",
-    price: "$99",
+    key: "unlimited",
+    name: "Scale",
+    price: "$59.99",
     cycle: "per month",
-    features: ["Unlimited clones", "300 pages per clone", "Team seats", "Priority cloning queue"],
+    features: [
+      "Unlimited website clones",
+      "Unlimited screens",
+      "Code & ZIP export",
+      "Figma export",
+      "Visual builder & editor",
+      "Access to templates",
+      "API access",
+      "7 days/week priority support",
+      "Cancel anytime",
+    ],
     current: false,
   },
 ];
+
+export const FREE_PLAN = { key: "free", name: "Free", price: "$0", cycle: "forever" };
+
+/** Upgrade order — customers can only move to a higher plan. */
+export const PLAN_RANK: Record<string, number> = { free: 0, starter: 1, growth: 2, unlimited: 3 };

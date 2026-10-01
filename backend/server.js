@@ -21,7 +21,7 @@ import {
   getPaymentByTxId, updatePaymentFields,
   getSettings, saveSettings,
   getUserBlockReason, getUserBlockReasons, setUserBlockReason,
-  getShare, insertShare, insertUsageEvent, countUsageEventsSince,
+  getShare, insertShare, insertUsageEvent, deleteUsageEvent, countUsageEventsSince,
   getAllPromoCodes, getPromoCode, insertPromoCode, incrementPromoUsed, deletePromoCode,
   getAllErrors, insertError, deleteError, clearErrors, pruneErrors,
   insertAudit, getAuditLog, getAuditCount, pruneAuditLog, audit,
@@ -251,6 +251,20 @@ const PLAN_LIMITS = {
 };
 const USAGE_KIND_LIMIT_KEY = { edit: 'editsPerMonth', save: 'savesPerMonth', share: 'sharesPerMonth' };
 const PAID_PLAN_KEYS = ['starter', 'growth', 'unlimited'];
+/** Plan order for upgrade rules: a customer may only move to a higher rank. */
+const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
+function planRank(plan) {
+  return PLAN_RANK[normalizePlan(plan)] ?? 0;
+}
+/** Figma export and templates are Growth and Scale features. */
+function hasGrowthFeatures(plan) {
+  return planRank(plan) >= PLAN_RANK.growth;
+}
+const GROWTH_FEATURE_ERROR = (feature) => `${feature}: available on the Growth and Scale plans. Upgrade to use it.`;
+/** Clones counted against the monthly quota (deleting a clone does not give it back). */
+function clonesUsedThisPeriod(user) {
+  return countUsageEventsSince(user.id, 'clone', planPeriodStart(user).toISOString());
+}
 const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', enterprise: 'unlimited' };
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
@@ -367,7 +381,7 @@ async function getUserUsageSummary(user) {
     countUsageEventsSince(user.id, 'edit', periodStart),
     countUsageEventsSince(user.id, 'save', periodStart),
     countUsageEventsSince(user.id, 'share', periodStart),
-    getCloneCountThisMonth(user.id, periodStart),
+    countUsageEventsSince(user.id, 'clone', periodStart),
   ]);
   return {
     periodStart,
@@ -502,6 +516,27 @@ function whopPlanFor(obj, fallbackPlan, fallbackInterval) {
   return { plan: metaPlan, interval: obj?.metadata?.interval || fallbackInterval || 'monthly' };
 }
 
+/**
+ * After an upgrade the old membership would keep renewing; stop it at period end. If the
+ * API key may not cancel, record an admin error so it is cancelled by hand (no silent
+ * double billing).
+ */
+async function retireReplacedWhopMembership(user, oldMembershipId, newMembershipId) {
+  try {
+    await cancelWhopMembership(oldMembershipId, 'at_period_end');
+    audit(user.id, user.name, 'whop_membership_replaced', `old=${oldMembershipId} new=${newMembershipId}`, null);
+  } catch (err) {
+    console.error('[whop] could not cancel replaced membership', oldMembershipId, err.message);
+    try {
+      await insertError({
+        id: randomUUID(), userId: user.id, userName: user.name, url: '/api/whop/webhook',
+        errorSummary: `ACTION NEEDED: cancel old Whop membership ${oldMembershipId} for ${user.email} (upgraded to ${newMembershipId}); API cancel failed: ${err.message}`,
+        logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString(),
+      });
+    } catch {}
+  }
+}
+
 /** Grant the paid plan for an active Whop membership. Idempotent. */
 async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fallbackInterval = null } = {}) {
   let user = userId ? await getUserById(userId) : null;
@@ -511,11 +546,18 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   const { plan, interval } = whopPlanFor(m, fallbackPlan || pending?.plan, fallbackInterval || pending?.interval);
   if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${m?.plan?.id})`);
   const renewsAt = m.renewal_period_end ? new Date(m.renewal_period_end) : null;
+  const previousMembershipId = user.whop_membership_id && user.whop_membership_id !== m.id ? user.whop_membership_id : null;
+  // An older, lower membership (e.g. the one replaced by an upgrade) must never pull the user back down.
+  if (previousMembershipId && isPaidPlan(user.plan) && planRank(plan) < planRank(user.plan)) {
+    audit(user.id, user.name, 'whop_membership_ignored', `membership=${m.id} plan=${plan} kept=${normalizePlan(user.plan)}`, null);
+    return { user, plan: normalizePlan(user.plan), interval, renewsAt, ignored: true };
+  }
   await activatePaidPlanForUser(user.id, {
     plan, interval, renewsAt,
     whopMembershipId: m.id, whopUserId: m.user?.id || null,
     cancelAtPeriodEnd: m.cancel_at_period_end ? 1 : 0,
   });
+  if (previousMembershipId) await retireReplacedWhopMembership(user, previousMembershipId, m.id);
   if (m.checkout_configuration_id) {
     const p = pending || await getPaymentByTxId(m.checkout_configuration_id);
     if (p && p.status === 'pending') {
@@ -525,13 +567,26 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   return { user, plan, interval, renewsAt };
 }
 
+/** Whop money fields come either as numbers or as { amount: "19.99", currency } objects. */
+function whopAmount(...values) {
+  for (const v of values) {
+    const n = Number(v && typeof v === 'object' ? v.amount : v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+function whopCurrency(data) {
+  return String(data?.currency || data?.total?.currency || 'usd').toUpperCase();
+}
+
 async function handleWhopEvent(event) {
   const type = event?.type || '';
   const data = event?.data || {};
 
   if (type === 'membership.activated') {
     if (!['active', 'trialing'].includes(data.status)) return;
-    const { user, plan, renewsAt } = await applyWhopMembership(data);
+    const { user, plan, renewsAt, ignored } = await applyWhopMembership(data);
+    if (ignored) return;
     audit(user.id, user.name, 'whop_membership_activated', `plan=${plan} membership=${data.id}`, null);
     sendEmail(user.email, `Your ${getPlanLabel(plan)} plan is active`,
       renderEmail('payment-confirmed', { SUBJECT: `${getPlanLabel(plan)} plan activated`, NAME: user.name, PLAN: getPlanLabel(plan), AMOUNT: '', INTERVAL: '', RENEWS_AT: renewsAt ? renewsAt.toLocaleDateString() : '' })
@@ -545,23 +600,33 @@ async function handleWhopEvent(event) {
     if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
     if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
     const { plan, interval } = whopPlanFor(data, user.plan, user.billing_interval);
-    await insertPayment({
-      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
-      amount: Number(data.total ?? data.usd_total ?? data.subtotal ?? 0) || 0,
-      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
-      txId: data.id || null, note: membershipId ? `Whop membership ${membershipId}` : '',
-      promoCode: null, discountPercent: 0, interval, status: 'confirmed',
-      submittedAt: new Date().toISOString(),
-    });
-    // Renewals: refresh the paid period from the membership itself.
-    if (membershipId) {
+    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
+    const note = membershipId ? `Whop membership ${membershipId}` : '';
+    // First payment of a checkout: complete that checkout's row instead of adding a second one.
+    const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
+    if (checkoutRow && checkoutRow.user_id === user.id) {
+      await updatePaymentFields(checkoutRow.id, {
+        status: 'confirmed', amount, currency: whopCurrency(data), tx_id: data.id || checkoutRow.tx_id,
+        processed_at: new Date().toISOString(), note,
+      });
+    } else {
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
+        amount, currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note,
+        promoCode: null, discountPercent: 0, interval, status: 'confirmed',
+        submittedAt: new Date().toISOString(),
+      });
+    }
+    // Renewals: refresh the paid period from the membership itself (only the current one).
+    if (membershipId && (!user.whop_membership_id || user.whop_membership_id === membershipId)) {
       try {
         const m = await retrieveWhopMembership(membershipId);
         if (['active', 'trialing'].includes(m?.status)) await applyWhopMembership(m, { userId: user.id });
       } catch (err) { console.error('[whop] membership refresh failed:', err.message); }
     }
-    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${data.total}`, null);
+    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${whopAmount(data.total, data.usd_total, data.subtotal)}`, null);
     return;
   }
 
@@ -592,8 +657,8 @@ async function handleWhopEvent(event) {
     if (!user) return;
     await insertPayment({
       id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: normalizePlan(user.plan), amount: Number(data.total ?? 0) || 0,
-      currency: String(data.currency || 'usd').toUpperCase(), method: 'whop',
+      plan: normalizePlan(user.plan), amount: whopAmount(data.total, data.usd_total, data.subtotal),
+      currency: whopCurrency(data), method: 'whop',
       txId: data.id || null, note: 'Payment failed', promoCode: null, discountPercent: 0,
       interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
     }).catch(() => {});
@@ -1100,7 +1165,7 @@ async function checkUsageAlert(userId) {
     const plan = normalizePlan(user.plan);
     const limits = getEffectivePlanLimits(plan);
     if (limits.clonesPerMonth === Infinity) return;
-    const used = await getCloneCountThisMonth(userId, planPeriodStart(user).toISOString());
+    const used = await clonesUsedThisPeriod(user);
     const pct = used / limits.clonesPerMonth;
     if (pct >= 0.8) {
       await updateUser(userId, { usage_alert_sent: 1 });
@@ -3094,6 +3159,7 @@ function userPublic(u) {
     billingInterval: u.billing_interval || 'monthly',
     emailVerified: u.email_verified === 1 || u.email_verified === true,
     cancelAtPeriodEnd: u.cancel_at_period_end === 1,
+    hasWhopBilling: !!u.whop_membership_id,
     createdAt: u.created_at,
   };
 }
@@ -4383,6 +4449,9 @@ async function handleRequest(req, res) {
     readJsonBody(req).then(async ({ templateId }) => {
       const safeId = String(templateId || '').replace(/[^a-z0-9-]/gi, '');
       if (!safeId || !TEMPLATES_META[safeId]) return json(res, { error: 'Template not found' }, 404);
+      if (safeId !== 'blank' && !hasGrowthFeatures(templateUser.plan)) {
+        return json(res, { error: GROWTH_FEATURE_ERROR('Templates') }, 403);
+      }
       const templateFile = join(__dirname, 'templates', 'starter-pages', `${safeId}.html`);
       if (!existsSync(templateFile)) return json(res, { error: 'Template file missing' }, 404);
       const id = randomUUID();
@@ -4663,7 +4732,7 @@ async function handleRequest(req, res) {
         const plan = normalizePlan(cloneUser.plan);
         const limits = getEffectivePlanLimits(plan);
         if (limits.clonesPerMonth !== Infinity) {
-          const used = await getCloneCountThisMonth(cloneUser.id, planPeriodStart(cloneUser).toISOString());
+          const used = await clonesUsedThisPeriod(cloneUser);
           if (used >= limits.clonesPerMonth) {
             return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade to clone more.` }, 429);
           }
@@ -4701,6 +4770,18 @@ async function handleRequest(req, res) {
       if (cloneUser) checkRateLimit(`clone_user:${cloneUser.id}`, cloneHourlyLimit(normalizePlan(cloneUser.plan)), 3600000);
 
       const id = randomUUID();
+      if (cloneUser) {
+        // Reserve the quota now, then re-count: two simultaneous requests can't both slip under the limit.
+        await insertUsageEvent({ id: `clone:${id}`, userId: cloneUser.id, kind: 'clone', outDir: null, createdAt: new Date().toISOString() });
+        const cloneLimit = getEffectivePlanLimits(normalizePlan(cloneUser.plan)).clonesPerMonth;
+        if (cloneLimit !== Infinity) {
+          const usedNow = await clonesUsedThisPeriod(cloneUser);
+          if (usedNow > cloneLimit) {
+            await deleteUsageEvent(`clone:${id}`).catch(() => {});
+            return json(res, { error: `Monthly limit reached (${cloneLimit}/${cloneLimit} for ${normalizePlan(cloneUser.plan)} plan). Upgrade to clone more.` }, 429);
+          }
+        }
+      }
       const hostname = target.hostname.replace(/\./g, '-');
       const outDir = resolve(OUTPUT_DIR, `${hostname}-${id.slice(0, 6)}`);
 
@@ -4887,6 +4968,10 @@ async function handleRequest(req, res) {
           cloneRecordSaved = true;
         } catch (dbErr) {
           job.logs.push(`[WARN] Could not save clone record: ${dbErr?.message || dbErr}`);
+        }
+        // A clone that failed without capturing anything doesn't use up the monthly quota.
+        if (!(exitCode === 0 && cloneReadable?.ok) && !job.pages && job.userId) {
+          await deleteUsageEvent(`clone:${job.id}`).catch(() => {});
         }
         const cloneSucceeded = exitCode === 0 && cloneReadable?.ok;
         if (exitCode === 0) {
@@ -5366,7 +5451,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/render') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     if (!html) return json(res, { error: 'No HTML provided' }, 400);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
@@ -5404,7 +5489,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, svg, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
@@ -5444,7 +5529,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5494,7 +5579,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5549,7 +5634,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma-zip') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -6715,7 +6800,10 @@ async function handleRequest(req, res) {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Not authenticated' }, 401);
     if (user.blocked) return await blockedUserResponse(res, user);
-    return json(res, { payments: await getPaymentsByUser(user.id) });
+    // Whop 'pending' rows only mark a checkout that was opened; hide the ones never paid.
+    const payments = (await getPaymentsByUser(user.id))
+      .filter((p) => !(p.method === 'whop' && p.status === 'pending'));
+    return json(res, { payments });
   }
 
   if (req.method === 'PUT' && url.pathname === '/api/user/profile') {
@@ -7152,6 +7240,13 @@ async function handleRequest(req, res) {
     const plan = normalizePlan(body.plan);
     if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
     const bi = body.interval === 'annual' || body.interval === 'yearly' ? 'annual' : 'monthly';
+    if (isPaidPlan(user.plan)) {
+      const current = normalizePlan(user.plan);
+      if (plan === current) return json(res, { error: `You already have the ${getPlanLabel(current)} plan.`, code: 'already_on_plan' }, 409);
+      if (planRank(plan) < planRank(current)) {
+        return json(res, { error: `You're on ${getPlanLabel(current)}. You can only upgrade to a higher plan.`, code: 'downgrade_not_allowed' }, 409);
+      }
+    }
     const reason = whopUnavailableReason(plan, bi);
     if (reason) return json(res, { error: reason }, 503);
     const appUrl = publicAppUrl(req);

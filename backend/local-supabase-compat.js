@@ -739,6 +739,12 @@ export async function ensureLocalSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
     CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
     CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);
+    -- Clone quota is counted from usage_events so deleting a clone can't refund it.
+    -- Backfill existing clones (idempotent; refunded failures stay status 'error').
+    INSERT INTO usage_events (id, user_id, kind, out_dir, created_at)
+      SELECT 'clone:' || id, user_id, 'clone', out_dir, started_at FROM clones
+      WHERE user_id IS NOT NULL AND url NOT LIKE 'builder:%' AND status <> 'error'
+      ON CONFLICT (id) DO NOTHING;
     CREATE TABLE IF NOT EXISTS webhook_events (
       id text PRIMARY KEY,
       source text NOT NULL,

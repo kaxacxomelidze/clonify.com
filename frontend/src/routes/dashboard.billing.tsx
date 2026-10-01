@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Check, CreditCard, Sparkles } from "lucide-react";
-import { PLANS, SUBSCRIPTION } from "@/components/dashboard/data";
+import { FREE_PLAN, PLAN_RANK, PLANS } from "@/components/dashboard/data";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -87,7 +87,10 @@ function BillingPage() {
         await new Promise((r) => setTimeout(r, 2500));
       }
       await refresh();
-      if (!cancelled) setNotice("Payment received. Your plan will activate within a minute — refresh if it doesn't.");
+      if (!cancelled)
+        setNotice(
+          "Payment received. Your plan will activate within a minute — refresh if it doesn't.",
+        );
     })();
     return () => {
       cancelled = true;
@@ -131,39 +134,45 @@ function BillingPage() {
   }, []);
 
   const plans = PLANS.map((plan) => ({ ...plan, current: plan.name === previewPlan }));
-  const plan = plans.find((item) => item.current) || PLANS.find((p) => p.name === "Growth") || PLANS[0]!;
+  const userRank = PLAN_RANK[String(user?.plan || "free").toLowerCase()] ?? 0;
+  /** Only higher plans can be bought; the current and cheaper ones are locked. */
+  const cardState = (p: { key: string; current: boolean }) =>
+    p.current ? "current" : (PLAN_RANK[p.key] ?? 0) < userRank ? "lower" : "upgrade";
+  const plan = plans.find((item) => item.current) || FREE_PLAN;
+  const isPaid = planLabel !== "Free";
+  const currentKey = plan.key;
+  const hasWhopBilling = !!user?.hasWhopBilling;
+  const renewsOn = user?.planRenewsAt
+    ? new Date(user.planRenewsAt).toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      })
+    : null;
   const clonesUsed = usage?.clonesThisMonth ?? 0;
   const clonesLimit = usage?.limits?.clonesPerMonth ?? usage?.limitThisMonth ?? null;
   const liveLimits = [
     {
       label: "Clones this month",
       used: clonesUsed,
-      limit: clonesLimit == null ? Math.max(clonesUsed, 1) : clonesLimit,
+      limit: clonesLimit ?? null,
     },
     {
-      label: "Pages captured",
-      used: usage?.totalPages ?? 0,
-      limit: Math.max(usage?.totalPages ?? 0, user?.planLimits?.maxPages ?? 50),
+      label: "Saves",
+      used: usage?.savesThisMonth ?? 0,
+      limit: usage?.limits?.savesPerMonth ?? null,
     },
     {
       label: "Edits",
       used: usage?.editsThisMonth ?? 0,
-      limit: usage?.limits?.editsPerMonth ?? 100,
+      limit: usage?.limits?.editsPerMonth ?? null,
     },
     {
       label: "Shares",
       used: usage?.sharesThisMonth ?? 0,
-      limit: usage?.limits?.sharesPerMonth ?? 50,
+      limit: usage?.limits?.sharesPerMonth ?? null,
     },
   ];
-
-  const planApiKey = (name: string) => {
-    const n = name.toLowerCase();
-    if (n === "scale") return "unlimited";
-    if (n === "growth") return "growth";
-    if (n === "starter") return "starter";
-    return "starter";
-  };
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -190,24 +199,24 @@ function BillingPage() {
               <p className="eyebrow">Current plan</p>
               <p className="mt-3 font-display text-5xl tracking-tight">{plan.name}</p>
               <p className="mt-2 text-sm text-muted-foreground">
-                {plan.price} {plan.cycle} · renews{" "}
-                {user?.planRenewsAt
-                  ? new Date(user.planRenewsAt).toLocaleDateString("en-US", {
-                      month: "long",
-                      day: "numeric",
-                      year: "numeric",
-                    })
-                  : SUBSCRIPTION.renews}
+                {plan.price} {plan.cycle}
+                {user?.planLimits?.maxPages
+                  ? ` · up to ${user.planLimits.maxPages} pages per clone`
+                  : ""}
+                {isPaid && renewsOn ? ` · ${cancelled ? "ends" : "renews"} ${renewsOn}` : ""}
               </p>
             </div>
             <span className="rounded-full bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground">
-              {cancelled ? "Cancels at period end" : user?.planLabel || "Active"}
+              {!isPaid ? "Free" : cancelled ? "Cancels at period end" : "Active"}
             </span>
           </div>
 
           <div className="mt-8 grid gap-5 sm:grid-cols-2">
             {liveLimits.map((l, i) => {
-              const pct = Math.min(100, Math.round((l.used / Math.max(1, Number(l.limit) || 1)) * 100));
+              const pct =
+                l.limit == null
+                  ? 0
+                  : Math.min(100, Math.round((l.used / Math.max(1, Number(l.limit) || 1)) * 100));
               return (
                 <div key={l.label}>
                   <div className="mb-2 flex items-center justify-between text-sm">
@@ -230,45 +239,49 @@ function BillingPage() {
           </div>
 
           <div className="mt-8 flex flex-wrap gap-3">
-            <button
-              onClick={() =>
-                document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
-              }
-              className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03]"
-            >
-              <Sparkles className="h-4 w-4" />
-              Upgrade plan
-            </button>
-            <button
-              onClick={() => {
-                void (async () => {
-                  try {
-                    if (cancelled) {
-                      setNotice("Cancellation already scheduled. Use Manage billing to resume.");
-                      return;
+            {currentKey !== "unlimited" && (
+              <button
+                onClick={() =>
+                  document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
+                }
+                className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03]"
+              >
+                <Sparkles className="h-4 w-4" />
+                Upgrade plan
+              </button>
+            )}
+            {isPaid && (
+              <button
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      if (cancelled) {
+                        setNotice("Cancellation already scheduled. Use Manage billing to resume.");
+                        return;
+                      }
+                      const result = await cancelSubscription();
+                      if (result.redirectUrl) {
+                        // Cancellation happens on Whop's billing page.
+                        window.location.href = result.redirectUrl;
+                        return;
+                      }
+                      setCancelled(true);
+                      await refresh();
+                      setNotice("Subscription will cancel at the end of the billing period.");
+                      toast.success("Cancellation scheduled.");
+                    } catch (err) {
+                      const message =
+                        err instanceof ApiError ? err.message : "Could not cancel subscription.";
+                      setNotice(message);
+                      toast.error(message);
                     }
-                    const result = await cancelSubscription();
-                    if (result.redirectUrl) {
-                      // Cancellation happens on Whop's billing page.
-                      window.location.href = result.redirectUrl;
-                      return;
-                    }
-                    setCancelled(true);
-                    await refresh();
-                    setNotice("Subscription will cancel at the end of the billing period.");
-                    toast.success("Cancellation scheduled.");
-                  } catch (err) {
-                    const message =
-                      err instanceof ApiError ? err.message : "Could not cancel subscription.";
-                    setNotice(message);
-                    toast.error(message);
-                  }
-                })();
-              }}
-              className="inline-flex items-center gap-2 rounded-full border border-border px-6 py-3 text-sm transition-colors hover:bg-accent"
-            >
-              {cancelled ? "Cancellation scheduled" : "Cancel subscription"}
-            </button>
+                  })();
+                }}
+                className="inline-flex items-center gap-2 rounded-full border border-border px-6 py-3 text-sm transition-colors hover:bg-accent"
+              >
+                {cancelled ? "Cancellation scheduled" : "Cancel subscription"}
+              </button>
+            )}
           </div>
         </motion.section>
 
@@ -284,30 +297,52 @@ function BillingPage() {
               <CreditCard className="h-5 w-5" />
             </span>
             <span className="min-w-0">
-              <span className="block text-sm">Managed securely by Whop</span>
-              <span className="block text-xs text-muted-foreground">
-                Update cards, invoices, and tax details securely
-              </span>
+              {hasWhopBilling ? (
+                <>
+                  <span className="block text-sm">Managed securely by Whop</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Update your card, see receipts, or cancel on Whop
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="block text-sm">No card on file</span>
+                  <span className="block text-xs text-muted-foreground">
+                    You add your card securely on Whop when you choose a plan
+                  </span>
+                </>
+              )}
             </span>
           </div>
-          <button
-            onClick={() => {
-              void (async () => {
-                try {
-                  const { url } = await openBillingPortal();
-                  if (url) window.location.href = url;
-                  else toast.error("Billing portal unavailable.");
-                } catch (err) {
-                  toast.error(
-                    err instanceof ApiError ? err.message : "Could not open billing portal.",
-                  );
-                }
-              })();
-            }}
-            className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
-          >
-            Manage billing
-          </button>
+          {hasWhopBilling ? (
+            <button
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const { url } = await openBillingPortal();
+                    if (url) window.location.href = url;
+                    else toast.error("Billing portal unavailable.");
+                  } catch (err) {
+                    toast.error(
+                      err instanceof ApiError ? err.message : "Could not open billing portal.",
+                    );
+                  }
+                })();
+              }}
+              className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
+            >
+              Manage billing
+            </button>
+          ) : (
+            <button
+              onClick={() =>
+                document.getElementById("billing-plans")?.scrollIntoView({ block: "center" })
+              }
+              className="mt-4 w-full rounded-full border border-border py-3 text-sm transition-colors hover:bg-accent"
+            >
+              {currentKey === "unlimited" ? "You're on the top plan" : "Choose a plan"}
+            </button>
+          )}
 
           <p className="eyebrow mt-8">Billing contact</p>
           <div className="mt-4 space-y-3 text-sm">
@@ -317,15 +352,12 @@ function BillingPage() {
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-muted-foreground">Plan</span>
-              <span>{user?.planLabel || planLabel}</span>
+              <span>{plan.name}</span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-muted-foreground">Next charge</span>
               <span>
-                {plan.price}
-                {user?.planRenewsAt
-                  ? ` · ${new Date(user.planRenewsAt).toLocaleDateString("en-US")}`
-                  : ""}
+                {isPaid && !cancelled ? `${plan.price}${renewsOn ? ` · ${renewsOn}` : ""}` : "—"}
               </span>
             </div>
           </div>
@@ -363,16 +395,12 @@ function BillingPage() {
               ))}
             </ul>
             <button
-              disabled={p.current}
+              disabled={cardState(p) !== "upgrade"}
               onClick={() => {
                 void (async () => {
-                  if (p.name === "Free" || planApiKey(p.name) === String(user?.plan || "")) {
-                    setPreviewPlan(p.name);
-                    setNotice(`Showing ${p.name}.`);
-                    return;
-                  }
+                  if (cardState(p) !== "upgrade") return;
                   try {
-                    const { url } = await startWhopCheckout(planApiKey(p.name), "monthly");
+                    const { url } = await startWhopCheckout(p.key, "monthly");
                     if (url) {
                       window.location.href = url;
                       return;
@@ -391,12 +419,16 @@ function BillingPage() {
               }}
               className={cn(
                 "mt-7 w-full rounded-full py-3 text-sm transition-colors",
-                p.current
+                cardState(p) !== "upgrade"
                   ? "cursor-default border border-border text-muted-foreground"
                   : "bg-primary font-medium text-primary-foreground hover:opacity-90",
               )}
             >
-              {p.current ? "Your plan" : `Upgrade to ${p.name}`}
+              {cardState(p) === "current"
+                ? "Already purchased · your plan"
+                : cardState(p) === "lower"
+                  ? "Included in your plan"
+                  : `Upgrade to ${p.name}`}
             </button>
           </motion.div>
         ))}

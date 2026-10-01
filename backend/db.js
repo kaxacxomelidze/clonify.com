@@ -424,6 +424,10 @@ export const insertUsageEvent = async (e) => {
   }
 };
 
+export const deleteUsageEvent = async (id) => {
+  await supabase.from('usage_events').delete().eq('id', id);
+};
+
 export const countUsageEventsSince = async (userId, kind, sinceIso) => {
   const { count, error } = await supabase.from('usage_events')
     .select('*', { count: 'exact', head: true })

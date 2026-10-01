@@ -259,6 +259,8 @@ export type AuthUser = {
   billingInterval?: string | null;
   emailVerified?: boolean;
   cancelAtPeriodEnd?: boolean;
+  /** Has a Whop subscription whose card/invoices can be managed on Whop. */
+  hasWhopBilling?: boolean;
   createdAt?: string;
 };
 
