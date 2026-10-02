@@ -58,6 +58,7 @@ function mapOutput(item: OutputItem): CloneJob {
     status,
     startedAt: item.capturedAt ? new Date(item.capturedAt).toLocaleTimeString("en-US") : "",
     elapsed: status === "running" ? elapsedSince(item.capturedAt) : "—",
+    ...(item.capturedAt ? { capturedAt: item.capturedAt } : {}),
     ...(item.dir ? { outDir: item.dir } : {}),
   };
 }

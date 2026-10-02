@@ -22,13 +22,24 @@ const TITLE = "Configure your plan — Clonyfy";
 
 type PlanKey = "starter" | "growth" | "unlimited";
 const PLAN_KEYS: PlanKey[] = ["starter", "growth", "unlimited"];
+type Interval = "monthly" | "annual";
+
+/** Yearly billing is 12 months at 20% off — the same prices as the Whop yearly plans. */
+function yearlyTotal(monthly: number) {
+  return Math.round(monthly * 12 * 0.8 * 100) / 100;
+}
 
 export const Route = createFileRoute("/checkout")({
   head: () => ({ meta: [{ title: TITLE }, { name: "robots", content: "noindex" }] }),
   validateSearch: (
     search: Record<string, unknown>,
-  ): { plan?: PlanKey | undefined; status?: string | undefined } => ({
+  ): {
+    plan?: PlanKey | undefined;
+    interval?: Interval | undefined;
+    status?: string | undefined;
+  } => ({
     plan: PLAN_KEYS.includes(search["plan"] as PlanKey) ? (search["plan"] as PlanKey) : undefined,
+    interval: search["interval"] === "annual" ? "annual" : undefined,
     status: typeof search["status"] === "string" ? search["status"] : undefined,
   }),
   component: CheckoutPage,
@@ -138,7 +149,7 @@ function loadWhopElements(): Promise<WhopElementsFactory> {
 }
 
 function CheckoutPage() {
-  const { plan: requestedPlan, status } = Route.useSearch();
+  const { plan: requestedPlan, interval: requestedInterval, status } = Route.useSearch();
   const navigate = useNavigate();
   const { user, loading, isAuthenticated } = useAuth();
   const userRank = PLAN_RANK[String(user?.plan || "free").toLowerCase()] ?? 0;
@@ -148,6 +159,7 @@ function CheckoutPage() {
     [userRank],
   );
   const [selected, setSelected] = useState<PlanKey | null>(null);
+  const [interval, setBillingInterval] = useState<Interval>(requestedInterval ?? "monthly");
   const [checkoutUrl, setCheckoutUrl] = useState("");
   const [error, setError] = useState("");
   const [mounting, setMounting] = useState(false);
@@ -191,7 +203,7 @@ function CheckoutPage() {
     target.innerHTML = "";
     void (async () => {
       try {
-        const res = await startWhopCheckout(selected, "monthly");
+        const res = await startWhopCheckout(selected, interval);
         if (cancelled) return;
         setCheckoutUrl(res.url);
         if (!res.checkoutId) throw new Error("no embedded checkout");
@@ -199,7 +211,7 @@ function CheckoutPage() {
         if (cancelled) return;
         const checkoutGroup = WhopElements().checkout.create({
           checkoutConfiguration: res.checkoutId,
-          returnUrl: `${window.location.origin}/checkout?plan=${selected}`,
+          returnUrl: `${window.location.origin}/checkout?plan=${selected}&interval=${interval}`,
           appearance: {
             theme: { appearance: "dark", accentColor: "gray", grayColor: "gray" },
             variables: { "--radius": "10px" },
@@ -237,11 +249,14 @@ function CheckoutPage() {
       element?.destroy?.();
       group?.destroy?.();
     };
-  }, [selected, user?.email, navigate]);
+  }, [selected, interval, user?.email, navigate]);
 
   const plan = PLANS.find((p) => p.key === selected) ?? PLANS[0]!;
   const planKey = plan.key as PlanKey;
-  const price = plan.price.replace("$", "");
+  const monthly = Number(plan.price.replace("$", ""));
+  const yearly = interval === "annual";
+  const price = (yearly ? yearlyTotal(monthly) : monthly).toFixed(2);
+  const saving = (monthly * 12 - yearlyTotal(monthly)).toFixed(2);
   const goBack = () =>
     window.history.length > 1 ? window.history.back() : void navigate({ to: "/dashboard/billing" });
 
@@ -275,14 +290,46 @@ function CheckoutPage() {
             <span className="pb-1 text-sm leading-tight text-muted-foreground">
               per
               <br />
-              month
+              {yearly ? "year" : "month"}
             </span>
+          </div>
+          {yearly && (
+            <p className="mt-2 text-sm text-muted-foreground">
+              ${(yearlyTotal(monthly) / 12).toFixed(2)}/month · you save ${saving} a year
+            </p>
+          )}
+
+          <div
+            role="radiogroup"
+            aria-label="Billing period"
+            className="mt-6 inline-grid grid-cols-2 gap-1 rounded-xl border border-border p-1"
+          >
+            {(["monthly", "annual"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={interval === value}
+                onClick={() => {
+                  setError("");
+                  setBillingInterval(value);
+                }}
+                className={cn(
+                  "rounded-lg px-4 py-1.5 text-sm transition-colors",
+                  interval === value
+                    ? "bg-foreground font-medium text-background"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {value === "monthly" ? "Monthly" : "Yearly −20%"}
+              </button>
+            ))}
           </div>
 
           <div
             role="radiogroup"
             aria-label="Plan"
-            className="mt-8 grid grid-cols-3 gap-1 rounded-xl border border-border p-1"
+            className="mt-3 grid grid-cols-3 gap-1 rounded-xl border border-border p-1"
           >
             {PLANS.map((p) => {
               const key = p.key as PlanKey;
@@ -335,7 +382,9 @@ function CheckoutPage() {
             <div className="flex justify-between gap-4">
               <dt>
                 Clonyfy {plan.name}
-                <span className="block text-xs text-muted-foreground">Billed monthly</span>
+                <span className="block text-xs text-muted-foreground">
+                  {yearly ? "Billed yearly" : "Billed monthly"}
+                </span>
               </dt>
               <dd>${price}</dd>
             </div>
@@ -401,7 +450,7 @@ function CheckoutPage() {
           <p className="mt-6 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
             <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              Renews monthly until canceled. Cancel anytime in{" "}
+              Renews {yearly ? "yearly" : "monthly"} until canceled. Cancel anytime in{" "}
               <Link to="/dashboard/billing" className="underline underline-offset-2">
                 Billing
               </Link>

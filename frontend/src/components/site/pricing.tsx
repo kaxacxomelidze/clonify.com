@@ -3,7 +3,15 @@ import { useState, useRef, useEffect } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { Reveal, SplitHeading } from "@/components/anim";
 import { Cta } from "./cta";
+import { useSignedIn } from "@/hooks/use-auth";
 import { ArrowGlyph } from "./brand";
+/** Backend plan keys for the pricing cards (Scale is "unlimited" internally). */
+const PLAN_KEY: Record<string, string> = {
+  Starter: "starter",
+  Growth: "growth",
+  Scale: "unlimited",
+};
+
 const PLANS = [
   {
     name: "Starter",
@@ -66,6 +74,7 @@ export function Pricing() {
   const amount = (value: number) =>
     value.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [yearly, setYearly] = useState(false);
+  const signedIn = useSignedIn();
   const [selected, setSelected] = useState(1);
   const [hovered, setHovered] = useState<number | null>(null);
   const [focused, setFocused] = useState<number | null>(null);
@@ -188,7 +197,12 @@ export function Pricing() {
                     : `$${(p.price * 12 * 0.8).toFixed(2)} billed yearly`
                   : tr(p.note || "Billed monthly. Cancel anytime.")}
               </p>
-              <Cta size="md" className="plan-cta" variant={active === i ? "solid" : "ghost"}>
+              <Cta
+                size="md"
+                className="plan-cta"
+                variant={active === i ? "solid" : "ghost"}
+                href={`${signedIn ? "/checkout" : language === "fr" ? "/fr/register" : "/register"}?plan=${PLAN_KEY[p.name]}${yearly ? "&interval=annual" : ""}`}
+              >
                 {tr(p.action)}
                 <ArrowGlyph />
               </Cta>

@@ -1,17 +1,10 @@
 ﻿import { useSiteLanguage } from "@/hooks/use-site-language";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError, ensureApiAwake, githubAuthUrl, googleAuthUrl } from "@/lib/api";
+import { postAuthDestination, rememberPendingPlan } from "@/lib/pending-plan";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  ArrowLeft,
-  AtSign,
-  LockKeyhole,
-  UserRound,
-  Eye,
-  EyeOff,
-  ArrowRight,
-} from "lucide-react";
+import { ArrowLeft, AtSign, LockKeyhole, UserRound, Eye, EyeOff, ArrowRight } from "lucide-react";
 import { Brand, BrandMark } from "./brand";
 import { LanguageSwitcher } from "./language-switcher";
 import { AuthArt } from "./auth-art";
@@ -38,8 +31,13 @@ export function AuthShell({
   // Already signed in (e.g. clicked "Log in" or "Get started" from the landing page):
   // skip the form instead of making the user log in again.
   useEffect(() => {
-    if (isAuthenticated && !busy) void navigate({ to: "/dashboard", replace: true });
+    if (isAuthenticated && !busy)
+      void navigate({ ...postAuthDestination(), replace: true } as never);
   }, [isAuthenticated, busy, navigate]);
+
+  useEffect(() => {
+    rememberPendingPlan();
+  }, []);
 
   useEffect(() => {
     try {
@@ -80,21 +78,24 @@ export function AuthShell({
         await attempt();
       } catch (first) {
         const retryable =
-          (first instanceof ApiError && (first.status === 502 || first.status === 503 || first.status === 504)) ||
+          (first instanceof ApiError &&
+            (first.status === 502 || first.status === 503 || first.status === 504)) ||
           (!(first instanceof ApiError) &&
             (first instanceof TypeError ||
-              (first instanceof Error && /Failed to fetch|NetworkError|abort|waking/i.test(first.message))));
+              (first instanceof Error &&
+                /Failed to fetch|NetworkError|abort|waking/i.test(first.message))));
         if (!retryable) throw first;
         await ensureApiAwake({ attempts: 8, timeoutMs: 15_000, force: true }).catch(() => {});
         await new Promise((r) => setTimeout(r, 2000));
         await attempt();
       }
-      await navigate({ to: "/dashboard" });
+      await navigate(postAuthDestination() as never);
     } catch (err) {
       const message =
         err instanceof ApiError
           ? err.message
-          : err instanceof TypeError || (err instanceof Error && /Failed to fetch|NetworkError|abort/i.test(err.message))
+          : err instanceof TypeError ||
+              (err instanceof Error && /Failed to fetch|NetworkError|abort/i.test(err.message))
             ? tr("Cannot reach the server. Check your connection and try again.")
             : mode === "login"
               ? tr("Could not log in. Check your email and password.")
@@ -321,9 +322,7 @@ function oauthErrorMessage(
   const isGithub = provider === "github";
   switch (code) {
     case "cancelled":
-      return isGithub
-        ? tr("GitHub sign-in was cancelled.")
-        : tr("Google sign-in was cancelled.");
+      return isGithub ? tr("GitHub sign-in was cancelled.") : tr("Google sign-in was cancelled.");
     case "not_configured":
       return isGithub
         ? tr("GitHub sign-in is not available yet. Please use email and password.")

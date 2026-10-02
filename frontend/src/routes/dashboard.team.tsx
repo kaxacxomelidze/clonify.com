@@ -4,7 +4,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { toast } from "sonner";
 
-
 export const Route = createFileRoute("/dashboard/team")({
   head: () => ({ meta: [{ title: "Teams — Clonyfy dashboard" }] }),
   component: TeamPage,
@@ -96,7 +95,7 @@ function TeamPage() {
             setEmail("");
             setNotice("Saved locally. No invitation email was sent.");
             toast.message("Member saved locally", {
-              description: "Team invites are not enabled on the Backend yet.",
+              description: "Team invites aren't available yet.",
             });
           }}
         >
@@ -159,9 +158,7 @@ function TeamPage() {
               </li>
             ))}
         </ul>
-        {!members.length && (
-          <p className="mt-4 text-sm text-muted-foreground">No members yet.</p>
-        )}
+        {!members.length && <p className="mt-4 text-sm text-muted-foreground">No members yet.</p>}
       </section>
     </div>
   );
