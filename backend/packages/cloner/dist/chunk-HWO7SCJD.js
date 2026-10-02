@@ -1291,13 +1291,13 @@ function domAssetUrlScore(url) {
 
 // src/interactionRecorder.ts
 import { createHash } from "crypto";
-var MAX_TRIGGERS = IS_FAST_CLONE ? 8 : 12;
-var HOVER_WAIT_MS = IS_FAST_CLONE ? 280 : 360;
-var CLICK_WAIT_MS = IS_FAST_CLONE ? 320 : 420;
-var SETTLE_MS = IS_FAST_CLONE ? 140 : 180;
-var TIME_BUDGET_MS = IS_FAST_CLONE ? 7e3 : 14e3;
+var MAX_TRIGGERS = IS_FAST_CLONE ? 14 : 28;
+var HOVER_WAIT_MS = IS_FAST_CLONE ? 260 : 340;
+var CLICK_WAIT_MS = IS_FAST_CLONE ? 300 : 400;
+var SETTLE_MS = IS_FAST_CLONE ? 120 : 160;
+var TIME_BUDGET_MS = IS_FAST_CLONE ? 1e4 : 28e3;
 var MAX_ADD_HTML = 25e4;
-var MAX_TOTAL_JSON = 9e5;
+var MAX_TOTAL_JSON = 12e5;
 var CACHE_TTL_MS = 60 * 60 * 1e3;
 var CACHE_MAX = 200;
 var recordedNavCache = /* @__PURE__ */ new Map();
@@ -1331,8 +1331,9 @@ function injectInteractionsScript(html, scriptHtml) {
 async function setupRecorder(page, maxTriggers, maxAddHtml) {
   return page.evaluate(({ maxTriggers: maxTriggers2, maxAddHtml: maxAddHtml2 }) => {
     const w = window;
-    const root = document.querySelector('header, [role="banner"]') || document.querySelector('nav, [role="navigation"]');
-    if (!root || !document.body) return null;
+    if (!document.body) return null;
+    const navRoot = document.querySelector('header, [role="banner"]') || document.querySelector('nav, [role="navigation"]');
+    const root = navRoot || document.body;
     root.setAttribute("data-clonyfy-ix-root", "");
     const visible = (el) => {
       const r = el.getBoundingClientRect();
@@ -1346,27 +1347,64 @@ async function setupRecorder(page, maxTriggers, maxAddHtml) {
       return !!h && !/^#!?$/.test(h) && !/^javascript:/i.test(h);
     };
     const hasHiddenSubmenu = (li) => Array.from(li.children).some((c) => /^(UL|OL|DIV|SECTION|NAV)$/.test(c.tagName) && !!c.querySelector("a[href]") && !visible(c));
+    const TRIGGER_SEL = [
+      '[aria-haspopup]:not([aria-haspopup="false"])',
+      "[aria-expanded]",
+      "[aria-controls]",
+      "[data-toggle]",
+      "[data-bs-toggle]",
+      "[data-state]",
+      '[role="tab"]',
+      '[role="button"]',
+      "button",
+      "summary",
+      "[data-accordion-trigger]",
+      "[data-radix-collection-item]",
+      ".carousel-control-prev",
+      ".carousel-control-next",
+      '[class*="carousel"] [class*="next"]',
+      '[class*="carousel"] [class*="prev"]',
+      '[class*="accordion"] button',
+      '[class*="Accordion"] button',
+      '[class*="tabs"] button',
+      '[class*="Tabs"] button'
+    ].join(", ");
     const picked = [];
     const consider = (el) => {
       if (!el || picked.includes(el)) return;
       for (const s of picked) if (s.contains(el) || el.contains(s)) return;
       if (!visible(el)) return;
       if (el.type === "submit" && el.closest("form")) return;
+      if (realHref(el) && !el.hasAttribute("aria-expanded") && !el.hasAttribute("aria-haspopup") && !el.hasAttribute("aria-controls") && !el.hasAttribute("data-toggle") && !el.hasAttribute("data-bs-toggle")) return;
       picked.push(el);
     };
-    root.querySelectorAll(
-      '[aria-haspopup]:not([aria-haspopup="false"]), [aria-expanded], [aria-controls], [data-toggle], [data-bs-toggle], button, [role="button"], summary'
-    ).forEach((el) => consider(el));
-    root.querySelectorAll("li").forEach((li) => {
-      if (hasHiddenSubmenu(li)) consider(li.querySelector(":scope > a, :scope > button, :scope > span, :scope > div") || li);
-    });
+    if (navRoot) {
+      navRoot.querySelectorAll(TRIGGER_SEL).forEach((el) => consider(el));
+      navRoot.querySelectorAll("li").forEach((li) => {
+        if (hasHiddenSubmenu(li)) {
+          consider(li.querySelector(":scope > a, :scope > button, :scope > span, :scope > div") || li);
+        }
+      });
+    }
+    const pageScopes = [];
+    const main = document.querySelector('main, [role="main"], #__next, #root, #app') || document.body;
+    pageScopes.push(main);
+    if (main !== document.body) pageScopes.push(document.body);
+    for (const scope of pageScopes) {
+      if (picked.length >= maxTriggers2) break;
+      scope.querySelectorAll(TRIGGER_SEL).forEach((el) => {
+        if (picked.length >= maxTriggers2) return;
+        if (navRoot && navRoot.contains(el)) return;
+        consider(el);
+      });
+    }
     const list = picked.slice(0, maxTriggers2);
-    const signature = [root.tagName];
+    const signature = [root.tagName, `n=${list.length}`];
     const clickable = [];
     list.forEach((el, i) => {
       el.setAttribute("data-clonyfy-ix", String(i));
-      signature.push(`${el.tagName}:${(el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40)}:${el.getAttribute("aria-controls") || ""}`);
-      clickable.push(!realHref(el) && (el.tagName === "BUTTON" || el.tagName === "A" || el.tagName === "SUMMARY" || el.getAttribute("role") === "button" || el.hasAttribute("aria-expanded") || el.hasAttribute("aria-controls") || el.hasAttribute("aria-haspopup") || el.hasAttribute("data-toggle") || el.hasAttribute("data-bs-toggle")));
+      signature.push(`${el.tagName}:${(el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40)}:${el.getAttribute("aria-controls") || el.getAttribute("data-bs-toggle") || ""}`);
+      clickable.push(!realHref(el) && (el.tagName === "BUTTON" || el.tagName === "A" || el.tagName === "SUMMARY" || el.getAttribute("role") === "button" || el.getAttribute("role") === "tab" || el.hasAttribute("aria-expanded") || el.hasAttribute("aria-controls") || el.hasAttribute("aria-haspopup") || el.hasAttribute("data-toggle") || el.hasAttribute("data-bs-toggle") || el.hasAttribute("data-state")));
     });
     const ATTRS2 = [
       "class",
@@ -1753,7 +1791,7 @@ async function recordNavInteractions(page, pageUrl) {
         });
         await page.waitForTimeout(SETTLE_MS);
         if (page.url() !== startUrl) {
-          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
+          logger.warn(`  [INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
           raw = [];
           try {
             await page.goto(startUrl, { waitUntil: "load", timeout: 15e3 });
@@ -1777,11 +1815,11 @@ async function recordNavInteractions(page, pageUrl) {
     keep = items.map((it) => it.i);
     await teardownRecorder(page, keep);
     if (items.length) {
-      logger.debug(`  [NAV INTERACTIONS] ${pageUrl}: ${items.length} menu(s) recorded in ${Date.now() - started}ms`);
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s) recorded in ${Date.now() - started}ms`);
     }
     return interactionsScriptHtml(items);
   } catch (err) {
-    logger.debug(`  [NAV INTERACTIONS WARN] ${err.message}`);
+    logger.debug(`  [INTERACTIONS WARN] ${err.message}`);
     await teardownRecorder(page, keep);
     return "";
   } finally {
@@ -3526,7 +3564,6 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         }
         if (el.hasAttribute("data-aos")) {
           el.classList.add("aos-animate");
-          style.setProperty("transform", "none", "important");
         }
       });
     }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
@@ -13597,11 +13634,18 @@ import Handlebars from "handlebars";
 var __dirname = dirname2(fileURLToPath(import.meta.url));
 var TEMPLATES_DIR = join5(__dirname, "..", "templates");
 var SERVE_PATCHES_PATH = resolve(__dirname, "../../../lib/cloneServePatches.js");
+var PREVIEW_RUNTIME_PATH = resolve(__dirname, "../../../lib/clonePreviewRuntime.js");
 var _servePatches = null;
 async function loadServePatches() {
   if (_servePatches) return _servePatches;
   _servePatches = await import(pathToFileURL(SERVE_PATCHES_PATH).href);
   return _servePatches;
+}
+var _previewRuntime = null;
+async function loadPreviewRuntime() {
+  if (_previewRuntime) return _previewRuntime;
+  _previewRuntime = await import(pathToFileURL(PREVIEW_RUNTIME_PATH).href);
+  return _previewRuntime;
 }
 function tpl(name, data) {
   const src = readFileSync(join5(TEMPLATES_DIR, name), "utf8");
@@ -13731,11 +13775,14 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
   const stalePage = join5(outDir, "app", "[[...slug]]", "page.tsx");
   if (existsSync4(stalePage)) rmSync(stalePage);
   const servePatches = await loadServePatches();
+  const previewRuntime = await loadPreviewRuntime();
   write(join5(outDir, "app", "[[...slug]]", "route.ts"), tpl("page.tsx.hbs", {
     targetOrigin: manifest.targetOrigin,
     targetOriginJson: JSON.stringify(manifest.targetOrigin),
     visibilityPatchJson: JSON.stringify(servePatches.buildVisibilityPatchHtml("/", { includeBase: false })),
-    scrollPatchJson: JSON.stringify(servePatches.buildScrollAnimationsPatchHtml())
+    scrollPatchJson: JSON.stringify(servePatches.buildScrollAnimationsPatchHtml()),
+    interactionRuntimeJson: JSON.stringify(previewRuntime.buildInteractionRuntimeScript()),
+    animationRuntimeJson: JSON.stringify(previewRuntime.buildAnimationRuntimeScript())
   }));
   const SKIP_API = [/cdn-cgi/, /analytics/, /gtag/, /hotjar/, /mixpanel/, /segment/, /sentry/];
   const filteredRoutes = apiRoutes.filter((r) => !SKIP_API.some((p) => p.test(r.path)));
@@ -14065,4 +14112,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-WQOUGB3C.js.map
+//# sourceMappingURL=chunk-HWO7SCJD.js.map

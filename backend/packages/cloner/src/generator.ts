@@ -8,6 +8,7 @@ import type { Manifest, ApiRouteSpec } from './types.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, '..', 'templates');
 const SERVE_PATCHES_PATH = resolve(__dirname, '../../../lib/cloneServePatches.js');
+const PREVIEW_RUNTIME_PATH = resolve(__dirname, '../../../lib/clonePreviewRuntime.js');
 
 let _servePatches: {
   buildVisibilityPatchHtml: (base?: string, opts?: { includeBase?: boolean }) => string;
@@ -17,6 +18,16 @@ async function loadServePatches() {
   if (_servePatches) return _servePatches;
   _servePatches = await import(pathToFileURL(SERVE_PATCHES_PATH).href);
   return _servePatches!;
+}
+
+let _previewRuntime: {
+  buildInteractionRuntimeScript: () => string;
+  buildAnimationRuntimeScript: () => string;
+} | null = null;
+async function loadPreviewRuntime() {
+  if (_previewRuntime) return _previewRuntime;
+  _previewRuntime = await import(pathToFileURL(PREVIEW_RUNTIME_PATH).href);
+  return _previewRuntime!;
 }
 
 function tpl(name: string, data: Record<string, unknown>): string {
@@ -189,11 +200,14 @@ export async function generateNextApp(outDir: string, manifest: Manifest, apiRou
   if (existsSync(stalePage)) rmSync(stalePage);
   // Route handler serves raw captured HTML (preserves scripts, full <head>, interactivity)
   const servePatches = await loadServePatches();
+  const previewRuntime = await loadPreviewRuntime();
   write(join(outDir, 'app', '[[...slug]]', 'route.ts'), tpl('page.tsx.hbs', {
     targetOrigin: manifest.targetOrigin,
     targetOriginJson: JSON.stringify(manifest.targetOrigin),
     visibilityPatchJson: JSON.stringify(servePatches.buildVisibilityPatchHtml('/', { includeBase: false })),
     scrollPatchJson: JSON.stringify(servePatches.buildScrollAnimationsPatchHtml()),
+    interactionRuntimeJson: JSON.stringify(previewRuntime.buildInteractionRuntimeScript()),
+    animationRuntimeJson: JSON.stringify(previewRuntime.buildAnimationRuntimeScript()),
   }));
 
   // API routes — skip CDN/analytics paths that shouldn't be proxied

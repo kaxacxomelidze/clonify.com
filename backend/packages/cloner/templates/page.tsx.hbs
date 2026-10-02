@@ -191,6 +191,8 @@ const REPLAY_PATCH = `<script data-clonyfy-replay>
 
 const VISIBILITY_PATCH = {{{visibilityPatchJson}}};
 const SCROLL_ANIMATIONS_PATCH = {{{scrollPatchJson}}};
+const INTERACTION_RUNTIME = {{{interactionRuntimeJson}}};
+const ANIMATION_RUNTIME = {{{animationRuntimeJson}}};
 
 function resolveRoute(pathname: string): string | undefined {
   // Normalize: collapse consecutive slashes, decode percent-encoding
@@ -274,6 +276,8 @@ function stripStaleClonyfyPatches(html: string): string {
   out = out.replace(/<script\b[^>]*\btype\s*=\s*["']importmap["'][^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-replay\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-interactions-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-animation-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
   return out;
@@ -285,7 +289,10 @@ function injectReplayPatch(html: string): string {
   out = rewriteUncapturedMedia(out);
 
   const headPatch = `<base href="/">${IMPORT_MAP}${REPLAY_PATCH}${VISIBILITY_PATCH}`;
-  const bodyPatch = out.includes('data-clonyfy-scroll-reveal') ? '' : SCROLL_ANIMATIONS_PATCH;
+  let bodyPatch = '';
+  if (!out.includes('data-clonyfy-scroll-reveal') && SCROLL_ANIMATIONS_PATCH) bodyPatch += SCROLL_ANIMATIONS_PATCH;
+  if (!out.includes('data-clonyfy-interactions-runtime') && INTERACTION_RUNTIME) bodyPatch += INTERACTION_RUNTIME;
+  if (!out.includes('data-clonyfy-animation-runtime') && ANIMATION_RUNTIME) bodyPatch += ANIMATION_RUNTIME;
 
   if (out.includes('<head>')) {
     out = out.replace('<head>', `<head>${headPatch}`);
