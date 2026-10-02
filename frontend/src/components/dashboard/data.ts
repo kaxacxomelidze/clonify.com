@@ -9,6 +9,8 @@ export type CloneJob = {
   assets: number;
   routes: number;
   elapsed: string;
+  /** ISO time the clone was captured (for date-based analytics). */
+  capturedAt?: string;
   /** Backend output directory when loaded from API */
   outDir?: string;
 };
@@ -94,104 +96,6 @@ export const CLONES: CloneJob[] = [
     routes: 0,
     elapsed: "27s",
   },
-];
-
-export const LIBRARY = [
-  {
-    id: "echelon",
-    title: "Echelon International — Hospitality & Real Estate",
-    updated: "1d",
-    lines: ["Hotels.", "Wellness.", "Real Estate."],
-  },
-  {
-    id: "stripe",
-    title: "Stripe Revenue Infrastructure",
-    updated: "1d",
-    lines: ["Financial infrastructure", "to grow your revenue"],
-  },
-  {
-    id: "notion",
-    title: "Notion AI Workspace",
-    updated: "1d",
-    lines: ["Where teams and", "agents think together"],
-  },
-];
-
-export const USAGE = { used: 1, limit: 3 };
-
-/* ---------- Analytics (dummy) ---------- */
-
-export const CLONE_ACTIVITY = [
-  { day: "Mon", clones: 2, pages: 18 },
-  { day: "Tue", clones: 4, pages: 46 },
-  { day: "Wed", clones: 3, pages: 31 },
-  { day: "Thu", clones: 6, pages: 74 },
-  { day: "Fri", clones: 5, pages: 58 },
-  { day: "Sat", clones: 8, pages: 96 },
-  { day: "Sun", clones: 7, pages: 82 },
-];
-
-export const MONTHLY_PAGES = [
-  { month: "Apr", pages: 120 },
-  { month: "May", pages: 208 },
-  { month: "Jun", pages: 186 },
-  { month: "Jul", pages: 292 },
-  { month: "Aug", pages: 341 },
-  { month: "Sep", pages: 405 },
-];
-
-export const ASSET_SPLIT = [
-  { name: "Images", value: 412 },
-  { name: "Scripts", value: 218 },
-  { name: "Styles", value: 164 },
-  { name: "Fonts", value: 92 },
-];
-
-export const EXPORT_SPLIT = [
-  { name: "React + Tailwind", value: 62 },
-  { name: "Figma", value: 21 },
-  { name: "Static HTML", value: 17 },
-];
-
-export const CLONE_QUALITY = [
-  { label: "Layout fidelity", value: 98 },
-  { label: "Asset capture", value: 94 },
-  { label: "Responsive match", value: 91 },
-  { label: "Build success", value: 96 },
-];
-
-export const HEADLINE_STATS = [
-  { label: "Total clones", value: 36, delta: "+18%" },
-  { label: "Pages captured", value: 1552, delta: "+24%" },
-  { label: "Assets downloaded", value: 886, delta: "+11%" },
-  { label: "Avg clone time", value: "1m 54s", delta: "-12%" },
-];
-
-/* ---------- Billing (dummy) ---------- */
-
-export const SUBSCRIPTION = {
-  plan: "Growth",
-  price: "$29.99",
-  cycle: "per month",
-  status: "Active",
-  renews: "October 7, 2026",
-  card: "Visa •••• 4242",
-  cardExpiry: "09 / 28",
-  seats: 3,
-};
-
-export const PLAN_LIMITS = [
-  { label: "Clones this month", used: 1, limit: 3 },
-  { label: "Pages per clone", used: 41, limit: 60 },
-  { label: "Team seats", used: 2, limit: 3 },
-  { label: "Exports", used: 14, limit: 50 },
-];
-
-export const INVOICES = [
-  { id: "INV-2026-09", date: "Sep 7, 2026", amount: "$29.99", status: "Paid" },
-  { id: "INV-2026-08", date: "Aug 7, 2026", amount: "$29.99", status: "Paid" },
-  { id: "INV-2026-07", date: "Jul 7, 2026", amount: "$29.99", status: "Paid" },
-  { id: "INV-2026-06", date: "Jun 7, 2026", amount: "$29.99", status: "Paid" },
 ];
 
 /** Paid plans — must match the landing pricing and the backend plan keys. */

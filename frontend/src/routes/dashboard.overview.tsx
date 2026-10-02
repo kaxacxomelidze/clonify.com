@@ -4,7 +4,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 import { Bell, Check, Download, Grid2X2, List, Pencil, Plus, Search, Pin } from "lucide-react";
-import { CLONE_ACTIVITY, type CloneJob } from "@/components/dashboard/data";
+import type { CloneJob } from "@/components/dashboard/data";
 import { CaptureDetails, downloadCaptureReport } from "@/components/dashboard/captures";
 import { TaskEditor, newTask } from "@/components/dashboard/planner";
 import { useDashboardWorkspace, type WorkspaceTask } from "@/components/dashboard/workspace";
@@ -55,7 +55,14 @@ function OverviewPage() {
           pages: job.pages,
           clones: 1,
         }))
-      : CLONE_ACTIVITY;
+      : // No clones yet: an empty week rather than sample numbers.
+        Array.from({ length: 7 }, (_, i) => ({
+          day: new Date(Date.now() - (6 - i) * 864e5).toLocaleDateString("en-US", {
+            weekday: "short",
+          }),
+          pages: 0,
+          clones: 0,
+        }));
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-4">
@@ -345,7 +352,9 @@ function OverviewPage() {
                 {project.pages} pages · {project.assets} assets · {project.status}
               </p>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">Started {project.startedAt || "—"}</span>
+                <span className="text-xs text-muted-foreground">
+                  Started {project.startedAt || "—"}
+                </span>
                 <button className="dashboard-button text-xs" onClick={() => setSelected(project)}>
                   View capture
                 </button>

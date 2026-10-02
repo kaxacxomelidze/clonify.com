@@ -39,11 +39,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const applySession = useCallback((token: string, nextUser: AuthUser, nextUsage?: UsageSummary) => {
-    setAuthToken(token);
-    setUser(nextUser);
-    setUsage(nextUsage || null);
-  }, []);
+  const applySession = useCallback(
+    (token: string, nextUser: AuthUser, nextUsage?: UsageSummary) => {
+      setAuthToken(token);
+      setUser(nextUser);
+      setUsage(nextUsage || null);
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     const token = getAuthToken();

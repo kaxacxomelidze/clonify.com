@@ -325,9 +325,9 @@ const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE
 const FULL_SITE_DEPTH = Math.max(50, parseInt(process.env.CLONYFY_FULL_SITE_DEPTH || '256', 10) || 256);
 const SERVERLESS_FULL_SITE_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_FULL_SITE_MAX_PAGES || String(SERVERLESS_MAX_PAGES), 10) || SERVERLESS_MAX_PAGES);
 const PLAN_PRICES = {
-  starter:    { monthly: 19.99, annual: 191.88 },
-  growth:     { monthly: 29.99, annual: 287.88 },
-  unlimited:  { monthly: 59.99, annual: 575.88 },
+  starter:    { monthly: 19.99, annual: 191.90 },
+  growth:     { monthly: 29.99, annual: 287.90 },
+  unlimited:  { monthly: 59.99, annual: 575.90 },
 };
 const PLAN_LABELS = {
   free: 'Free',
@@ -6293,6 +6293,7 @@ async function handleRequest(req, res) {
       google_oauth_enabled: !!google.google_client_id,
       github_oauth_enabled: !!github.github_client_id,
       affiliate_commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
+      email_enabled: !!getMailSettings().smtp_host,
     });
   }
 
@@ -7065,6 +7066,8 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/payments/whop/checkout') {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Sign in first.' }, 401);
+    // Each call creates a checkout on Whop; cap it so a loop can't flood the Whop account.
+    if (!checkRateLimit(`whop_checkout:${user.id}`, 20, 600000)) return json(res, { error: 'Too many checkout attempts. Wait a few minutes and try again.' }, 429);
     const body = await readJsonBody(req).catch(() => ({}));
     const plan = normalizePlan(body.plan);
     if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);

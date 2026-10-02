@@ -2,7 +2,9 @@ import { getAffiliateCode } from "@/lib/affiliate";
 
 /** Browser-facing Backend API base (no trailing slash). */
 export function getApiBaseUrl(): string {
-  const raw = String(import.meta.env["VITE_API_BASE_URL"] || "").trim().replace(/\/$/, "");
+  const raw = String(import.meta.env["VITE_API_BASE_URL"] || "")
+    .trim()
+    .replace(/\/$/, "");
   return raw || "http://localhost:5000";
 }
 
@@ -56,7 +58,8 @@ function sleep(ms: number) {
 
 function isTransientNetworkError(err: unknown): boolean {
   if (!err) return false;
-  if (err instanceof ApiError) return err.status === 502 || err.status === 503 || err.status === 504;
+  if (err instanceof ApiError)
+    return err.status === 502 || err.status === 503 || err.status === 504;
   const name = err instanceof Error ? err.name : "";
   const msg = String(err instanceof Error ? err.message : err).toLowerCase();
   return (
@@ -142,7 +145,10 @@ type ApiFetchOptions = Omit<RequestInit, "body"> & {
   skipWake?: boolean;
 };
 
-export async function apiFetch<T = unknown>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+export async function apiFetch<T = unknown>(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
   const {
     body,
     auth = true,
@@ -171,7 +177,7 @@ export async function apiFetch<T = unknown>(path: string, options: ApiFetchOptio
   }
 
   let attempt = 0;
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -183,7 +189,10 @@ export async function apiFetch<T = unknown>(path: string, options: ApiFetchOptio
         credentials: "omit",
       };
       if (body !== undefined) init.body = JSON.stringify(body);
-      const res = await fetch(`${getApiBaseUrl()}${path.startsWith("/") ? path : `/${path}`}`, init);
+      const res = await fetch(
+        `${getApiBaseUrl()}${path.startsWith("/") ? path : `/${path}`}`,
+        init,
+      );
       const text = await res.text();
       let data: unknown = null;
       if (text) {
@@ -524,10 +533,12 @@ export async function fetchPageHtml(outDir: string, route = "/", mode?: "editor"
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (err instanceof DOMException && err.name === "AbortError") {
-      throw new ApiError("Loading the page timed out. Wait for the Backend and try again.", 504);
+      throw new ApiError("Loading the page timed out. Try again in a moment.", 504);
     }
     if (isTransientNetworkError(err)) {
-      throw new ApiError("Could not reach the Backend to load this page.", 503, { cause: String(err) });
+      throw new ApiError("Could not reach the server to load this page.", 503, {
+        cause: String(err),
+      });
     }
     throw err;
   } finally {
@@ -547,14 +558,17 @@ export async function savePage(outDir: string, route: string, html: string) {
 }
 
 export async function importAsset(outDir: string, dataUrl: string, filename?: string) {
-  return apiFetch<{ ok: boolean; path: string; previewUrl?: string; mimeType?: string; size?: number }>(
-    "/api/import-asset",
-    {
-      method: "POST",
-      body: { outDir, dataUrl, filename },
-      timeoutMs: 120_000,
-    },
-  );
+  return apiFetch<{
+    ok: boolean;
+    path: string;
+    previewUrl?: string;
+    mimeType?: string;
+    size?: number;
+  }>("/api/import-asset", {
+    method: "POST",
+    body: { outDir, dataUrl, filename },
+    timeoutMs: 120_000,
+  });
 }
 
 export async function consumeUsage(kind: "edit" | "save" | "share", outDir?: string) {
@@ -614,8 +628,13 @@ async function downloadAuthedBlob(
         const parsed = text ? (JSON.parse(text) as { error?: string }) : null;
         if (parsed?.error) message = parsed.error;
       } catch {
-        if (/timed out|timeout|gateway|502|503|504/i.test(text) || res.status === 502 || res.status === 503 || res.status === 504) {
-          message = "Figma export timed out or the Backend restarted. Try Export for Figma Desktop, or retry once.";
+        if (
+          /timed out|timeout|gateway|502|503|504/i.test(text) ||
+          res.status === 502 ||
+          res.status === 503 ||
+          res.status === 504
+        ) {
+          message = "Figma export timed out. Try Export for Figma Desktop, or retry once.";
         }
       }
       if (res.status === 401) message = "Session expired — sign in again.";
@@ -643,7 +662,7 @@ async function downloadAuthedBlob(
     }
     if (isTransientNetworkError(err)) {
       throw new ApiError(
-        "Could not reach the Backend for Figma export. Wait for wake-up and try again.",
+        "Could not reach the server for Figma export. Try again in a moment.",
         503,
         { cause: String(err) },
       );
@@ -678,11 +697,15 @@ export async function fetchPublicConfig() {
     google_oauth_enabled?: boolean;
     github_oauth_enabled?: boolean;
     affiliate_commission?: string;
+    email_enabled?: boolean;
   }>("/api/public-config", { auth: false });
 }
 
 /** Resolve Scene Graph for Figma Desktop plugin (clipboard import). */
-export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
+export async function fetchFigmaScene(
+  outDir: string,
+  route = "/",
+): Promise<{
   scene: FigmaScene;
   warning?: string;
 }> {
@@ -699,9 +722,7 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
       cache: "no-store",
     });
     const contentType = String(res.headers.get("content-type") || "");
-    const data = (contentType.includes("application/json")
-      ? await res.json()
-      : null) as {
+    const data = (contentType.includes("application/json") ? await res.json() : null) as {
       error?: string;
       ok?: boolean;
       scene?: FigmaScene;
@@ -717,14 +738,15 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
         res.status === 401
           ? "Session expired — sign in again."
           : data?.error ||
-            (res.status === 502 || res.status === 503 || res.status === 504
-              ? "Figma Desktop export timed out or the Backend restarted. Try again."
-              : `HTTP ${res.status}`),
+              (res.status === 502 || res.status === 503 || res.status === 504
+                ? "Figma Desktop export timed out. Try again."
+                : `HTTP ${res.status}`),
         res.status,
         data,
       );
     }
-    if (data.scene) return { scene: data.scene, ...(data.warning ? { warning: data.warning } : {}) };
+    if (data.scene)
+      return { scene: data.scene, ...(data.warning ? { warning: data.warning } : {}) };
 
     // Large scenes are delivered via signed Storage (same pattern as ZIP exports).
     if (data.kind === "figma-scene-ref" || data.downloadUrl || data.mode === "parts") {
@@ -734,7 +756,8 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
         const chunks: string[] = [];
         for (const part of ordered) {
           const partRes = await fetch(part.url);
-          if (!partRes.ok) throw new ApiError(`Could not download scene part ${part.index + 1}`, partRes.status);
+          if (!partRes.ok)
+            throw new ApiError(`Could not download scene part ${part.index + 1}`, partRes.status);
           chunks.push(await partRes.text());
         }
         text = chunks.join("");
@@ -764,7 +787,7 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
     }
     if (isTransientNetworkError(err)) {
       throw new ApiError(
-        "Could not reach the Backend for Figma Desktop export. Wait for wake-up and try again.",
+        "Could not reach the server for Figma Desktop export. Try again in a moment.",
         503,
         { cause: String(err) },
       );
@@ -853,13 +876,15 @@ async function fetchZipBlobFromResponse(res: Response): Promise<Blob> {
       mode?: string;
       parts?: Array<{ url: string; index: number }>;
     };
-    if (!res.ok || data.error) throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
+    if (!res.ok || data.error)
+      throw new ApiError(data.error || `HTTP ${res.status}`, res.status, data);
     if (data.mode === "parts" && Array.isArray(data.parts)) {
       const ordered = data.parts.slice().sort((a, b) => (a.index || 0) - (b.index || 0));
       const chunks: ArrayBuffer[] = [];
       for (const part of ordered) {
         const partRes = await fetch(part.url);
-        if (!partRes.ok) throw new ApiError(`Could not download part ${part.index + 1}`, partRes.status);
+        if (!partRes.ok)
+          throw new ApiError(`Could not download part ${part.index + 1}`, partRes.status);
         chunks.push(await partRes.arrayBuffer());
       }
       return new Blob(chunks, { type: "application/zip" });
