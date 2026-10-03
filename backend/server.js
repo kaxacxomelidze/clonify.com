@@ -2433,7 +2433,9 @@ function sanitizeStoredCloneHtml(html) {
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-share-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-interactions-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-animation-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<div\b[^>]*\bid\s*=\s*["']__clonyfy_toast_host__["'][^>]*>\s*<\/div>/gi, '');
+  out = out.replace(/<div\b[^>]*\bid\s*=\s*["']__clonyfy_blocked_modal__["'][^>]*>[\s\S]*?<\/div>/gi, '');
   out = out.replace(/\sdata-clonyfy-editor-[a-z-]+(?:\s*=\s*(["'])[^"']*\1)?/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
@@ -2587,6 +2589,9 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   }
   if (injectInteractions && !out.includes('data-clonyfy-interactions-runtime')) {
     out = injectBeforeBodyEnd(out, buildInteractionRuntimeScript());
+  }
+  if (!out.includes('data-clonyfy-animation-runtime')) {
+    out = injectBeforeBodyEnd(out, buildAnimationRuntimeScript());
   }
   if (injectScrollReveal && !out.includes('data-clonyfy-scroll-reveal')) {
     const scrollPatch = previewScrollAnimationsPatch();

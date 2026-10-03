@@ -2,12 +2,14 @@
  * Browser runtimes injected into hosted clone previews and share pages.
  *
  * - Navigation: every link/button/form stays inside the clone. Cloned routes
- *   open the cloned page; anything else shows "not cloned yet" instead of
- *   leaving for the live site.
- * - Interactions: replays nav menus recorded at capture time
+ *   open the cloned page; missing/external targets open a modal with Go back
+ *   (never leave for the live site).
+ * - Interactions: replays menus/toggles recorded at capture time
  *   (#__clonyfy_interactions__) and emulates common UI patterns (aria-controls,
- *   tabs, Bootstrap, hover submenus, hamburger menus) since original site JS is
- *   neutralized in previews.
+ *   tabs, Bootstrap, dialogs, carousels, hover submenus, hamburger menus)
+ *   since original site JS is neutralized in previews.
+ * - Animations: restarts CSS keyframe/marquee motion and replays scroll-entrance
+ *   effects without the original framework JS.
  *
  * The in-page code is written as plain functions and serialized with
  * Function#toString, so it must not reference anything from this module.
@@ -60,6 +62,88 @@ function installToast() {
       timer = setTimeout(function () { box.classList.remove('on'); }, 2800);
     } catch (e) { /* ignore */ }
   };
+}
+
+/* ------------------------------------------------------ blocked-page modal */
+
+function installBlockedModal() {
+  if (window.__clonyfyBlockedModal) return;
+  var host = null;
+  var titleEl = null;
+  var detailEl = null;
+  var onBackCb = null;
+  function ensure() {
+    if (host && host.isConnected) return;
+    host = document.createElement('div');
+    host.id = '__clonyfy_blocked_modal__';
+    host.setAttribute('data-clonyfy-ui', '');
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;display:none;';
+    var root = host.attachShadow ? host.attachShadow({ mode: 'open' }) : host;
+    var style = document.createElement('style');
+    style.textContent = '.bg{position:absolute;inset:0;background:rgba(8,10,18,.55);backdrop-filter:blur(2px)}'
+      + '.card{position:relative;margin:min(18vh,160px) auto 0;width:min(92vw,420px);background:#111318;color:#f4f4f5;'
+      + 'border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:22px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.45);'
+      + 'font:500 15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}'
+      + '.h{font-size:17px;font-weight:650;margin:0 0 6px;letter-spacing:-.01em}'
+      + '.d{margin:0 0 18px;color:rgba(255,255,255,.68);font-weight:400;font-size:13px;word-break:break-all}'
+      + '.row{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}'
+      + 'button{appearance:none;border:0;border-radius:10px;padding:9px 14px;font:600 13px/1 system-ui,sans-serif;cursor:pointer}'
+      + '.back{background:#fff;color:#111}.close{background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.12)}';
+    var bg = document.createElement('div');
+    bg.className = 'bg';
+    bg.addEventListener('click', function () { hide(); });
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+    titleEl = document.createElement('p');
+    titleEl.className = 'h';
+    detailEl = document.createElement('p');
+    detailEl.className = 'd';
+    var row = document.createElement('div');
+    row.className = 'row';
+    var backBtn = document.createElement('button');
+    backBtn.type = 'button';
+    backBtn.className = 'back';
+    backBtn.textContent = 'Go back';
+    backBtn.addEventListener('click', function () {
+      var cb = onBackCb;
+      hide();
+      if (typeof cb === 'function') cb();
+    });
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'close';
+    closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', function () { hide(); });
+    row.appendChild(closeBtn);
+    row.appendChild(backBtn);
+    card.appendChild(titleEl);
+    card.appendChild(detailEl);
+    card.appendChild(row);
+    root.appendChild(style);
+    root.appendChild(bg);
+    root.appendChild(card);
+    (document.body || document.documentElement).appendChild(host);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && host && host.style.display === 'flex') hide();
+    });
+  }
+  function hide() {
+    if (!host) return;
+    host.style.display = 'none';
+    onBackCb = null;
+  }
+  window.__clonyfyBlockedModal = function (opts) {
+    try {
+      ensure();
+      titleEl.textContent = (opts && opts.title) || 'This page is not cloned yet';
+      detailEl.textContent = (opts && opts.detail) || '';
+      onBackCb = opts && opts.onBack ? opts.onBack : null;
+      host.style.display = 'block';
+    } catch (e) { /* ignore */ }
+  };
+  window.__clonyfyBlockedModalHide = hide;
 }
 
 /* ------------------------------------------------------------- navigation */
@@ -167,9 +251,26 @@ function navigationRuntime(CFG) {
     syncShareUrl(d);
     location.href = d.url;
   }
+  function goHomeOrBack() {
+    try {
+      if (window.history.length > 1) {
+        history.back();
+        return;
+      }
+    } catch (e) { /* ignore */ }
+    var home = lookup(CFG.defaultRoute || '/', '');
+    if (home.kind === 'cloned') go(home, false);
+  }
   function explain(d) {
-    if (d.kind === 'missing') toast('This page is not cloned yet', d.route);
-    else if (d.kind === 'external') toast('External link \u2014 not cloned yet', d.host);
+    var title = d.kind === 'external'
+      ? 'External link \u2014 not cloned yet'
+      : 'This page is not cloned yet';
+    var detail = d.kind === 'external' ? (d.host || d.href || '') : (d.route || '');
+    if (typeof window.__clonyfyBlockedModal === 'function') {
+      window.__clonyfyBlockedModal({ title: title, detail: detail, onBack: goHomeOrBack });
+    } else {
+      toast(title, detail);
+    }
     notify('clonyfy-preview-nav-blocked', { reason: d.kind, target: d.route || d.href || '' });
   }
   window.__clonyfyNav = { classify: classify, go: go, explain: explain, scrollToHash: scrollToHash };
@@ -717,8 +818,113 @@ function interactionRuntime() {
     });
   });
 
+  /* ---- dialog / popover / accordion / carousel heuristics ---- */
+  function findDialogFor(trigger) {
+    var labelled = trigger.getAttribute('aria-controls');
+    if (labelled) {
+      var byId = document.getElementById(String(labelled).split(/\s+/)[0]);
+      if (byId) return byId;
+    }
+    var href = trigger.getAttribute('href') || trigger.getAttribute('data-target') || trigger.getAttribute('data-bs-target') || '';
+    if (href && href.charAt(0) === '#' && href.length > 1) {
+      try {
+        var byHref = document.querySelector(href);
+        if (byHref) return byHref;
+      } catch (e) { /* ignore */ }
+    }
+    var scope = trigger.closest('section, article, main, header, nav, form, div') || document.body;
+    var dialogs = scope.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog, .modal, [class*="modal" i], [class*="dialog" i], [class*="popover" i], [data-radix-portal], [data-state="closed"]');
+    for (var i = 0; i < dialogs.length; i++) {
+      var d = dialogs[i];
+      if (d === trigger || d.contains(trigger)) continue;
+      if (isHidden(d) || d.getAttribute('data-state') === 'closed') return d;
+    }
+    return null;
+  }
+  function toggleDialog(trigger) {
+    var d = findDialogFor(trigger);
+    if (!d) return false;
+    var openNow = !isHidden(d) && d.getAttribute('data-state') !== 'closed';
+    if (openNow) {
+      conceal(d);
+      if (trigger.hasAttribute('aria-expanded')) trigger.setAttribute('aria-expanded', 'false');
+      if (d.hasAttribute('data-state')) d.setAttribute('data-state', 'closed');
+    } else {
+      reveal(d);
+      if (trigger.hasAttribute('aria-expanded')) trigger.setAttribute('aria-expanded', 'true');
+      if (d.hasAttribute('data-state')) d.setAttribute('data-state', 'open');
+      if (d.tagName === 'DIALOG' && typeof d.showModal === 'function') {
+        try { d.showModal(); } catch (e) { try { d.show(); } catch (x) { /* ignore */ } }
+      }
+    }
+    return true;
+  }
+  function toggleAccordion(trigger) {
+    var panel = null;
+    var cid = trigger.getAttribute('aria-controls');
+    if (cid) panel = document.getElementById(String(cid).split(/\s+/)[0]);
+    if (!panel) {
+      var next = trigger.nextElementSibling;
+      if (next && (/accordion|panel|content|collapse|region/i.test(next.className || '') || next.getAttribute('role') === 'region')) {
+        panel = next;
+      }
+    }
+    if (!panel) {
+      var parent = trigger.closest('[class*="accordion" i], details, [data-orientation]');
+      if (parent) {
+        panel = parent.querySelector('[role="region"], .accordion-panel, .accordion-content, [class*="content" i], [data-state]');
+        if (panel === trigger || (panel && panel.contains(trigger))) panel = null;
+      }
+    }
+    if (!panel || panel === trigger) return false;
+    toggleControlled(trigger, panel);
+    return true;
+  }
+  function advanceCarousel(btn, dir) {
+    var root = btn.closest('[class*="carousel" i], [class*="slider" i], [class*="swiper" i], [data-carousel], [data-slider], [aria-roledescription*="carousel" i]');
+    if (!root) return false;
+    var slides = root.querySelectorAll('[class*="slide" i], [data-slide], [role="group"], .swiper-slide');
+    if (slides.length < 2) return false;
+    var idx = -1;
+    for (var i = 0; i < slides.length; i++) {
+      var s = slides[i];
+      var cs = getComputedStyle(s);
+      var active = s.classList.contains('active') || s.classList.contains('is-active') || s.classList.contains('swiper-slide-active')
+        || s.getAttribute('aria-hidden') === 'false' || s.getAttribute('data-state') === 'active'
+        || (parseFloat(cs.opacity) > 0.5 && cs.visibility !== 'hidden');
+      if (active) { idx = i; break; }
+    }
+    if (idx < 0) idx = 0;
+    var next = (idx + (dir < 0 ? -1 : 1) + slides.length) % slides.length;
+    for (var j = 0; j < slides.length; j++) {
+      var slide = slides[j];
+      var on = j === next;
+      slide.classList.toggle('active', on);
+      slide.classList.toggle('is-active', on);
+      slide.classList.toggle('swiper-slide-active', on);
+      if (on) {
+        reveal(slide);
+        slide.setAttribute('aria-hidden', 'false');
+      } else {
+        conceal(slide);
+        slide.setAttribute('aria-hidden', 'true');
+      }
+    }
+    return true;
+  }
+  function carouselDir(btn) {
+    var label = [
+      btn.getAttribute('aria-label'), btn.getAttribute('title'),
+      typeof btn.className === 'string' ? btn.className : '',
+      btn.id || '', (btn.textContent || '').trim().slice(0, 24),
+    ].join(' ');
+    if (/prev|previous|back|left/i.test(label) || btn.classList.contains('carousel-control-prev')) return -1;
+    if (/next|forward|right/i.test(label) || btn.classList.contains('carousel-control-next')) return 1;
+    return 0;
+  }
+
   /* ---- click dispatcher (bubble phase: recorded triggers run first) ---- */
-  var BUTTON_SEL = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], a[href="#"], a[href="#!"], a[href^="javascript:"]';
+  var BUTTON_SEL = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], a[href="#"], a[href="#!"], a[href^="javascript:"], summary, [aria-haspopup], [data-state]';
   document.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || !t.closest) return;
@@ -743,6 +949,13 @@ function interactionRuntime() {
     el = t.closest('[role="tab"]');
     if (el) { activateTab(el); e.preventDefault(); return; }
 
+    el = t.closest('summary');
+    if (el) {
+      // Native <details> handles open/close; just mark so the dead-button watcher stays quiet.
+      markHandled(e);
+      return;
+    }
+
     el = t.closest('[aria-controls]');
     if (el && !isRealLink(el)) {
       var cid = String(el.getAttribute('aria-controls') || '').split(/\s+/)[0];
@@ -755,7 +968,24 @@ function interactionRuntime() {
     if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
     if (btn.form && (btn.type === 'submit' || btn.type === 'reset')) return;
     if (btn.tagName !== 'A' && isRealLink(btn.closest('a'))) return;
-    if (btn.closest('label, summary')) return;
+    if (btn.closest('label')) return;
+
+    var cdir = carouselDir(btn);
+    if (cdir && advanceCarousel(btn, cdir)) { e.preventDefault(); return; }
+
+    if (btn.getAttribute('aria-haspopup') === 'dialog' || btn.getAttribute('aria-haspopup') === 'true'
+      || /modal|dialog|popup|popover/i.test(String(btn.className || '') + ' ' + (btn.getAttribute('aria-label') || ''))) {
+      if (toggleDialog(btn)) { e.preventDefault(); return; }
+    }
+
+    if (/accordion|collapse|expand|disclosure/i.test(String(btn.className || '') + ' ' + (btn.getAttribute('aria-label') || ''))
+      || btn.closest('[class*="accordion" i], [data-orientation="vertical"]')) {
+      if (toggleAccordion(btn)) { e.preventDefault(); return; }
+    }
+
+    if (btn.hasAttribute('data-state') || btn.hasAttribute('aria-expanded')) {
+      if (toggleAccordion(btn) || toggleDialog(btn)) { e.preventDefault(); return; }
+    }
 
     var menu = burgerOpen ? burgerOpen.get(btn) : null;
     if (menu) {
@@ -780,7 +1010,9 @@ function interactionRuntime() {
     var watch = clickWatch;
     setTimeout(function () {
       if (clickWatch === watch) clickWatch = null;
-      if (!watch.changed && Math.abs(window.scrollY - scrollY) < 2) toast("This button's action is not cloned yet");
+      if (!watch.changed && Math.abs(window.scrollY - scrollY) < 2) {
+        toast("This button's action is not cloned yet", 'Interactive JS from the original site is disabled in the preview.');
+      }
     }, 450);
   }, false);
 
@@ -790,7 +1022,167 @@ function interactionRuntime() {
     closeHover();
     closeBsDropdowns(null);
     document.querySelectorAll('.modal.show').forEach(hideModal);
+    if (typeof window.__clonyfyBlockedModalHide === 'function') window.__clonyfyBlockedModalHide();
   });
+}
+
+/* ------------------------------------------------------------- animations */
+
+function animationRuntime() {
+  if (window.__clonyfyAnimRuntime) return;
+  window.__clonyfyAnimRuntime = true;
+
+  function injectCss() {
+    if (document.getElementById('__clonyfy_anim_css__')) return;
+    var style = document.createElement('style');
+    style.id = '__clonyfy_anim_css__';
+    style.textContent = '@keyframes clonyfy-fade-up{from{opacity:0;transform:translate3d(0,28px,0)}to{opacity:1;transform:none}}'
+      + '@keyframes clonyfy-fade-in{from{opacity:0}to{opacity:1}}'
+      + '@keyframes clonyfy-fade-left{from{opacity:0;transform:translate3d(-28px,0,0)}to{opacity:1;transform:none}}'
+      + '@keyframes clonyfy-fade-right{from{opacity:0;transform:translate3d(28px,0,0)}to{opacity:1;transform:none}}'
+      + '@keyframes clonyfy-zoom-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}'
+      + '[data-clonyfy-anim].clonyfy-anim-run{animation-duration:.7s;animation-fill-mode:both;'
+      + 'animation-timing-function:cubic-bezier(.22,.61,.36,1);will-change:opacity,transform}'
+      + '[data-clonyfy-anim][data-clonyfy-anim="fade-up"].clonyfy-anim-run{animation-name:clonyfy-fade-up}'
+      + '[data-clonyfy-anim][data-clonyfy-anim="fade-in"].clonyfy-anim-run{animation-name:clonyfy-fade-in}'
+      + '[data-clonyfy-anim][data-clonyfy-anim="fade-left"].clonyfy-anim-run{animation-name:clonyfy-fade-left}'
+      + '[data-clonyfy-anim][data-clonyfy-anim="fade-right"].clonyfy-anim-run{animation-name:clonyfy-fade-right}'
+      + '[data-clonyfy-anim][data-clonyfy-anim="zoom-in"].clonyfy-anim-run{animation-name:clonyfy-zoom-in}'
+      + '.marquee,.marquee-inner,[class*="marquee" i],[class*="ticker" i]{animation-play-state:running!important}';
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function reviveCssAnimations() {
+    var nodes = document.querySelectorAll('body *');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      try {
+        if (el.closest && el.closest('[data-clonyfy-ui]')) continue;
+        var cs = getComputedStyle(el);
+        var name = String(cs.animationName || '');
+        if (!name || name === 'none') continue;
+        if (String(cs.animationPlayState || '') === 'paused') {
+          el.style.animationPlayState = 'running';
+        }
+        // Restart so loops frozen mid-capture keep moving.
+        var prev = el.style.animation;
+        el.style.animation = 'none';
+        // force reflow
+        void el.offsetWidth;
+        el.style.animation = prev || '';
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  function aosKind(el) {
+    var aos = (el.getAttribute('data-aos') || '').toLowerCase();
+    if (!aos) {
+      var framer = el.getAttribute('data-framer-appear-id') || el.getAttribute('data-framer-name') || '';
+      if (framer) return 'fade-up';
+      var cls = String(el.className || '').toLowerCase();
+      if (/fade-?in|reveal|animate-in|slide-?up|slide-?in/.test(cls)) return 'fade-up';
+      if (/slide-?left|from-left/.test(cls)) return 'fade-left';
+      if (/slide-?right|from-right/.test(cls)) return 'fade-right';
+      if (/zoom|scale-in/.test(cls)) return 'zoom-in';
+      return '';
+    }
+    if (/fade-up|slide-up|fadeup|slideup/.test(aos)) return 'fade-up';
+    if (/fade-down|slide-down/.test(aos)) return 'fade-up';
+    if (/fade-left|slide-left|fadeleft/.test(aos)) return 'fade-left';
+    if (/fade-right|slide-right|faderight/.test(aos)) return 'fade-right';
+    if (/zoom|flip|scale/.test(aos)) return 'zoom-in';
+    if (/fade/.test(aos)) return 'fade-in';
+    return 'fade-up';
+  }
+
+  function inInitialViewport(el) {
+    var r = el.getBoundingClientRect();
+    return r.top < window.innerHeight * 0.92 && r.bottom > 0;
+  }
+
+  function tagEntranceTargets() {
+    var sel = [
+      '[data-aos]',
+      '[data-framer-appear-id]',
+      '[data-framer-name]',
+      '.aos-init',
+      '[class*="reveal" i]',
+      '[class*="fade-in" i]',
+      '[class*="animate-in" i]',
+      '[class*="slide-up" i]',
+      '[data-scroll]',
+      '[data-animate]',
+    ].join(',');
+    var list = document.querySelectorAll(sel);
+    var tagged = 0;
+    for (var i = 0; i < list.length && tagged < 120; i++) {
+      var el = list[i];
+      if (el.hasAttribute('data-clonyfy-anim')) continue;
+      if (el.closest && el.closest('[data-clonyfy-ui], script, style, noscript')) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      // Keep above-the-fold content visible; only replay entrance below the fold
+      // (or for explicitly AOS-tagged nodes that want motion once).
+      var kind = aosKind(el);
+      if (!kind) continue;
+      if (inInitialViewport(el) && !el.hasAttribute('data-aos') && !el.hasAttribute('data-framer-appear-id')) continue;
+      el.setAttribute('data-clonyfy-anim', kind);
+      var delay = el.getAttribute('data-aos-delay') || el.getAttribute('data-delay') || '';
+      if (delay && /^\d+$/.test(delay)) el.style.animationDelay = (parseInt(delay, 10) / 1000) + 's';
+      tagged++;
+    }
+  }
+
+  function play(el) {
+    if (!el || el.classList.contains('clonyfy-anim-run') || el.classList.contains('clonyfy-anim-done')) return;
+    el.classList.add('clonyfy-anim-run');
+    el.classList.add('aos-animate');
+    if (el.hasAttribute('data-aos')) {
+      try { el.style.removeProperty('transform'); } catch (e) { /* ignore */ }
+    }
+    var done = function () {
+      el.classList.add('clonyfy-anim-done');
+      el.classList.remove('clonyfy-anim-run');
+      el.removeEventListener('animationend', done);
+    };
+    el.addEventListener('animationend', done);
+    setTimeout(done, 1200);
+  }
+
+  function observe() {
+    tagEntranceTargets();
+    var targets = document.querySelectorAll('[data-clonyfy-anim]');
+    if (!targets.length) return;
+    if (typeof IntersectionObserver !== 'function') {
+      for (var i = 0; i < targets.length; i++) play(targets[i]);
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      for (var i = 0; i < entries.length; i++) {
+        if (!entries[i].isIntersecting) continue;
+        play(entries[i].target);
+        io.unobserve(entries[i].target);
+      }
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.12 });
+    for (var j = 0; j < targets.length; j++) {
+      var el = targets[j];
+      if (inInitialViewport(el)) play(el);
+      else io.observe(el);
+    }
+  }
+
+  function run() {
+    try {
+      injectCss();
+      reviveCssAnimations();
+      observe();
+    } catch (e) { /* ignore */ }
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, { once: true });
+  else run();
+  setTimeout(run, 500);
+  setTimeout(reviveCssAnimations, 1600);
 }
 
 /* ---------------------------------------------------------------- builders */
@@ -812,9 +1204,13 @@ export function buildPreviewNavigationScript(opts = {}) {
     defaultRoute: String(opts.defaultRoute || '/'),
   };
   const attr = mode === 'share' ? 'data-clonyfy-share-nav' : 'data-clonyfy-preview-nav';
-  return `<script ${attr}>(${installToast.toString()})();(${navigationRuntime.toString()})(${safeJson(config)});</script>`;
+  return `<script ${attr}>(${installToast.toString()})();(${installBlockedModal.toString()})();(${navigationRuntime.toString()})(${safeJson(config)});</script>`;
 }
 
 export function buildInteractionRuntimeScript() {
   return `<script data-clonyfy-interactions-runtime>(${installToast.toString()})();(${interactionRuntime.toString()})();</script>`;
+}
+
+export function buildAnimationRuntimeScript() {
+  return `<script data-clonyfy-animation-runtime>(${animationRuntime.toString()})();</script>`;
 }

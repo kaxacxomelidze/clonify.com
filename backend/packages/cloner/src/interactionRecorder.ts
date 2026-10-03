@@ -4,8 +4,12 @@ import { logger } from './logger.js';
 import { IS_FAST_CLONE } from './serverlessBudget.js';
 
 /**
- * Records how header/nav menus open (hover or click) on the live page so the
- * clone can replay them without the original site JS.
+ * Records how interactive UI opens (hover or click) on the live page so the
+ * clone can replay it without the original site JS.
+ *
+ * Prefers header/nav menus, then page-level toggles (accordions, tabs, modals,
+ * carousels, aria-controls). Original framework JS is neutralized in preview —
+ * these recordings are what make on-page buttons work again.
  *
  * Output: `<script type="application/json" id="__clonyfy_interactions__">` with
  * items keyed by `data-clonyfy-ix` (trigger) and ops referencing
@@ -25,13 +29,13 @@ type FinalOp =
   | { k: 'add'; p: string; b: string | null; h: string };
 type FinalItem = { i: number; ev: 'hover' | 'click'; ops: FinalOp[] };
 
-const MAX_TRIGGERS = IS_FAST_CLONE ? 8 : 12;
-const HOVER_WAIT_MS = IS_FAST_CLONE ? 280 : 360;
-const CLICK_WAIT_MS = IS_FAST_CLONE ? 320 : 420;
-const SETTLE_MS = IS_FAST_CLONE ? 140 : 180;
-const TIME_BUDGET_MS = IS_FAST_CLONE ? 7_000 : 14_000;
+const MAX_TRIGGERS = IS_FAST_CLONE ? 14 : 28;
+const HOVER_WAIT_MS = IS_FAST_CLONE ? 260 : 340;
+const CLICK_WAIT_MS = IS_FAST_CLONE ? 300 : 400;
+const SETTLE_MS = IS_FAST_CLONE ? 120 : 160;
+const TIME_BUDGET_MS = IS_FAST_CLONE ? 10_000 : 28_000;
 const MAX_ADD_HTML = 250_000;
-const MAX_TOTAL_JSON = 900_000;
+const MAX_TOTAL_JSON = 1_200_000;
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const CACHE_MAX = 200;
@@ -68,12 +72,15 @@ export function injectInteractionsScript(html: string, scriptHtml: string): stri
   return html.slice(0, idx) + scriptHtml + html.slice(idx);
 }
 
-/** Install in-page helpers, tag the nav root + triggers. */
+/** Install in-page helpers, tag interactive triggers (nav first, then page body). */
 async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number) {
   return page.evaluate(({ maxTriggers, maxAddHtml }: { maxTriggers: number; maxAddHtml: number }) => {
     const w = window as any;
-    const root = document.querySelector('header, [role="banner"]') || document.querySelector('nav, [role="navigation"]');
-    if (!root || !document.body) return null;
+    if (!document.body) return null;
+    const navRoot = document.querySelector('header, [role="banner"]')
+      || document.querySelector('nav, [role="navigation"]');
+    // Path refs prefer a stable nav root; fall back to body so page buttons still record.
+    const root = navRoot || document.body;
     root.setAttribute('data-clonyfy-ix-root', '');
 
     const visible = (el: Element) => {
@@ -90,6 +97,28 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
     const hasHiddenSubmenu = (li: Element) => Array.from(li.children).some((c) => (
       /^(UL|OL|DIV|SECTION|NAV)$/.test(c.tagName) && !!c.querySelector('a[href]') && !visible(c)
     ));
+    const TRIGGER_SEL = [
+      '[aria-haspopup]:not([aria-haspopup="false"])',
+      '[aria-expanded]',
+      '[aria-controls]',
+      '[data-toggle]',
+      '[data-bs-toggle]',
+      '[data-state]',
+      '[role="tab"]',
+      '[role="button"]',
+      'button',
+      'summary',
+      '[data-accordion-trigger]',
+      '[data-radix-collection-item]',
+      '.carousel-control-prev',
+      '.carousel-control-next',
+      '[class*="carousel"] [class*="next"]',
+      '[class*="carousel"] [class*="prev"]',
+      '[class*="accordion"] button',
+      '[class*="Accordion"] button',
+      '[class*="tabs"] button',
+      '[class*="Tabs"] button',
+    ].join(', ');
 
     const picked: Element[] = [];
     const consider = (el: Element | null) => {
@@ -97,26 +126,49 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
       for (const s of picked) if (s.contains(el) || el.contains(s)) return;
       if (!visible(el)) return;
       if ((el as HTMLButtonElement).type === 'submit' && el.closest('form')) return;
+      // Skip plain navigation links — the nav runtime handles those.
+      if (realHref(el) && !el.hasAttribute('aria-expanded') && !el.hasAttribute('aria-haspopup')
+        && !el.hasAttribute('aria-controls') && !el.hasAttribute('data-toggle')
+        && !el.hasAttribute('data-bs-toggle')) return;
       picked.push(el);
     };
-    root.querySelectorAll(
-      '[aria-haspopup]:not([aria-haspopup="false"]), [aria-expanded], [aria-controls], [data-toggle], [data-bs-toggle], button, [role="button"], summary',
-    ).forEach((el) => consider(el));
-    root.querySelectorAll('li').forEach((li) => {
-      if (hasHiddenSubmenu(li)) consider(li.querySelector(':scope > a, :scope > button, :scope > span, :scope > div') || li);
-    });
+
+    // Priority 1: nav / header menus (what users click first).
+    if (navRoot) {
+      navRoot.querySelectorAll(TRIGGER_SEL).forEach((el) => consider(el));
+      navRoot.querySelectorAll('li').forEach((li) => {
+        if (hasHiddenSubmenu(li)) {
+          consider(li.querySelector(':scope > a, :scope > button, :scope > span, :scope > div') || li);
+        }
+      });
+    }
+
+    // Priority 2: rest of the page — accordions, tabs, modal/dialog triggers, carousels.
+    const pageScopes: Element[] = [];
+    const main = document.querySelector('main, [role="main"], #__next, #root, #app') || document.body;
+    pageScopes.push(main);
+    if (main !== document.body) pageScopes.push(document.body);
+    for (const scope of pageScopes) {
+      if (picked.length >= maxTriggers) break;
+      scope.querySelectorAll(TRIGGER_SEL).forEach((el) => {
+        if (picked.length >= maxTriggers) return;
+        if (navRoot && navRoot.contains(el)) return;
+        consider(el);
+      });
+    }
 
     const list = picked.slice(0, maxTriggers);
-    const signature: string[] = [root.tagName];
+    const signature: string[] = [root.tagName, `n=${list.length}`];
     const clickable: boolean[] = [];
     list.forEach((el, i) => {
       el.setAttribute('data-clonyfy-ix', String(i));
-      signature.push(`${el.tagName}:${(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40)}:${el.getAttribute('aria-controls') || ''}`);
+      signature.push(`${el.tagName}:${(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40)}:${el.getAttribute('aria-controls') || el.getAttribute('data-bs-toggle') || ''}`);
       clickable.push(!realHref(el) && (
         el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'SUMMARY'
-        || el.getAttribute('role') === 'button'
+        || el.getAttribute('role') === 'button' || el.getAttribute('role') === 'tab'
         || el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls') || el.hasAttribute('aria-haspopup')
         || el.hasAttribute('data-toggle') || el.hasAttribute('data-bs-toggle')
+        || el.hasAttribute('data-state')
       ));
     });
 
@@ -478,7 +530,7 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
         await page.waitForTimeout(SETTLE_MS);
 
         if (page.url() !== startUrl) {
-          logger.warn(`  [NAV INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
+          logger.warn(`  [INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
           raw = [];
           try {
             await page.goto(startUrl, { waitUntil: 'load', timeout: 15_000 });
@@ -502,11 +554,11 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
     keep = items.map((it) => it.i);
     await teardownRecorder(page, keep);
     if (items.length) {
-      logger.debug(`  [NAV INTERACTIONS] ${pageUrl}: ${items.length} menu(s) recorded in ${Date.now() - started}ms`);
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s) recorded in ${Date.now() - started}ms`);
     }
     return interactionsScriptHtml(items);
   } catch (err) {
-    logger.debug(`  [NAV INTERACTIONS WARN] ${(err as Error).message}`);
+    logger.debug(`  [INTERACTIONS WARN] ${(err as Error).message}`);
     await teardownRecorder(page, keep);
     return '';
   } finally {

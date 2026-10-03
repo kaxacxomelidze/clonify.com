@@ -1983,8 +1983,8 @@ export async function capturePage(
       }
 
       if (el.hasAttribute('data-aos')) {
+        // Keep data-aos for the preview animation runtime; do not freeze transform.
         el.classList.add('aos-animate');
-        style.setProperty('transform', 'none', 'important');
       }
     });
   }, { fast: fastScroll, carouselSkip: CAROUSEL_SKIP_SELECTOR }).catch((err) => {
