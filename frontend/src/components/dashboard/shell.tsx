@@ -16,6 +16,7 @@ import {
   Blocks,
   Users,
   LogOut,
+  HandCoins,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Brand, BrandMark } from "@/components/site/brand";
@@ -43,6 +44,7 @@ const NAV = [
   { to: "/dashboard/integrations", label: "Integrations", icon: Blocks, exact: false },
   { to: "/dashboard/team", label: "Teams", icon: Users, exact: false },
   { to: "/dashboard/billing", label: "Subscription", icon: CreditCard, exact: false },
+  { to: "/dashboard/affiliates", label: "Affiliates", icon: HandCoins, exact: false },
   { to: "/dashboard/settings", label: "Settings", icon: Settings, exact: false },
 ] as const;
 

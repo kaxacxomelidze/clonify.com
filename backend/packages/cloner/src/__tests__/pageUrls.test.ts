@@ -23,13 +23,34 @@ describe('normalizePageUrl crawler-trap hardening', () => {
 });
 
 describe('createQueryVariantLimiter', () => {
-  it('caps query variants per path but not plain paths', () => {
+  it('allows one URL per path (query variants overwrite the same route)', () => {
+    const limiter = createQueryVariantLimiter();
+    expect(limiter.allow('https://a.com/')).toBe(true);
+    expect(limiter.allow('https://a.com/?cur=GEL')).toBe(false);
+    expect(limiter.allow('https://a.com/blog.php?cat=a')).toBe(true);
+    expect(limiter.allow('https://a.com/blog.php?cat=b')).toBe(false);
+    expect(limiter.allow('https://a.com/clinic/login.php')).toBe(true);
+  });
+
+  it('honours a higher limit', () => {
     const limiter = createQueryVariantLimiter(2);
     expect(limiter.allow('https://a.com/p?x=1')).toBe(true);
     expect(limiter.allow('https://a.com/p?x=2')).toBe(true);
     expect(limiter.allow('https://a.com/p?x=3')).toBe(false);
-    expect(limiter.allow('https://a.com/other')).toBe(true);
-    expect(limiter.allow('https://a.com/other2')).toBe(true);
-    expect(limiter.allow('https://a.com/other3')).toBe(true);
+  });
+});
+
+describe('findScriptBuiltContainers', () => {
+  it('finds empty containers that inline scripts fill', async () => {
+    const { findScriptBuiltContainers } = await import('../capture.js');
+    const html = `<div class="sgf-cc" data-sgf-cc="country"></div><ul id="menu"> </ul><div id="static"></div>
+      <script>document.querySelectorAll('[data-sgf-cc]').forEach(build); document.getElementById('menu')</script>
+      <script src="/x.js"></script>`;
+    expect(findScriptBuiltContainers(html)).toEqual(['div[data-sgf-cc="country"]', '[id="menu"]']);
+  });
+
+  it('ignores pages without inline scripts', async () => {
+    const { findScriptBuiltContainers } = await import('../capture.js');
+    expect(findScriptBuiltContainers('<div id="a"></div><script src="a.js"></script>')).toEqual([]);
   });
 });

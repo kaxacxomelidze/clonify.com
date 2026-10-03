@@ -67,6 +67,7 @@ export const updateUser = async (id, fields) => {
     'email_verified','verify_token','verify_expiry','reset_token','reset_expiry',
     'blocked','blocked_reason','cancel_at_period_end','renewal_reminder_sent','usage_alert_sent',
     'google_id','github_id','stripe_customer_id','stripe_subscription_id',
+    'whop_membership_id','whop_user_id','whop_affiliate_code','whop_affiliate_at','whop_username',
   ];
   const update = {};
   for (const [k, v] of Object.entries(fields)) {
@@ -99,6 +100,9 @@ export const getUserByGoogleId = (googleId) =>
 
 export const getUserByGithubId = (githubId) =>
   one(supabase.from('users').select('*').eq('github_id', String(githubId)));
+
+export const getUserByWhopMembershipId = (membershipId) =>
+  one(supabase.from('users').select('*').eq('whop_membership_id', String(membershipId)));
 
 export const getUserByStripeCustomerId = (customerId) =>
   one(supabase.from('users').select('*').eq('stripe_customer_id', customerId));
@@ -253,6 +257,14 @@ export const insertPayment = async (p) => {
   if (error) throw new Error(error.message);
 };
 
+export const getPaymentByTxId = (txId) =>
+  one(supabase.from('payments').select('*').eq('tx_id', String(txId)));
+
+export const updatePaymentFields = async (id, fields) => {
+  const { error } = await supabase.from('payments').update(fields).eq('id', id);
+  if (error) throw new Error(error.message);
+};
+
 export const updatePayment = async ({ id, status, processedAt, reason }) => {
   const { error } = await supabase.from('payments').update({ status, processed_at: processedAt, reason }).eq('id', id);
   if (error) throw new Error(error.message); // silent failure left payments stuck "pending" after admin confirmed them
@@ -276,8 +288,6 @@ const SETTINGS_DEFAULTS = {
   btc:'', eth:'', usdt_trc20:'', paypal_email:'', paypal_me:'', app_note:'',
   smtp_host:'', smtp_port:'587', smtp_user:'', smtp_pass:'', smtp_from:'',
   smtp_secure:'false', app_url:(process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') || 'http://localhost:5000').replace(/\/$/, ''),
-  affiliate_enabled:'true', affiliate_program_url:'https://affonso.io/', affiliate_public_id:'cmpj1i5tn00087mxngp80ddzy',
-  affiliate_program_id:'', affiliate_group_id:'', affiliate_api_key:'',
 };
 
 export async function getSettings() {
@@ -292,53 +302,6 @@ export async function saveSettings(obj) {
   const rows = Object.entries(obj).map(([key, value]) => ({ key, value: String(value ?? '') }));
   const { error } = await supabase.from('settings').upsert(rows, { onConflict: 'key' });
   if (error) throw new Error(error.message);
-}
-
-const affiliateReferralKey = (ownerId) => `affiliate_referrals:${ownerId}`;
-const affiliateVisitKey = (ownerId) => `affiliate_visits:${ownerId}`;
-const affiliateSlugKey = (slug) => `affiliate_slug:${slug}`;
-
-export async function getAffiliateOwnerBySlug(slug) {
-  const clean = String(slug || '').trim().toLowerCase();
-  if (!clean) return null;
-  const { data } = await supabase.from('settings').select('value').eq('key', affiliateSlugKey(clean)).maybeSingle();
-  return data?.value || null;
-}
-
-export async function saveAffiliateSlug(slug, ownerId) {
-  const clean = String(slug || '').trim().toLowerCase();
-  if (!clean || !ownerId) return;
-  await supabase.from('settings').upsert({ key: affiliateSlugKey(clean), value: String(ownerId) }, { onConflict: 'key' });
-}
-
-export async function getAffiliateReferrals(ownerId) {
-  const { data } = await supabase.from('settings').select('value').eq('key', affiliateReferralKey(ownerId)).maybeSingle();
-  try { return JSON.parse(data?.value || '[]'); } catch { return []; }
-}
-
-export async function addAffiliateReferral(ownerId, referral) {
-  if (!ownerId || !referral?.userId || ownerId === referral.userId) return;
-  const rows = await getAffiliateReferrals(ownerId);
-  if (!rows.some(r => r.userId === referral.userId)) {
-    rows.unshift({ ...referral, createdAt: referral.createdAt || new Date().toISOString(), status: referral.status || 'Signed up' });
-    await supabase.from('settings').upsert({ key: affiliateReferralKey(ownerId), value: JSON.stringify(rows.slice(0, 500)) }, { onConflict: 'key' });
-  }
-}
-
-export async function getAffiliateVisits(ownerId) {
-  const { data } = await supabase.from('settings').select('value').eq('key', affiliateVisitKey(ownerId)).maybeSingle();
-  try { return JSON.parse(data?.value || '[]'); } catch { return []; }
-}
-
-export async function addAffiliateVisit(ownerId, visit) {
-  if (!ownerId || !visit?.visitorId) return;
-  const rows = await getAffiliateVisits(ownerId);
-  const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const existsRecent = rows.some(r => r.visitorId === visit.visitorId && new Date(r.createdAt || 0).getTime() > recentCutoff);
-  if (!existsRecent) {
-    rows.unshift({ ...visit, createdAt: visit.createdAt || new Date().toISOString() });
-    await supabase.from('settings').upsert({ key: affiliateVisitKey(ownerId), value: JSON.stringify(rows.slice(0, 1000)) }, { onConflict: 'key' });
-  }
 }
 
 const blockedReasonKey = (userId) => `blocked_reason:${userId}`;
@@ -410,6 +373,10 @@ export const insertUsageEvent = async (e) => {
     if (isMissingUsageEventsTable(error)) { warnUsageEventsMissing(); return; }
     throw new Error(error.message);
   }
+};
+
+export const deleteUsageEvent = async (id) => {
+  await supabase.from('usage_events').delete().eq('id', id);
 };
 
 export const countUsageEventsSince = async (userId, kind, sinceIso) => {
@@ -504,6 +471,14 @@ export const getAuditLog = async (limit, offset) => {
 // forever, which is the most likely cause of an unbounded-growth Supabase
 // storage warning on a long-running install. Called on the same hourly timer
 // as session cleanup. Keeps the most recent 5000 rows.
+// Pending rows of Whop checkouts nobody finished; a late payment still finds its
+// user through the checkout metadata, so the row isn't needed after a week.
+export const pruneAbandonedWhopCheckouts = async () => {
+  const cutoff = new Date(Date.now() - 7 * 864e5).toISOString();
+  await supabase.from('payments').delete()
+    .eq('method', 'whop').eq('status', 'pending').lt('submitted_at', cutoff);
+};
+
 export const pruneAuditLog = async () => {
   const { data } = await supabase.from('audit_log')
     .select('id')

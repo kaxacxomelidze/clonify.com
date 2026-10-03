@@ -1,27 +1,13 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  Check,
-  Download,
-  Figma,
-  Github,
-  Globe,
-  Pencil,
-  Play,
-  RotateCcw,
-} from "lucide-react";
+import { Check, Download, Figma, Github, Globe, Pencil, Play, RotateCcw } from "lucide-react";
 import { CapturePipeline } from "@/components/dashboard/pipeline";
 import { ScanningBrowser } from "@/components/dashboard/demo-preview";
 import { ExportFigmaDialog } from "@/components/dashboard/export-figma-dialog";
 import { GitHubPushDialog } from "@/components/dashboard/github-push-dialog";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import type { CloneJob } from "@/components/dashboard/data";
-import {
-  ApiError,
-  downloadZipBlob,
-  pagePreviewUrl,
-  triggerBrowserDownload,
-} from "@/lib/api";
+import { ApiError, downloadZipBlob, pagePreviewUrl, triggerBrowserDownload } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 
 export const Route = createFileRoute("/dashboard/")({
@@ -183,11 +169,13 @@ function ClonePage() {
         }
         if (status === "error") {
           const lastErr =
-            [...allLogs].reverse().find((l) =>
-              /\[ERROR\]|robots\.txt blocks|captured 0 pages|timed out|Page capture timed out|Could not start|Clone process exited/i.test(
-                l,
-              ),
-            ) ||
+            [...allLogs]
+              .reverse()
+              .find((l) =>
+                /\[ERROR\]|robots\.txt blocks|captured 0 pages|timed out|Page capture timed out|Could not start|Clone process exited/i.test(
+                  l,
+                ),
+              ) ||
             [...allLogs].reverse().find((l) => /error/i.test(l)) ||
             "Clone failed. Check the URL and try again.";
           setPhase("error");
@@ -209,8 +197,8 @@ function ClonePage() {
         if (!cancelled) {
           setNotice(
             err instanceof Error
-              ? `Status poll paused: ${err.message}. The Backend job may still be running.`
-              : "Status poll paused. The Backend job may still be running.",
+              ? `Status updates paused: ${err.message}. The clone may still be running.`
+              : "Status updates paused. The clone may still be running.",
           );
         }
       }
@@ -294,7 +282,7 @@ function ClonePage() {
       setNotice(
         useMax
           ? "Full-site Max clone started. This can take much longer than a normal capture."
-          : "Clone started on the Backend. You can close this tab — the job keeps running.",
+          : "Clone started. You can close this tab — it keeps running.",
       );
     } catch (err) {
       if (err instanceof Error && err.message === "url") {
@@ -327,8 +315,8 @@ function ClonePage() {
         <p className="eyebrow">From inspiration to your next build</p>
         <h1 className="display-lg mt-3">Clone a website.</h1>
         <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
-          Typical small clones (about 3–10 pages) target 2–5 minutes on the hosted Backend. Closing
-          the browser does not stop the job.
+          Small sites (about 3–10 pages) usually take 2–5 minutes. Closing the browser does not stop
+          the clone.
         </p>
       </header>
       <form
@@ -366,8 +354,8 @@ function ClonePage() {
           </button>
         </div>
         <p id="clone-hint" className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          Clones run on the Backend. Progress updates while you stay on this page; the job continues
-          if you leave.
+          Clones run on our servers. Progress updates while you stay on this page; the clone
+          continues if you leave.
         </p>
         <fieldset
           disabled={busy}
@@ -478,7 +466,9 @@ function ClonePage() {
                   onClick={() => {
                     setPhase("idle");
                     setProgress(0);
-                    setNotice("Stopped watching this job. The Backend clone may still finish.");
+                    setNotice(
+                      "Stopped watching this clone. It may still finish in the background.",
+                    );
                   }}
                 >
                   Stop watching
@@ -621,9 +611,7 @@ function ClonePage() {
               }
             >
               <Download size={16} />
-              {exportBusy === "zip"
-                ? `ZIP ${zipProgress?.pct ?? 0}%`
-                : "Download ZIP"}
+              {exportBusy === "zip" ? `ZIP ${zipProgress?.pct ?? 0}%` : "Download ZIP"}
             </button>
             {exportBusy === "zip" && zipProgress && (
               <div className="zip-export-progress w-full basis-full" aria-live="polite">
@@ -646,19 +634,11 @@ function ClonePage() {
                 </div>
               </div>
             )}
-            <button
-              type="button"
-              className="dashboard-button"
-              onClick={() => setFigmaOpen(true)}
-            >
+            <button type="button" className="dashboard-button" onClick={() => setFigmaOpen(true)}>
               <Figma size={16} />
               Export to Figma
             </button>
-            <button
-              type="button"
-              className="dashboard-button"
-              onClick={() => setGithubOpen(true)}
-            >
+            <button type="button" className="dashboard-button" onClick={() => setGithubOpen(true)}>
               <Github size={16} />
               Push to GitHub
             </button>

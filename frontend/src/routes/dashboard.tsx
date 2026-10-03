@@ -4,6 +4,7 @@ import { DashboardShell } from "@/components/dashboard/shell";
 import { DashboardWorkspace } from "@/components/dashboard/workspace";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api";
+import { postAuthDestination } from "@/lib/pending-plan";
 
 const TITLE = "Dashboard — Clonyfy";
 const DESCRIPTION =
@@ -39,7 +40,7 @@ function DashboardLayout() {
           params.delete("oauth_token");
           const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}`;
           window.history.replaceState({}, "", next);
-          if (!cancelled) await navigate({ to: "/dashboard" });
+          if (!cancelled) await navigate(postAuthDestination() as never);
           return;
         }
       } catch (err) {
@@ -65,9 +66,7 @@ function DashboardLayout() {
   }, [loading, bootstrapping, isAuthenticated, navigate]);
 
   if (loading || bootstrapping || !isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-background" aria-busy="true" aria-live="polite" />
-    );
+    return <div className="min-h-screen bg-background" aria-busy="true" aria-live="polite" />;
   }
 
   return (

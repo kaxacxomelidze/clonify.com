@@ -72,8 +72,7 @@ export function ExportFigmaDialog({
     return "Figma export failed.";
   };
 
-  const sceneFileName = () =>
-    `${(domain || "clone").replace(/[^\w.-]+/g, "_")}-figma-scene.json`;
+  const sceneFileName = () => `${(domain || "clone").replace(/[^\w.-]+/g, "_")}-figma-scene.json`;
 
   const deliverScene = async (scene: FigmaScene, warning?: string) => {
     try {
@@ -85,9 +84,12 @@ export function ExportFigmaDialog({
       if (warning) toast.message(warning);
     } catch (clipErr) {
       const reason = clipErr instanceof Error ? clipErr.message : "";
-      const blob = new Blob([JSON.stringify({ ...scene, kind: "clonyfy-figma-scene", version: 1 }, null, 2)], {
-        type: "application/json",
-      });
+      const blob = new Blob(
+        [JSON.stringify({ ...scene, kind: "clonyfy-figma-scene", version: 1 }, null, 2)],
+        {
+          type: "application/json",
+        },
+      );
       triggerBrowserDownload(blob, sceneFileName());
       if (reason === "SCENE_TOO_LARGE_FOR_CLIPBOARD") {
         setHint(
@@ -106,11 +108,14 @@ export function ExportFigmaDialog({
 
   const exportDesktop = async () => {
     setBusy("desktop");
-    setHint("Building Scene Graph on the Backend (can take up to ~2 minutes on free hosts)…");
+    setHint("Preparing your design for Figma (large sites can take up to 2 minutes)…");
     try {
       const { scene, warning } = await fetchFigmaScene(outDir, route);
       if (!scene?.nodes || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
-        throw new ApiError("Empty scene — nothing to import. Re-run the clone or try another page.", 422);
+        throw new ApiError(
+          "Empty scene — nothing to import. Re-run the clone or try another page.",
+          422,
+        );
       }
       await deliverScene(scene, warning);
     } catch (err) {
@@ -118,7 +123,7 @@ export function ExportFigmaDialog({
       setHint(
         err instanceof ApiError
           ? err.message
-          : "Desktop export failed while building the scene on the Backend.",
+          : "Figma Desktop export failed while preparing the design. Try again.",
       );
     } finally {
       setBusy("");
@@ -173,8 +178,8 @@ export function ExportFigmaDialog({
           Export to Figma
         </DialogTitle>
         <DialogDescription>
-          Desktop import needs two steps: Clonyfy builds a Scene Graph on the Backend, then you run
-          the <strong>Clonyfy Import</strong> plugin in Figma Desktop (clipboard alone is not enough).
+          Desktop import takes two steps: Clonyfy prepares your design, then you run the{" "}
+          <strong>Clonyfy Import</strong> plugin in Figma Desktop (clipboard alone is not enough).
         </DialogDescription>
 
         <label className="mt-4 block text-sm">
@@ -194,9 +199,17 @@ export function ExportFigmaDialog({
         </label>
 
         <ol className="mt-4 list-decimal space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-          <li>Install <strong>Clonyfy Import</strong> (Community link below, or Development → Import plugin).</li>
-          <li>Click <strong>Export for Figma Desktop</strong> and wait until it says copied / downloaded.</li>
-          <li>In <strong>Figma Desktop</strong>: Plugins → Clonyfy Import (or Run last plugin).</li>
+          <li>
+            Install <strong>Clonyfy Import</strong> (Community link below, or Development → Import
+            plugin).
+          </li>
+          <li>
+            Click <strong>Export for Figma Desktop</strong> and wait until it says copied /
+            downloaded.
+          </li>
+          <li>
+            In <strong>Figma Desktop</strong>: Plugins → Clonyfy Import (or Run last plugin).
+          </li>
         </ol>
 
         <div className="mt-5 space-y-3">
@@ -207,11 +220,11 @@ export function ExportFigmaDialog({
             onClick={() => void exportDesktop()}
           >
             <Monitor size={16} />
-            {busy === "desktop" ? "Building scene on Backend…" : "Export for Figma Desktop"}
+            {busy === "desktop" ? "Preparing design…" : "Export for Figma Desktop"}
           </button>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Builds editable layers, then copies JSON for the Clonyfy Import plugin. This does not open
-            Figma by itself.
+            Builds editable layers, then copies JSON for the Clonyfy Import plugin. This does not
+            open Figma by itself.
           </p>
 
           <button
@@ -225,7 +238,7 @@ export function ExportFigmaDialog({
           </button>
           <p className="text-xs leading-relaxed text-muted-foreground">
             Download an SVG and drag it onto the Figma canvas (works in Figma Web without the
-            plugin). Large sites may take up to ~1 minute on free hosts.
+            plugin). Large sites may take up to a minute.
           </p>
 
           <button

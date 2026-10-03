@@ -22,7 +22,7 @@ export const Route = createFileRoute("/dashboard/editor")({
       { title: "Visual editor — Clonyfy" },
       {
         name: "description",
-        content: "Edit cloned pages in the browser and save changes to your Clonyfy Backend.",
+        content: "Edit cloned pages in the browser and save changes to your Clonyfy project.",
       },
     ],
   }),
@@ -52,11 +52,7 @@ function EditorPage() {
           <p className="eyebrow">Editor</p>
           <h1 className="mt-1 font-display text-2xl">Edit captured pages</h1>
         </div>
-        <Link
-          to="/dashboard/library"
-          className="dashboard-button"
-          search={{} as never}
-        >
+        <Link to="/dashboard/library" className="dashboard-button" search={{} as never}>
           <ArrowLeft size={16} />
           Library
         </Link>

@@ -14,27 +14,33 @@ import { runClone, regenerateCloneProject } from './packages/cloner/dist/runClon
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
-  getUserByGoogleId, getUserByGithubId, getUserByStripeCustomerId, insertOAuthUser,
+  getUserByGoogleId, getUserByGithubId, getUserByStripeCustomerId, getUserByWhopMembershipId, insertOAuthUser,
   getSession, insertSession, deleteSession, deleteUserSessions, cleanExpiredSessions,
   insertClone, updateCloneLabel, updateCloneStatus, getClonesByUser, getAllClones, deleteCloneById, deleteUserClones, getCloneCountThisMonth,
   getAllPayments, getPaymentsByUser, getPaymentById, insertPayment, updatePayment, getPendingPaymentByUserPlan, getAdminStats,
+  getPaymentByTxId, updatePaymentFields,
   getSettings, saveSettings,
   getUserBlockReason, getUserBlockReasons, setUserBlockReason,
-  getShare, insertShare, insertUsageEvent, countUsageEventsSince,
+  getShare, insertShare, insertUsageEvent, deleteUsageEvent, countUsageEventsSince,
   getAllPromoCodes, getPromoCode, insertPromoCode, incrementPromoUsed, deletePromoCode,
   getAllErrors, insertError, deleteError, clearErrors, pruneErrors,
-  insertAudit, getAuditLog, getAuditCount, pruneAuditLog, audit,
+  insertAudit, getAuditLog, getAuditCount, pruneAuditLog, pruneAbandonedWhopCheckouts, audit,
   insertAnnouncement, getAllAnnouncements,
   insertContactSubmission, getContactSubmissions,
   getCloneByOutDir, uploadCloneFile, downloadCloneFile, saveCloneTextFile, getCloneTextFile,
   createCloneFileSignedUrl, uploadExportZipForDownload, isStorageSizeLimitError,
-  getAffiliateOwnerBySlug, saveAffiliateSlug, getAffiliateReferrals, addAffiliateReferral, getAffiliateVisits, addAffiliateVisit,
 } from './db.js';
 import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
-import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript } from './lib/clonePreviewRuntime.js';
+import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './lib/clonePreviewRuntime.js';
+import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
+import {
+  whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
+  retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
+  listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS, lookupWhopUser,
+} from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
 let bcrypt = null, nodemailer = null, StripeLib = null;
@@ -54,7 +60,6 @@ const DEFAULT_APP_URL = (
 ).replace(/\/$/, '');
 // Only use an explicit override — never hardcode production domain on preview deploys.
 const CANONICAL_APP_URL = (process.env.PUBLIC_APP_URL || process.env.SHARE_BASE_URL || '').replace(/\/$/, '');
-const DEFAULT_AFFONSO_PUBLIC_ID = 'cmpj1i5tn00087mxngp80ddzy';
 
 const jobs = new Map();
 const ACTIVE_JOB_STATUSES = new Set(['running', 'saving', 'queued']);
@@ -226,6 +231,7 @@ function refundRateLimit(key) {
 setInterval(() => { const now = Date.now(); for (const [k, v] of rateLimits) { if (now > v.resetAt) rateLimits.delete(k); } }, 300000);
 setInterval(async () => { try { await cleanExpiredSessions(Date.now()); } catch {} }, 3600000);
 setInterval(async () => { try { await pruneAuditLog(); } catch {} }, 3600000);
+setInterval(async () => { try { await pruneAbandonedWhopCheckouts(); } catch {} }, 3600000);
 // Evict finished jobs older than 4 hours from memory; they remain in DB and on disk.
 setInterval(() => {
   const cutoff = Date.now() - 4 * 60 * 60 * 1000;
@@ -245,6 +251,20 @@ const PLAN_LIMITS = {
 };
 const USAGE_KIND_LIMIT_KEY = { edit: 'editsPerMonth', save: 'savesPerMonth', share: 'sharesPerMonth' };
 const PAID_PLAN_KEYS = ['starter', 'growth', 'unlimited'];
+/** Plan order for upgrade rules: a customer may only move to a higher rank. */
+const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
+function planRank(plan) {
+  return PLAN_RANK[normalizePlan(plan)] ?? 0;
+}
+/** Figma export and templates are Growth and Scale features. */
+function hasGrowthFeatures(plan) {
+  return planRank(plan) >= PLAN_RANK.growth;
+}
+const GROWTH_FEATURE_ERROR = (feature) => `${feature}: available on the Growth and Scale plans. Upgrade to use it.`;
+/** Clones counted against the monthly quota (deleting a clone does not give it back). */
+function clonesUsedThisPeriod(user) {
+  return countUsageEventsSince(user.id, 'clone', planPeriodStart(user).toISOString());
+}
 const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', enterprise: 'unlimited' };
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
@@ -305,9 +325,9 @@ const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE
 const FULL_SITE_DEPTH = Math.max(50, parseInt(process.env.CLONYFY_FULL_SITE_DEPTH || '256', 10) || 256);
 const SERVERLESS_FULL_SITE_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_FULL_SITE_MAX_PAGES || String(SERVERLESS_MAX_PAGES), 10) || SERVERLESS_MAX_PAGES);
 const PLAN_PRICES = {
-  starter:    { monthly: 19.99, annual: 191.88 },
-  growth:     { monthly: 29.99, annual: 287.88 },
-  unlimited:  { monthly: 59.99, annual: 575.88 },
+  starter:    { monthly: 19.99, annual: 191.90 },
+  growth:     { monthly: 29.99, annual: 287.90 },
+  unlimited:  { monthly: 59.99, annual: 575.90 },
 };
 const PLAN_LABELS = {
   free: 'Free',
@@ -361,7 +381,7 @@ async function getUserUsageSummary(user) {
     countUsageEventsSince(user.id, 'edit', periodStart),
     countUsageEventsSince(user.id, 'save', periodStart),
     countUsageEventsSince(user.id, 'share', periodStart),
-    getCloneCountThisMonth(user.id, periodStart),
+    countUsageEventsSince(user.id, 'clone', periodStart),
   ]);
   return {
     periodStart,
@@ -444,7 +464,7 @@ function planFromStripePriceId(priceId) {
   }
   return 'free';
 }
-async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', renewsAt = null, stripeSubscriptionId = null, cancelAtPeriodEnd = 0 } = {}) {
+async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', renewsAt = null, stripeSubscriptionId = null, whopMembershipId = null, whopUserId = null, cancelAtPeriodEnd = 0 } = {}) {
   const confirmedPlan = normalizePlan(plan);
   if (!isPaidPlan(confirmedPlan)) return null;
   const fields = {
@@ -456,6 +476,8 @@ async function activatePaidPlanForUser(userId, { plan, interval = 'monthly', ren
   };
   if (renewsAt) fields.plan_renews_at = renewsAt instanceof Date ? renewsAt.toISOString() : String(renewsAt);
   if (stripeSubscriptionId) fields.stripe_subscription_id = stripeSubscriptionId;
+  if (whopMembershipId) fields.whop_membership_id = whopMembershipId;
+  if (whopUserId) fields.whop_user_id = whopUserId;
   await updateUser(userId, fields);
   _invalidateUserSessions(userId);
   return confirmedPlan;
@@ -469,6 +491,203 @@ function stripeSubscriptionPlan(sub, fallbackPlan = 'free') {
     if (isPaidPlan(pricePlan)) return pricePlan;
   }
   return 'free';
+}
+
+// ── Whop billing ─────────────────────────────────────────────────────────────
+/** Which of our users a Whop membership/payment belongs to. */
+async function resolveWhopUser(obj, membershipId) {
+  const userId = obj?.metadata?.userId;
+  if (userId) { const u = await getUserById(userId); if (u) return { user: u, pending: null }; }
+  const checkoutId = obj?.checkout_configuration_id;
+  if (checkoutId) {
+    const pending = await getPaymentByTxId(checkoutId);
+    if (pending?.user_id) { const u = await getUserById(pending.user_id); if (u) return { user: u, pending }; }
+  }
+  if (membershipId) { const u = await getUserByWhopMembershipId(membershipId); if (u) return { user: u, pending: null }; }
+  const email = obj?.user?.email || obj?.member?.email;
+  if (email) { const u = await getUserByEmail(String(email).toLowerCase()); if (u) return { user: u, pending: null }; }
+  return { user: null, pending: null };
+}
+
+function whopPlanFor(obj, fallbackPlan, fallbackInterval) {
+  const mapped = planFromWhopPlanId(obj?.plan?.id);
+  if (mapped) return mapped;
+  const metaPlan = normalizePlan(obj?.metadata?.plan || fallbackPlan);
+  return { plan: metaPlan, interval: obj?.metadata?.interval || fallbackInterval || 'monthly' };
+}
+
+/**
+ * After an upgrade the old membership would keep renewing; stop it at period end. If the
+ * API key may not cancel, record an admin error so it is cancelled by hand (no silent
+ * double billing).
+ */
+async function retireReplacedWhopMembership(user, oldMembershipId, newMembershipId) {
+  try {
+    await cancelWhopMembership(oldMembershipId, 'at_period_end');
+    audit(user.id, user.name, 'whop_membership_replaced', `old=${oldMembershipId} new=${newMembershipId}`, null);
+  } catch (err) {
+    console.error('[whop] could not cancel replaced membership', oldMembershipId, err.message);
+    try {
+      await insertError({
+        id: randomUUID(), userId: user.id, userName: user.name, url: '/api/whop/webhook',
+        errorSummary: `ACTION NEEDED: cancel old Whop membership ${oldMembershipId} for ${user.email} (upgraded to ${newMembershipId}); API cancel failed: ${err.message}`,
+        logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString(),
+      });
+    } catch {}
+  }
+}
+
+/** True once Whop reported a settled payment for this membership (recorded by payment.succeeded). */
+async function hasPaidWhopPayment(userId, membershipId) {
+  const rows = await getPaymentsByUser(userId).catch(() => []);
+  return rows.some((p) => p.method === 'whop' && p.status === 'confirmed' && Number(p.amount) > 0
+    && String(p.tx_id || '').startsWith('pay_') && String(p.note || '').includes(membershipId));
+}
+
+/** Grant the paid plan for an active Whop membership. Idempotent. */
+async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fallbackInterval = null } = {}) {
+  let user = userId ? await getUserById(userId) : null;
+  let pending = null;
+  if (!user) ({ user, pending } = await resolveWhopUser(m, m.id));
+  if (!user) throw new Error(`No Clonyfy user for Whop membership ${m.id}`);
+  const { plan, interval } = whopPlanFor(m, fallbackPlan || pending?.plan, fallbackInterval || pending?.interval);
+  if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${m?.plan?.id})`);
+  const renewsAt = m.renewal_period_end ? new Date(m.renewal_period_end) : null;
+  const previousMembershipId = user.whop_membership_id && user.whop_membership_id !== m.id ? user.whop_membership_id : null;
+  // An older, lower membership (e.g. the one replaced by an upgrade) must never pull the user back down.
+  if (previousMembershipId && isPaidPlan(user.plan) && planRank(plan) < planRank(user.plan)) {
+    audit(user.id, user.name, 'whop_membership_ignored', `membership=${m.id} plan=${plan} kept=${normalizePlan(user.plan)}`, null);
+    return { user, plan: normalizePlan(user.plan), interval, renewsAt, ignored: true };
+  }
+  await activatePaidPlanForUser(user.id, {
+    plan, interval, renewsAt,
+    whopMembershipId: m.id, whopUserId: m.user?.id || null,
+    cancelAtPeriodEnd: m.cancel_at_period_end ? 1 : 0,
+  });
+  if (previousMembershipId) await retireReplacedWhopMembership(user, previousMembershipId, m.id);
+  if (m.checkout_configuration_id) {
+    const p = pending || await getPaymentByTxId(m.checkout_configuration_id);
+    if (p && p.status === 'pending') {
+      await updatePaymentFields(p.id, { status: 'confirmed', processed_at: new Date().toISOString(), note: `Whop membership ${m.id}` });
+    }
+  }
+  return { user, plan, interval, renewsAt };
+}
+
+/** Whop money fields come either as numbers or as { amount: "19.99", currency } objects. */
+function whopAmount(...values) {
+  for (const v of values) {
+    const n = Number(v && typeof v === 'object' ? v.amount : v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+function whopCurrency(data) {
+  return String(data?.currency || data?.total?.currency || 'usd').toUpperCase();
+}
+
+async function handleWhopEvent(event) {
+  const type = event?.type || '';
+  const data = event?.data || {};
+
+  if (type === 'membership.activated') {
+    // A membership alone is not money: the plan is granted from payment.succeeded. This
+    // event only refreshes dates when that payment was already recorded (events can arrive
+    // in either order).
+    if (!['active', 'trialing'].includes(data.status)) return;
+    const { user } = await resolveWhopUser(data, data.id);
+    if (!user || !(await hasPaidWhopPayment(user.id, data.id))) return;
+    await applyWhopMembership(data, { userId: user.id });
+    return;
+  }
+
+  if (type === 'payment.succeeded') {
+    const membershipId = data.membership?.id || null;
+    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
+    // Only money that actually arrived upgrades anyone: paid status, a real amount, one of our plans.
+    const settled = (data.status ? data.status === 'paid' : true) && (data.substatus ? data.substatus === 'succeeded' : true);
+    const mappedPlan = planFromWhopPlanId(data.plan?.id);
+    if (!settled || amount <= 0 || !mappedPlan) {
+      console.log(`[whop] payment ${data.id} ignored (status=${data.status}/${data.substatus} amount=${amount} plan=${data.plan?.id})`);
+      return;
+    }
+    const { user } = await resolveWhopUser(data, membershipId);
+    if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
+    if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
+    const { plan, interval } = mappedPlan;
+    const note = membershipId ? `Whop membership ${membershipId}` : '';
+    // First payment of a checkout: complete that checkout's row instead of adding a second one.
+    const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
+    if (checkoutRow && checkoutRow.user_id === user.id) {
+      await updatePaymentFields(checkoutRow.id, {
+        status: 'confirmed', amount, currency: whopCurrency(data), tx_id: data.id || checkoutRow.tx_id,
+        processed_at: new Date().toISOString(), note,
+      });
+    } else {
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
+        amount, currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note,
+        promoCode: null, discountPercent: 0, interval, status: 'confirmed',
+        submittedAt: new Date().toISOString(),
+      });
+    }
+    // Paid: grant/extend the plan. Prefer the membership's own dates; if Whop hasn't
+    // exposed it yet, use the payment (applyWhopMembership never lowers a plan).
+    if (membershipId) {
+      let m = null;
+      try { m = await retrieveWhopMembership(membershipId); } catch (err) { console.error('[whop] membership fetch failed:', err.message); }
+      if (!m || !['active', 'trialing'].includes(m.status)) {
+        m = { id: membershipId, status: 'active', plan: data.plan, user: data.user, metadata: data.metadata,
+          checkout_configuration_id: data.checkout_configuration_id, renewal_period_end: null, cancel_at_period_end: false };
+      }
+      await applyWhopMembership(m, { userId: user.id, fallbackPlan: plan, fallbackInterval: interval });
+    }
+    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${whopAmount(data.total, data.usd_total, data.subtotal)}`, null);
+    return;
+  }
+
+  if (type === 'membership.cancel_at_period_end_changed') {
+    const user = data.id ? await getUserByWhopMembershipId(data.id) : null;
+    if (user) {
+      await updateUser(user.id, { cancel_at_period_end: data.cancel_at_period_end ? 1 : 0 });
+      _invalidateUserSessions(user.id);
+    }
+    return;
+  }
+
+  if (type === 'membership.deactivated') {
+    const user = data.id ? await getUserByWhopMembershipId(data.id) : null;
+    if (!user) return; // a membership we never linked (or already replaced)
+    await updateUser(user.id, { plan: 'free', plan_renews_at: null, whop_membership_id: null, cancel_at_period_end: 0, renewal_reminder_sent: 0, usage_alert_sent: 0 });
+    _invalidateUserSessions(user.id);
+    sendEmail(user.email, 'Your account has been downgraded to Free',
+      renderEmail('downgraded', { SUBJECT: 'Account downgraded to Free', NAME: user.name })
+    ).catch(() => {});
+    audit(user.id, user.name, 'whop_membership_deactivated', `membership=${data.id}`, null);
+    return;
+  }
+
+  if (type === 'payment.failed') {
+    const membershipId = data.membership?.id || null;
+    const { user } = await resolveWhopUser(data, membershipId);
+    if (!user) return;
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: (() => { const p = whopPlanFor(data, user.plan, user.billing_interval).plan; return isPaidPlan(p) ? p : normalizePlan(user.plan); })(),
+      amount: whopAmount(data.total, data.usd_total, data.subtotal),
+      currency: whopCurrency(data), method: 'whop',
+      txId: data.id || null, note: data.failure_message ? `Payment failed: ${String(data.failure_message).slice(0, 200)}` : 'Payment failed', promoCode: null, discountPercent: 0,
+      interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
+    }).catch(() => {});
+    let portalUrl = publicAppUrl() + '/dashboard/billing';
+    if (membershipId) { try { portalUrl = whopManageUrl(await retrieveWhopMembership(membershipId)); } catch {} }
+    sendEmail(user.email, 'Payment failed — action required',
+      renderEmail('payment-failed', { SUBJECT: 'Payment failed', NAME: user.name, PLAN: getPlanLabel(user.plan), PORTAL_URL: portalUrl })
+    ).catch(() => {});
+    audit(user.id, user.name, 'whop_payment_failed', `payment=${data.id}`, null);
+  }
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -549,8 +768,6 @@ const SETTINGS_DEFAULTS = {
   btc:'', eth:'', usdt_trc20:'', paypal_email:'', paypal_me:'', app_note:'',
   smtp_host:'', smtp_port:'587', smtp_user:'', smtp_pass:'', smtp_from:'',
   smtp_secure: false, app_url: DEFAULT_APP_URL, support_email:'',
-  affiliate_enabled:'true', affiliate_program_url:'https://affonso.io/', affiliate_public_id:DEFAULT_AFFONSO_PUBLIC_ID,
-  affiliate_program_id:'', affiliate_group_id:'', affiliate_api_key:'',
 };
 let _settingsCache = { ...SETTINGS_DEFAULTS };
 async function initSettings() { _settingsCache = await getSettings(); }
@@ -559,91 +776,6 @@ const invalidateSettingsCache = async () => {
   _settingsCache = await getSettings();
   _emailTemplateCache.clear(); // templates may reference APP_URL / SUPPORT_EMAIL from settings
 };
-
-function normalizeAffiliateUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  let parsed;
-  try {
-    parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-  } catch {
-    return null;
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-  return parsed.toString();
-}
-
-function cleanAffiliatePublicId(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  return /^[A-Za-z0-9_-]{3,180}$/.test(raw) ? raw : null;
-}
-
-function splitAffiliateName(nameOrEmail = '') {
-  const raw = String(nameOrEmail || '').trim();
-  const fallback = raw.includes('@') ? raw.split('@')[0] : raw;
-  const parts = (fallback || 'CLONYFY Partner').split(/\s+/).filter(Boolean);
-  return {
-    firstName: parts[0] || 'CLONYFY',
-    lastName: parts.slice(1).join(' ') || 'Partner',
-  };
-}
-
-function affiliateSlug(user) {
-  const raw = `${user.name || user.email || user.id || 'partner'}-${user.id || ''}`.toLowerCase();
-  const slug = raw.replace(/@.*/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-  return slug || `partner-${String(user.id || '').slice(0, 8) || 'clonyfy'}`;
-}
-
-function localReferralLink(req, user) {
-  const host = req?.headers?.['x-forwarded-host'] || req?.headers?.host || '';
-  const isLocal = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(host));
-  const base = isLocal ? `http://${host}` : publicAppUrl(req);
-  return `${String(base).replace(/\/$/, '')}/?via=${encodeURIComponent(affiliateSlug(user))}`;
-}
-
-function cleanReferralCode(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 80);
-}
-
-async function createAffonsoEmbedToken(user, settings) {
-  const names = splitAffiliateName(user.name || user.email);
-  const payload = {
-    programId: settings.affiliate_program_id,
-    partner: {
-      email: user.email,
-      name: user.name || `${names.firstName} ${names.lastName}`.trim(),
-    },
-  };
-  if (settings.affiliate_group_id) payload.groupId = settings.affiliate_group_id;
-  const affonsoRes = await fetch('https://api.affonso.io/v1/embed/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${settings.affiliate_api_key}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await affonsoRes.json().catch(() => ({}));
-  if (!affonsoRes.ok) {
-    throw new Error(data?.message || data?.error || 'Affonso could not create an embed token.');
-  }
-  const root = data.data || data;
-  return {
-    token: root.token || root.embedToken || root.publicToken || data.token || data.publicToken || '',
-    link: root.link || root.referralLink || root.referral_link || data.link || '',
-    partner: root.partner || data.partner || null,
-  };
-}
-
-async function getAffonsoEmbedData(token) {
-  const affonsoRes = await fetch(`https://api.affonso.io/v1/embed/data?token=${encodeURIComponent(token)}`);
-  const data = await affonsoRes.json().catch(() => ({}));
-  if (!affonsoRes.ok) {
-    throw new Error(data?.message || data?.error || 'Affonso dashboard data could not be loaded.');
-  }
-  return data.data || data;
-}
 
 function publicAppUrl(req = null) {
   // Explicit share-host override (optional). Prefer this only when set on purpose.
@@ -884,16 +1016,40 @@ async function ensureStripePrice(stripe, plan, interval) {
 }
 
 // ── Google OAuth state ────────────────────────────────────────────────────────
-const _oauthStates = new Map(); // state → expiresAt
-setInterval(() => { const now = Date.now(); for (const [k, v] of _oauthStates) if (now > v) _oauthStates.delete(k); }, 300000);
+const _oauthStates = new Map(); // state → { exp, affiliate }
+setInterval(() => { const now = Date.now(); for (const [k, v] of _oauthStates) if (now > v.exp) _oauthStates.delete(k); }, 300000);
+
+/** Saves the Whop affiliate who referred a new sign-up (or a user with no live referral). */
+async function rememberSignupAffiliate(user, code) {
+  const clean = cleanWhopAffiliateCode(code);
+  if (!user || !clean || clean.toLowerCase() === String(user.whop_username || '').toLowerCase()) return;
+  const live = user.whop_affiliate_code
+    && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+  if (live) return;
+  await updateUser(user.id, { whop_affiliate_code: clean, whop_affiliate_at: new Date().toISOString() }).catch(() => {});
+  _invalidateUserSessions(user.id);
+}
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 let _mailerTransport = null;
 let _mailerKey = '';
+/** SMTP config: admin settings first, then SMTP_* env vars (as for the OAuth keys). */
+function getMailSettings(raw = getCachedSettings()) {
+  return {
+    smtp_host: cleanSettingValue(raw.smtp_host) || envFirst('SMTP_HOST'),
+    smtp_port: cleanSettingValue(raw.smtp_host) ? raw.smtp_port : (envFirst('SMTP_PORT') || raw.smtp_port),
+    smtp_user: cleanSettingValue(raw.smtp_user) || envFirst('SMTP_USER'),
+    smtp_pass: cleanSettingValue(raw.smtp_pass) || envFirst('SMTP_PASS'),
+    smtp_from: cleanSettingValue(raw.smtp_from) || envFirst('SMTP_FROM'),
+    smtp_secure: raw.smtp_secure || envFirst('SMTP_SECURE'),
+  };
+}
+
 async function sendEmail(to, subject, html) {
-  const s = getCachedSettings();
+  const s = getMailSettings();
   if (!s.smtp_host || !nodemailer) {
-    console.log(`\n[Email → ${to}]\nSubject: ${subject}\n${html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()}\n`);
+    // Never log the body: it can carry password-reset and verification tokens.
+    console.log(`[Email not sent — SMTP not configured] to=${to} subject=${JSON.stringify(subject)}`);
     return;
   }
   const key = `${s.smtp_host}:${s.smtp_port}:${s.smtp_user}:${s.smtp_pass}:${s.smtp_secure}`;
@@ -901,7 +1057,7 @@ async function sendEmail(to, subject, html) {
     _mailerTransport = nodemailer.createTransport({
       host: s.smtp_host,
       port: parseInt(s.smtp_port, 10) || 587,
-      secure: s.smtp_secure === true || s.smtp_secure === '1' || s.smtp_secure === 'true' || s.smtp_port === '465',
+      secure: s.smtp_secure === true || s.smtp_secure === '1' || s.smtp_secure === 'true' || String(s.smtp_port) === '465',
       auth: s.smtp_user ? { user: s.smtp_user, pass: s.smtp_pass } : undefined,
     });
     _mailerKey = key;
@@ -952,7 +1108,7 @@ async function checkUsageAlert(userId) {
     const plan = normalizePlan(user.plan);
     const limits = getEffectivePlanLimits(plan);
     if (limits.clonesPerMonth === Infinity) return;
-    const used = await getCloneCountThisMonth(userId, planPeriodStart(user).toISOString());
+    const used = await clonesUsedThisPeriod(user);
     const pct = used / limits.clonesPerMonth;
     if (pct >= 0.8) {
       await updateUser(userId, { usage_alert_sent: 1 });
@@ -1110,22 +1266,6 @@ async function countClonePagesBestEffort(outDir) {
 }
 
 const _fileCache = new Map();
-function affonsoPixelHtml() {
-  const s = getCachedSettings();
-  const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-  const publicId = String(s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID).trim();
-  if (!enabled || !publicId) return '';
-  return `<script async defer src="https://cdn.affonso.io/js/pixel.min.js" data-affonso="${htmlEsc(publicId)}" data-cookie_duration="30"></script>`;
-}
-
-function injectAffonsoPixel(html) {
-  if (!html || /<script\b[^>]*src=["']https:\/\/cdn\.affonso\.io\/js\/pixel\.min\.js["'][^>]*>/i.test(html)) return html;
-  const script = affonsoPixelHtml();
-  if (!script) return html;
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${script}\n</head>`);
-  return `${script}\n${html}`;
-}
-
 /** Inject public frontend config (e.g. Community plugin URL after Figma publish). */
 function injectPublicRuntimeConfig(html) {
   if (!html) return html;
@@ -1150,7 +1290,6 @@ function serveFile(res, filePath, contentType, cacheSecs = 0) {
     }
     if (String(contentType || '').toLowerCase().includes('text/html')) {
       let html = data.toString('utf8');
-      html = injectAffonsoPixel(html);
       html = injectPublicRuntimeConfig(html);
       data = Buffer.from(html, 'utf8');
     }
@@ -1322,6 +1461,24 @@ function cloneStoragePrefixes(outDir) {
 
 function cloneStoragePath(outDir, relPath) {
   return `${cloneStoragePrefix(outDir)}/${normalizeCloneRelPath(relPath)}`;
+}
+
+/** Deletes a clone completely: output folder, stored copies, share links, job snapshot, DB row. */
+async function purgeClone({ outDir = null, cloneId = null } = {}) {
+  const dir = outDir ? resolveCloneOutDir(outDir) : '';
+  if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  for (const [id, job] of jobs.entries()) {
+    if ((dir && sameCloneOutDir(job.outDir, dir)) || (cloneId && id === cloneId)) jobs.delete(id);
+  }
+  await purgeCloneArtifacts({ outDir: dir || outDir, prefixes: outDir ? cloneStoragePrefixes(dir || outDir) : [], jobId: cloneId });
+  if (cloneId) await deleteCloneById(cloneId);
+}
+
+async function purgeUserClones(userId) {
+  for (const c of await getClonesByUser(userId).catch(() => [])) {
+    await purgeClone({ outDir: c.out_dir, cloneId: c.id }).catch((err) => console.error('[purge clone]', c.id, err.message));
+  }
+  await deleteUserClones(userId);
 }
 
 function cloneStoragePathCandidates(outDir, relPath) {
@@ -2136,6 +2293,30 @@ function previewReplayPatch(assetMap, targetOrigin = '') {
   if (window.HTMLEmbedElement) patchUrlProperty(HTMLEmbedElement.prototype, 'src');
   if (window.HTMLFormElement) patchUrlProperty(HTMLFormElement.prototype, 'action');
 
+  // Scripts that build markup as strings (el.innerHTML = '<img src="/flags/ge.svg">')
+  // bypass the property/attribute hooks above — localize URLs inside the HTML too.
+  const rewriteHtml = (html) => {
+    if (typeof html !== 'string' || !/\\b(?:src|srcset|poster)\\s*=|url\\(/i.test(html)) return html;
+    return html
+      .replace(/\\b(src|poster)\\s*=\\s*(["'])([^"']*)\\2/gi, (m, attr, q, url) => attr + '=' + q + localize(url) + q)
+      .replace(/\\b(srcset)\\s*=\\s*(["'])([^"']*)\\2/gi, (m, attr, q, value) => attr + '=' + q + rewriteSrcset(value) + q)
+      .replace(/\\bstyle\\s*=\\s*(["'])([^"']*)\\1/gi, (m, q, css) => 'style=' + q + rewriteCssText(css) + q);
+  };
+  for (const prop of ['innerHTML', 'outerHTML']) {
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, prop);
+    if (!desc || !desc.set || !desc.get) continue;
+    Object.defineProperty(Element.prototype, prop, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get() { return desc.get.call(this); },
+      set(value) { return desc.set.call(this, rewriteHtml(value)); },
+    });
+  }
+  const nativeInsertAdjacentHTML = Element.prototype.insertAdjacentHTML;
+  Element.prototype.insertAdjacentHTML = function(position, html) {
+    return nativeInsertAdjacentHTML.call(this, position, rewriteHtml(html));
+  };
+
   function rewriteCssText(value) {
     return String(value || '').replace(/url\\(\\s*(['"]?)([^'")\\s]+)\\1\\s*\\)/g, (match, quote, url) => {
       const next = localize(url);
@@ -2909,6 +3090,9 @@ function userPublic(u) {
     billingInterval: u.billing_interval || 'monthly',
     emailVerified: u.email_verified === 1 || u.email_verified === true,
     cancelAtPeriodEnd: u.cancel_at_period_end === 1,
+    hasWhopBilling: !!u.whop_membership_id,
+    // Paid plan with no subscription behind it = granted by hand (team, comp, support).
+    billingSource: !isPaidPlan(plan) ? null : u.whop_membership_id ? 'whop' : u.stripe_subscription_id ? 'stripe' : 'manual',
     createdAt: u.created_at,
   };
 }
@@ -3715,7 +3899,7 @@ function contentSecurityPolicyForPath(pathname) {
   }
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' https://cdn.affonso.io",
+    "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' fonts.googleapis.com",
     "font-src 'self' fonts.gstatic.com data:",
     "img-src 'self' data: blob: https:",
@@ -4071,7 +4255,7 @@ async function handleRequest(req, res) {
     if (!await verifyTurnstile(body.turnstileToken, ip)) {
       return json(res, { error: 'Please complete the human verification and try again.' }, 400);
     }
-    const referralCode = cleanReferralCode(body.referral || body.via || '');
+    const affiliateCode = cleanWhopAffiliateCode(body.affiliate);
     if (!name || !email || !password) return json(res, { error: 'Name, email and password are required' }, 400);
     if (password.length < 8) return json(res, { error: 'Password must be at least 8 characters' }, 400);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, { error: 'Invalid email address' }, 400);
@@ -4084,20 +4268,8 @@ async function handleRequest(req, res) {
     };
     await insertUser(user);
     await updateUser(user.id, { email_verified: 1 });
-    await saveAffiliateSlug(affiliateSlug(user), user.id);
-    if (referralCode) {
-      const ownerId = await getAffiliateOwnerBySlug(referralCode);
-      if (ownerId && ownerId !== user.id) {
-        await addAffiliateReferral(ownerId, {
-          userId: user.id,
-          name: user.name,
-          email: user.email,
-          status: 'Signed up',
-          source: referralCode,
-          createdAt: user.createdAt,
-        });
-      }
-    }
+    // Whop affiliate who sent this visitor; passed to Whop at checkout so they earn the commission.
+    await rememberSignupAffiliate(user, affiliateCode);
     const token = randomUUID();
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
@@ -4198,6 +4370,9 @@ async function handleRequest(req, res) {
     readJsonBody(req).then(async ({ templateId }) => {
       const safeId = String(templateId || '').replace(/[^a-z0-9-]/gi, '');
       if (!safeId || !TEMPLATES_META[safeId]) return json(res, { error: 'Template not found' }, 404);
+      if (safeId !== 'blank' && !hasGrowthFeatures(templateUser.plan)) {
+        return json(res, { error: GROWTH_FEATURE_ERROR('Templates') }, 403);
+      }
       const templateFile = join(__dirname, 'templates', 'starter-pages', `${safeId}.html`);
       if (!existsSync(templateFile)) return json(res, { error: 'Template file missing' }, 404);
       const id = randomUUID();
@@ -4478,7 +4653,7 @@ async function handleRequest(req, res) {
         const plan = normalizePlan(cloneUser.plan);
         const limits = getEffectivePlanLimits(plan);
         if (limits.clonesPerMonth !== Infinity) {
-          const used = await getCloneCountThisMonth(cloneUser.id, planPeriodStart(cloneUser).toISOString());
+          const used = await clonesUsedThisPeriod(cloneUser);
           if (used >= limits.clonesPerMonth) {
             return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade to clone more.` }, 429);
           }
@@ -4516,6 +4691,18 @@ async function handleRequest(req, res) {
       if (cloneUser) checkRateLimit(`clone_user:${cloneUser.id}`, cloneHourlyLimit(normalizePlan(cloneUser.plan)), 3600000);
 
       const id = randomUUID();
+      if (cloneUser) {
+        // Reserve the quota now, then re-count: two simultaneous requests can't both slip under the limit.
+        await insertUsageEvent({ id: `clone:${id}`, userId: cloneUser.id, kind: 'clone', outDir: null, createdAt: new Date().toISOString() });
+        const cloneLimit = getEffectivePlanLimits(normalizePlan(cloneUser.plan)).clonesPerMonth;
+        if (cloneLimit !== Infinity) {
+          const usedNow = await clonesUsedThisPeriod(cloneUser);
+          if (usedNow > cloneLimit) {
+            await deleteUsageEvent(`clone:${id}`).catch(() => {});
+            return json(res, { error: `Monthly limit reached (${cloneLimit}/${cloneLimit} for ${normalizePlan(cloneUser.plan)} plan). Upgrade to clone more.` }, 429);
+          }
+        }
+      }
       const hostname = target.hostname.replace(/\./g, '-');
       const outDir = resolve(OUTPUT_DIR, `${hostname}-${id.slice(0, 6)}`);
 
@@ -4702,6 +4889,10 @@ async function handleRequest(req, res) {
           cloneRecordSaved = true;
         } catch (dbErr) {
           job.logs.push(`[WARN] Could not save clone record: ${dbErr?.message || dbErr}`);
+        }
+        // A clone that failed without capturing anything doesn't use up the monthly quota.
+        if (!(exitCode === 0 && cloneReadable?.ok) && !job.pages && job.userId) {
+          await deleteUsageEvent(`clone:${job.id}`).catch(() => {});
         }
         const cloneSucceeded = exitCode === 0 && cloneReadable?.ok;
         if (exitCode === 0) {
@@ -5181,7 +5372,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/render') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     if (!html) return json(res, { error: 'No HTML provided' }, 400);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
@@ -5219,7 +5410,7 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const { html, svg, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
@@ -5259,7 +5450,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/figma/scene') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5309,7 +5500,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5364,7 +5555,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/download-figma-zip') {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
-    if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
+    if (!hasGrowthFeatures(figmaUser.plan)) return json(res, { error: GROWTH_FEATURE_ERROR('Figma export') }, 403);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
@@ -5759,14 +5950,10 @@ async function handleRequest(req, res) {
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(deleteUser, outDir)) return json(res, { error: 'Not found' }, 404);
     try {
-      if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
-      for (const [id, job] of jobs.entries()) {
-        if (sameCloneOutDir(job.outDir, outDir)) jobs.delete(id);
-      }
       const clones = await getClonesByUser(deleteUser.id).catch(() => []);
       const clone = (clones || []).find(c => sameCloneOutDir(c.out_dir, outDir))
         || await getCloneByOutDir(outDir).catch(() => null);
-      if (clone?.id) await deleteCloneById(clone.id);
+      await purgeClone({ outDir, cloneId: clone?.id || null });
       return json(res, { ok: true });
     } catch(err) { return json(res, { error: err.message }, 500); }
   }
@@ -5940,8 +6127,23 @@ async function handleRequest(req, res) {
     const user = await getUserById(userId);
     if (!user) return json(res, { error: 'User not found' }, 404);
     const fields = {};
-    if (body.plan !== undefined) fields.plan = normalizePlan(body.plan);
-    if (body.planRenewsAt !== undefined) fields.plan_renews_at = body.planRenewsAt;
+    // Paid access comes only from a settled Whop payment: admins may lower a plan or
+    // shorten paid time, never raise or extend it.
+    if (body.plan !== undefined) {
+      const nextPlan = normalizePlan(body.plan);
+      if (planRank(nextPlan) > planRank(user.plan)) {
+        return json(res, { error: 'Plans can only be upgraded by a confirmed Whop payment.' }, 403);
+      }
+      fields.plan = nextPlan;
+    }
+    if (body.planRenewsAt !== undefined) {
+      const next = body.planRenewsAt ? Date.parse(body.planRenewsAt) : null;
+      const current = user.plan_renews_at ? Date.parse(user.plan_renews_at) : null;
+      if (next !== null && (Number.isNaN(next) || current === null || next > current)) {
+        return json(res, { error: 'Paid time can only be extended by a confirmed Whop payment.' }, 403);
+      }
+      fields.plan_renews_at = body.planRenewsAt;
+    }
     if (body.billingInterval !== undefined) fields.billing_interval = body.billingInterval;
     if (body.blocked !== undefined) {
       fields.blocked = body.blocked ? 1 : 0;
@@ -5962,7 +6164,7 @@ async function handleRequest(req, res) {
     if (!user) return json(res, { error: 'User not found' }, 404);
     await deleteUserSessions(userId);
     _invalidateUserSessions(userId);
-    await deleteUserClones(userId);
+    await purgeUserClones(userId);
     await deleteUser(userId);
     audit(null, 'admin', 'admin_delete_user', `userId=${userId} email=${user.email}`, ip);
     return json(res, { ok: true });
@@ -6012,7 +6214,8 @@ async function handleRequest(req, res) {
   if (req.method === 'DELETE' && url.pathname.startsWith('/api/admin/clones/')) {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     const cloneId = url.pathname.slice('/api/admin/clones/'.length);
-    await deleteCloneById(cloneId);
+    const target = (await getAllClones().catch(() => [])).find(c => c.id === cloneId);
+    await purgeClone({ outDir: target?.out_dir || null, cloneId });
     return json(res, { ok: true });
   }
 
@@ -6077,6 +6280,7 @@ async function handleRequest(req, res) {
       stripe_ready: !stripeReason,
       stripe_error: stripeReason,
       stripe_publishable_key: s.stripe_publishable_key || '',
+      whop_enabled: whopConfigured(),
       google_oauth_enabled: !!getGoogleOAuthSettings(s).google_client_id,
       github_oauth_enabled: !!getGithubOAuthSettings(s).github_client_id,
     });
@@ -6086,111 +6290,16 @@ async function handleRequest(req, res) {
     const s = getCachedSettings();
     const google = getGoogleOAuthSettings(s);
     const github = getGithubOAuthSettings(s);
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
     return json(res, {
-      affiliate_enabled: enabled,
-      affiliate_program_url: s.affiliate_program_url || 'https://affonso.io/',
-      affiliate_public_id: enabled ? (s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID) : '',
-      affiliate_dashboard_enabled: enabled && !!(s.affiliate_api_key && s.affiliate_program_id),
       figma_community_plugin_url: String(
         process.env.FIGMA_COMMUNITY_PLUGIN_URL
         || 'https://www.figma.com/community/plugin/1677522506571131225/Clonyfy-Import',
       ).trim(),
       google_oauth_enabled: !!google.google_client_id,
       github_oauth_enabled: !!github.github_client_id,
+      affiliate_commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
+      email_enabled: !!getMailSettings().smtp_host,
     });
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/affiliate/embed-token') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to open the affiliate dashboard.' }, 401);
-    if (!checkRateLimit(`affiliate_embed:${user.id}`, 10, 600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const s = getCachedSettings();
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-    if (!enabled) return json(res, { error: 'Affiliate program is disabled.' }, 404);
-    if (!s.affiliate_api_key || !s.affiliate_program_id) {
-      return json(res, { ok: true, token: '', link: localReferralLink(req, user), configured: false });
-    }
-    try {
-      const embed = await createAffonsoEmbedToken(user, s);
-      if (!embed.token) return json(res, { error: 'Affonso did not return an embed token.' }, 502);
-      return json(res, { ok: true, token: embed.token, link: embed.link || localReferralLink(req, user) });
-    } catch (err) {
-      return json(res, { error: err.message || 'Affonso request failed. Check the API key and program ID.' }, 502);
-    }
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/affiliate/track') {
-    const body = await readJsonBody(req);
-    const referralCode = cleanReferralCode(body.referral || body.via || '');
-    if (!referralCode) return json(res, { ok: false, error: 'Missing referral code' }, 400);
-    if (!checkRateLimit(`affiliate_track:${ip}:${referralCode}`, 30, 3600000)) return json(res, { ok: true, throttled: true });
-    const ownerId = await getAffiliateOwnerBySlug(referralCode);
-    if (!ownerId) return json(res, { ok: true, tracked: false });
-    const visitorId = cleanReferralCode(body.visitorId || createHash('sha256').update(`${ip}:${referralCode}`).digest('hex').slice(0, 32));
-    await addAffiliateVisit(ownerId, {
-      visitorId,
-      source: referralCode,
-      path: String(body.path || '').slice(0, 200),
-      userAgent: String(req.headers['user-agent'] || '').slice(0, 200),
-      createdAt: new Date().toISOString(),
-    });
-    return json(res, { ok: true, tracked: true });
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/affiliate/dashboard') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to view your affiliate dashboard.' }, 401);
-    if (!checkRateLimit(`affiliate_dashboard:${user.id}`, 20, 600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const s = getCachedSettings();
-    const enabled = s.affiliate_enabled === true || s.affiliate_enabled === 'true';
-    if (!enabled) return json(res, { error: 'Affiliate program is disabled.' }, 404);
-    await saveAffiliateSlug(affiliateSlug(user), user.id).catch(() => {});
-    const localReferrals = await getAffiliateReferrals(user.id).catch(() => []);
-    const localVisits = await getAffiliateVisits(user.id).catch(() => []);
-    if (!s.affiliate_api_key || !s.affiliate_program_id) {
-      return json(res, {
-        ok: true,
-        configured: false,
-        needs: ['Affonso API Key', 'Affonso Program ID'],
-        data: {
-          link: localReferralLink(req, user),
-          referralLink: localReferralLink(req, user),
-          stats: { clicks: localVisits.length, referrals: localReferrals.length, conversions: 0, rewards: 0 },
-          referrals: localReferrals,
-          visits: localVisits,
-          rewards: [],
-        },
-        message: 'Your referral link is ready. Affonso reporting will appear here after the API key and program ID are connected in Admin Settings.',
-      });
-    }
-    try {
-      const embed = await createAffonsoEmbedToken(user, s);
-      if (!embed.token) return json(res, { error: 'Affonso did not return an embed token.' }, 502);
-      const data = await getAffonsoEmbedData(embed.token);
-      const link = data.link || data.referralLink || data.referral_link || data.partner?.referralLink || embed.link || localReferralLink(req, user);
-      const affonsoReferrals = Array.isArray(data.referrals) ? data.referrals : [];
-      return json(res, {
-        ok: true,
-        configured: true,
-        token: embed.token,
-        data: {
-          ...data,
-          link,
-          referralLink: link,
-          referrals: [...localReferrals, ...affonsoReferrals],
-          visits: localVisits,
-          stats: {
-            ...(data.stats || {}),
-            clicks: Math.max(Number(data.stats?.clicks || data.stats?.visits || 0), localVisits.length),
-            referrals: Math.max(Number(data.stats?.referrals || 0), localReferrals.length + affonsoReferrals.length),
-          },
-          partner: { ...(data.partner || embed.partner || {}), referralLink: link },
-        },
-      });
-    } catch (err) {
-      return json(res, { error: err.message || 'Affonso dashboard failed to load.' }, 502);
-    }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/payments/plans') {
@@ -6204,43 +6313,8 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/payments/submit') {
-    const user = await getSessionUser(req);
-    if (!user) return json(res, { error: 'Sign in to submit a payment.' }, 401);
-    if (!checkRateLimit(`pay_submit:${ip}`, 5, 3600000)) return json(res, { error: 'Too many requests.' }, 429);
-    const body = await readJsonBody(req);
-    const plan = normalizePlan(body.plan);
-    const { method, txId, note, promoCode, interval } = body;
-    if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
-    const billingInterval = interval === 'annual' ? 'annual' : 'monthly';
-    const validMethods = ['paypal', 'crypto_btc', 'crypto_eth', 'crypto_usdt'];
-    if (!method || !validMethods.includes(method)) return json(res, { error: 'Invalid payment method.' }, 400);
-    if (!txId || String(txId).trim().length < 4) return json(res, { error: 'Transaction ID is required.' }, 400);
-    if (await getPendingPaymentByUserPlan(user.id, plan, 'pending')) return json(res, { error: 'You already have a pending payment for this plan. Please wait for confirmation.' }, 409);
-    let discountPercent = 0, appliedCode = null;
-    if (promoCode) {
-      const codeRow = await getPromoCode(String(promoCode).toUpperCase().trim());
-      if (codeRow &&
-          (!codeRow.valid_until || new Date(codeRow.valid_until) > new Date()) &&
-          (!codeRow.max_uses || codeRow.used_count < codeRow.max_uses) &&
-          (!codeRow.plans || codeRow.plans === '[]' || safeJsonParse(codeRow.plans).includes(plan))) {
-        discountPercent = codeRow.discount_percent || 0;
-        appliedCode = codeRow.code;
-        await incrementPromoUsed(codeRow.code);
-      }
-    }
-    const prices = getPlanPrices(plan);
-    const baseAmount = prices[billingInterval] || 0;
-    const amount = Math.round(Math.max(0, baseAmount * (1 - discountPercent / 100)) * 100) / 100;
-    const payment = {
-      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan, amount, currency: 'USD', method, txId: String(txId).trim(),
-      note: String(note || '').trim().slice(0, 500),
-      promoCode: appliedCode, discountPercent, interval: billingInterval,
-      status: 'pending', submittedAt: new Date().toISOString(),
-    };
-    await insertPayment(payment);
-    audit(user.id, user.name, 'payment_submit', `plan=${plan} interval=${billingInterval} amount=${amount}`, ip);
-    return json(res, { ok: true, id: payment.id });
+    // Manual (crypto/PayPal) payments are discontinued: every purchase goes through Whop.
+    return json(res, { error: 'Payments are processed by Whop. Choose a plan on the Billing page.' }, 410);
   }
 
   if (req.method === 'GET' && url.pathname === '/api/admin/payments') {
@@ -6270,6 +6344,10 @@ async function handleRequest(req, res) {
     if (!['confirmed', 'rejected'].includes(status)) return json(res, { error: 'Invalid status' }, 400);
     const payment = await getPaymentById(payId);
     if (!payment) return json(res, { error: 'Payment not found' }, 404);
+    // Confirming by hand would grant a plan without money: Whop confirms its own payments.
+    if (status === 'confirmed') {
+      return json(res, { error: 'Payments are confirmed automatically when Whop reports the money arrived.' }, 403);
+    }
     const processedAt = new Date().toISOString();
     await updatePayment({ id: payId, status, processedAt, reason: String(reason || '').trim().slice(0, 500) });
     if (status === 'confirmed' && payment.user_id) {
@@ -6370,8 +6448,6 @@ async function handleRequest(req, res) {
       'btc', 'eth', 'usdt_trc20', 'paypal_email', 'paypal_me', 'app_note',
       'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'app_url',
       'support_email',
-      'affiliate_enabled', 'affiliate_program_url', 'affiliate_public_id',
-      'affiliate_program_id', 'affiliate_group_id', 'affiliate_api_key',
       'stripe_publishable_key',
       'stripe_price_starter_monthly', 'stripe_price_starter_annual',
       'stripe_price_popular_monthly', 'stripe_price_popular_annual',
@@ -6387,22 +6463,6 @@ async function handleRequest(req, res) {
     for (const k of plainKeys) {
       if (body[k] !== undefined && !isMaskedSecret(body[k])) {
         const value = String(body[k] || '').trim();
-        if (k === 'affiliate_enabled') {
-          current[k] = value === 'true' || value === '1' || value === 'yes' ? 'true' : 'false';
-          continue;
-        }
-        if (k === 'affiliate_program_url') {
-          const cleanUrl = normalizeAffiliateUrl(value);
-          if (cleanUrl === null) return json(res, { error: 'Affiliate program URL must be a valid http(s) URL.' }, 400);
-          current[k] = cleanUrl;
-          continue;
-        }
-        if (['affiliate_public_id', 'affiliate_program_id', 'affiliate_group_id'].includes(k)) {
-          const publicId = cleanAffiliatePublicId(value);
-          if (publicId === null) return json(res, { error: 'Affonso IDs can only contain letters, numbers, underscores, and dashes.' }, 400);
-          current[k] = publicId;
-          continue;
-        }
         const stripeError = validateStripeSetting(k, value);
         if (stripeError) return json(res, { error: stripeError }, 400);
         current[k] = value;
@@ -6532,7 +6592,10 @@ async function handleRequest(req, res) {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Not authenticated' }, 401);
     if (user.blocked) return await blockedUserResponse(res, user);
-    return json(res, { payments: await getPaymentsByUser(user.id) });
+    // Whop 'pending' rows only mark a checkout that was opened; hide the ones never paid.
+    const payments = (await getPaymentsByUser(user.id))
+      .filter((p) => !(p.method === 'whop' && p.status === 'pending'));
+    return json(res, { payments });
   }
 
   if (req.method === 'PUT' && url.pathname === '/api/user/profile') {
@@ -6560,7 +6623,18 @@ async function handleRequest(req, res) {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(user.plan)) return json(res, { error: 'No active subscription to cancel' }, 400);
-    if (user.stripe_subscription_id) {
+    if (user.whop_membership_id) {
+      try {
+        await cancelWhopMembership(user.whop_membership_id, 'at_period_end');
+      } catch (err) {
+        // Key without membership:cancel (or any Whop error): let the customer cancel on
+        // Whop's own page; membership.cancel_at_period_end_changed then syncs it back here.
+        let manageUrl = whopManageUrl(null);
+        try { manageUrl = whopManageUrl(await retrieveWhopMembership(user.whop_membership_id)); } catch {}
+        audit(user.id, user.name, 'cancel_subscription_redirect', `whop error: ${err.message}`, ip);
+        return json(res, { ok: false, redirectUrl: manageUrl });
+      }
+    } else if (user.stripe_subscription_id) {
       const stripe = getStripe();
       if (!stripe) return json(res, { error: stripeUnavailableReason() || 'Stripe is not configured. Contact support.' }, 503);
       try {
@@ -6585,7 +6659,7 @@ async function handleRequest(req, res) {
     const token = user._sessionToken;
     audit(user.id, user.name, 'account_deleted', `email=${user.email}`, ip);
     await deleteUserSessions(user.id);
-    await deleteUserClones(user.id);
+    await purgeUserClones(user.id);
     await deleteUser(user.id);
     return json(res, { ok: true });
   }
@@ -6699,7 +6773,7 @@ async function handleRequest(req, res) {
       return;
     }
     const state = randomUUID().replace(/-/g, '');
-    _oauthStates.set(state, Date.now() + 10 * 60 * 1000); // 10 min
+    _oauthStates.set(state, { exp: Date.now() + 10 * 60 * 1000, affiliate: cleanWhopAffiliateCode(url.searchParams.get('a')) }); // 10 min
     const apiUrl = apiPublicUrl(req);
     const redirectUri = `${apiUrl}/api/auth/google/callback`;
     const params = new URLSearchParams({
@@ -6724,7 +6798,8 @@ async function handleRequest(req, res) {
     const state = url.searchParams.get('state');
     const errParam = url.searchParams.get('error');
     if (errParam || !code || !state) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=cancelled&provider=google` }); res.end(); return; }
-    if (!_oauthStates.has(state)) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=google` }); res.end(); return; }
+    const oauthState = _oauthStates.get(state);
+    if (!oauthState || Date.now() > oauthState.exp) { res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=google` }); res.end(); return; }
     _oauthStates.delete(state);
     try {
       const redirectUri = `${apiUrl}/api/auth/google/callback`;
@@ -6766,6 +6841,8 @@ async function handleRequest(req, res) {
         audit(newId, googleName, 'register_google', null, ip);
       }
 
+      await rememberSignupAffiliate(dbUser, oauthState.affiliate);
+
       if (dbUser.blocked) {
         const reason = encodeURIComponent(await userBlockedReason(dbUser));
         res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=google&ban_reason=${reason}` });
@@ -6797,7 +6874,7 @@ async function handleRequest(req, res) {
       return;
     }
     const state = randomUUID().replace(/-/g, '');
-    _oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+    _oauthStates.set(state, { exp: Date.now() + 10 * 60 * 1000, affiliate: cleanWhopAffiliateCode(url.searchParams.get('a')) });
     const apiUrl = apiPublicUrl(req);
     const redirectUri = `${apiUrl}/api/auth/github/callback`;
     const params = new URLSearchParams({
@@ -6824,7 +6901,8 @@ async function handleRequest(req, res) {
       res.end();
       return;
     }
-    if (!_oauthStates.has(state)) {
+    const oauthState = _oauthStates.get(state);
+    if (!oauthState || Date.now() > oauthState.exp) {
       res.writeHead(302, { Location: `${frontend}/login?oauth_error=invalid_state&provider=github` });
       res.end();
       return;
@@ -6919,6 +6997,8 @@ async function handleRequest(req, res) {
         audit(newId, githubName, 'register_github', null, ip);
       }
 
+      await rememberSignupAffiliate(dbUser, oauthState.affiliate);
+
       if (dbUser.blocked) {
         const reason = encodeURIComponent(await userBlockedReason(dbUser));
         res.writeHead(302, { Location: `${frontend}/login?oauth_error=blocked&provider=github&ban_reason=${reason}` });
@@ -6949,6 +7029,161 @@ async function handleRequest(req, res) {
   // ── Stripe ────────────────────────────────────────────────────────────────────
 
   // POST /api/payments/stripe/checkout — create a Stripe Checkout session
+  // ── Whop payments ──────────────────────────────────────────────────────────
+  // POST /api/payments/whop/checkout — hosted Whop checkout for a paid plan
+  // GET/PUT /api/affiliate — the signed-in user's own Whop affiliate link.
+  if (url.pathname === '/api/affiliate' && (req.method === 'GET' || req.method === 'PUT')) {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    const view = (u) => {
+      const username = u.whop_username || '';
+      return {
+        username,
+        link: username ? `${publicAppUrl(req)}/?a=${encodeURIComponent(username)}` : '',
+        commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
+        whopUrl: 'https://whop.com',
+      };
+    };
+    if (req.method === 'GET') return json(res, view(user));
+    if (!checkRateLimit(`affiliate_save:${user.id}`, 10, 600000)) return json(res, { error: 'Too many attempts. Try again in a few minutes.' }, 429);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const raw = String(body.username || '').trim();
+    if (!raw) {
+      await updateUser(user.id, { whop_username: null });
+      _invalidateUserSessions(user.id);
+      return json(res, view({ ...user, whop_username: '' }));
+    }
+    const wanted = cleanWhopAffiliateCode(raw.replace(/^https?:\/\/(www\.)?whop\.com\/(@)?/i, '').replace(/\/.*$/, ''));
+    if (!wanted) return json(res, { error: 'Enter your Whop username (letters, numbers, dots, dashes or underscores).' }, 400);
+    let whopUser;
+    try {
+      whopUser = await lookupWhopUser(wanted);
+    } catch (err) {
+      return json(res, { error: `Could not reach Whop to check that username: ${err.message}` }, 502);
+    }
+    if (!whopUser) return json(res, { error: `No Whop account is called "${wanted}". Check the username on your Whop profile.`, code: 'whop_user_not_found' }, 400);
+    await updateUser(user.id, { whop_username: whopUser.username });
+    _invalidateUserSessions(user.id);
+    audit(user.id, user.name, 'affiliate_username_set', whopUser.username, ip);
+    return json(res, { ...view({ ...user, whop_username: whopUser.username }), whopName: whopUser.name });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/checkout') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Sign in first.' }, 401);
+    // Each call creates a checkout on Whop; cap it so a loop can't flood the Whop account.
+    if (!checkRateLimit(`whop_checkout:${user.id}`, 20, 600000)) return json(res, { error: 'Too many checkout attempts. Wait a few minutes and try again.' }, 429);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const plan = normalizePlan(body.plan);
+    if (!isPaidPlan(plan)) return json(res, { error: 'Invalid plan.' }, 400);
+    const bi = body.interval === 'annual' || body.interval === 'yearly' ? 'annual' : 'monthly';
+    if (isPaidPlan(user.plan)) {
+      const current = normalizePlan(user.plan);
+      if (plan === current) return json(res, { error: `You already have the ${getPlanLabel(current)} plan.`, code: 'already_on_plan' }, 409);
+      if (planRank(plan) < planRank(current)) {
+        return json(res, { error: `You're on ${getPlanLabel(current)}. You can only upgrade to a higher plan.`, code: 'downgrade_not_allowed' }, 409);
+      }
+    }
+    const reason = whopUnavailableReason(plan, bi);
+    if (reason) return json(res, { error: reason }, 503);
+    const appUrl = publicAppUrl(req);
+    // Whop affiliate attribution: a fresh `?a=` from the browser wins (last click),
+    // otherwise the one saved at sign-up while it's inside Whop's 30-day window.
+    const linkedCode = cleanWhopAffiliateCode(body.affiliate);
+    const savedFresh = user.whop_affiliate_code
+      && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+    let affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
+    // Affiliates don't earn commission on their own purchases.
+    if (affiliateCode && affiliateCode.toLowerCase() === String(user.whop_username || '').toLowerCase()) affiliateCode = '';
+    let checkout;
+    try {
+      checkout = await createWhopCheckout({
+        planId: whopPlanId(plan, bi),
+        metadata: { userId: user.id, plan, interval: bi, email: user.email },
+        redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+        affiliateCode,
+      });
+    } catch (err) {
+      return json(res, { error: `Whop checkout failed: ${err.message}` }, 502);
+    }
+    // Remember a link code only once Whop has accepted it as a real affiliate.
+    if (linkedCode && checkout.affiliateCode === linkedCode && linkedCode !== user.whop_affiliate_code) {
+      await updateUser(user.id, { whop_affiliate_code: linkedCode, whop_affiliate_at: new Date().toISOString() }).catch(() => {});
+      _invalidateUserSessions(user.id);
+    }
+    // Pending row keyed by the checkout id: the webhook uses it to find who paid.
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan, amount: PLAN_PRICES[plan]?.[bi] || 0, currency: 'USD', method: 'whop',
+      txId: checkout.id, note: 'Whop checkout started', promoCode: null, discountPercent: 0,
+      interval: bi, status: 'pending', submittedAt: new Date().toISOString(),
+    }).catch((err) => console.error('[whop checkout] pending payment insert failed:', err.message));
+    audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}${checkout.affiliateCode ? ` affiliate=${checkout.affiliateCode}` : ''}`, ip);
+    return json(res, { url: checkout.url, checkoutId: checkout.id });
+  }
+
+  // POST /api/payments/whop/sync — activate right after returning from checkout,
+  // without waiting for the webhook (which still arrives and is idempotent).
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/sync') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    if (whopUnavailableReason()) return json(res, { error: whopUnavailableReason() }, 503);
+    try {
+      const pending = (await getPaymentsByUser(user.id))
+        .filter((p) => p.method === 'whop' && p.status === 'pending' && String(p.tx_id || '').startsWith('ch_'));
+      if (!pending.length) return json(res, { ok: true, user: userPublic(user) });
+      // Same gate as the webhook: only a settled Whop payment for this checkout counts.
+      const payments = await listRecentWhopPayments();
+      for (const p of pending) {
+        const paid = payments.find((x) => x.checkout_configuration_id === p.tx_id && x.status === 'paid' && x.substatus === 'succeeded');
+        if (paid) {
+          await handleWhopEvent({ type: 'payment.succeeded', data: await retrieveWhopPayment(paid.id) });
+          break;
+        }
+      }
+      return json(res, { ok: true, user: userPublic(await getUserById(user.id)) });
+    } catch (err) {
+      return json(res, { error: `Whop sync failed: ${err.message}` }, 502);
+    }
+  }
+
+  // POST /api/payments/whop/portal — Whop's own page for card/plan/cancel management
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/portal') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Not authenticated' }, 401);
+    if (!user.whop_membership_id) return json(res, { error: 'No Whop subscription found' }, 400);
+    try {
+      return json(res, { url: whopManageUrl(await retrieveWhopMembership(user.whop_membership_id)) });
+    } catch {
+      return json(res, { url: whopManageUrl(null) });
+    }
+  }
+
+  // POST /api/whop/webhook — Whop events (Standard Webhooks signature, raw body)
+  if (req.method === 'POST' && url.pathname === '/api/whop/webhook') {
+    const rawBody = await readRawBody(req);
+    let verified;
+    try {
+      verified = verifyWhopWebhook(rawBody, req.headers);
+    } catch (err) {
+      const status = /not configured/.test(err.message) ? 503 : 400;
+      try { await insertError({ id: randomUUID(), userId: null, userName: 'whop-webhook', url: '/api/whop/webhook', errorSummary: 'Webhook rejected: ' + err.message, logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString() }); await pruneErrors(); } catch {}
+      res.writeHead(status); res.end(err.message); return;
+    }
+    const { id: deliveryId, event } = verified;
+    if (!(await claimWebhookEvent('whop', deliveryId))) { res.writeHead(200); res.end('duplicate'); return; }
+    try {
+      await handleWhopEvent(event);
+    } catch (err) {
+      console.error('[Whop webhook handler]', err.message);
+      await releaseWebhookEvent('whop', deliveryId).catch(() => {});
+      try { await insertError({ id: randomUUID(), userId: null, userName: 'whop-webhook', url: '/api/whop/webhook', errorSummary: `Webhook handler error (${event?.type}): ` + err.message, logs: '[]', startedAt: new Date().toISOString(), failedAt: new Date().toISOString() }); await pruneErrors(); } catch {}
+      // 500 so Whop retries; an acked event is never resent.
+      res.writeHead(500); res.end('handler error'); return;
+    }
+    res.writeHead(200); res.end('ok'); return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/payments/stripe/checkout') {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Sign in first.' }, 401);
@@ -7235,6 +7470,7 @@ async function handleRequest(req, res) {
       { loc: `${host}/`,           changefreq: 'weekly',  priority: '1.0' },
       { loc: `${host}/fr`,         changefreq: 'weekly',  priority: '0.8' },
       { loc: `${host}/register`,   changefreq: 'monthly', priority: '0.6' },
+      { loc: `${host}/affiliates`, changefreq: 'monthly', priority: '0.5' },
       { loc: `${host}/login`,      changefreq: 'monthly', priority: '0.4' },
       { loc: `${host}/privacy`,    changefreq: 'monthly', priority: '0.3' },
       { loc: `${host}/terms`,      changefreq: 'monthly', priority: '0.3' },
@@ -7364,7 +7600,7 @@ async function handleRequest(req, res) {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     return json(res, {
       adminPasswordSet: !!ADMIN_PASSWORD,
-      smtpConfigured: !!(getCachedSettings().smtp_host),
+      smtpConfigured: !!getMailSettings().smtp_host,
       stripeConfigured: !!(getStripeSettings().stripe_secret_key),
       stripeError: stripeUnavailableReason(),
       appUrlConfigured: !!(getCachedSettings().app_url),
@@ -7413,6 +7649,7 @@ async function ensureInit() {
   _initialized = true;
 
   try {
+    await ensureLocalSchema();
     const users = await getAllUsers();
     console.log(`[DB] Local PostgreSQL connected (${users.length} users).`);
   } catch (dbErr) {
