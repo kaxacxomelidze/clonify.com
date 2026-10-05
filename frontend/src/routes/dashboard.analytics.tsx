@@ -1,7 +1,7 @@
 import { CaptureTable } from "@/components/dashboard/captures";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import {
   Area,
@@ -17,19 +17,13 @@ import {
   YAxis,
 } from "recharts";
 import { TrendingUp } from "lucide-react";
-import {
-  ASSET_SPLIT,
-  CLONE_ACTIVITY,
-  CLONE_QUALITY,
-  EXPORT_SPLIT,
-  MONTHLY_PAGES,
-} from "@/components/dashboard/data";
+import type { CloneJob } from "@/components/dashboard/data";
 import { CountUp } from "@/components/anim";
 import { cn } from "@/lib/utils";
 
 const TITLE = "Analytics — Clonyfy dashboard";
 const DESCRIPTION =
-  "Track clone volume, pages captured, asset breakdown and export activity across your Clonyfy workspace.";
+  "Track clone volume, pages captured, outcomes and your most cloned sites across your Clonyfy workspace.";
 
 export const Route = createFileRoute("/dashboard/analytics")({
   head: () => ({
@@ -94,45 +88,54 @@ function AnalyticsPage() {
   const { jobs: CLONES } = useDashboardWorkspace();
   const [range, setRange] = useState<(typeof RANGES)[number]>("7 days");
   const reduceMotion = useReducedMotion();
-  const realPages = CLONES.reduce((sum, job) => sum + (job.pages || 0), 0);
-  const realAssets = CLONES.reduce((sum, job) => sum + (job.assets || 0), 0);
-  const activity =
-    CLONES.length > 0
-      ? CLONES.slice(0, range === "7 days" ? 7 : range === "30 days" ? 12 : 18)
-          .slice()
-          .reverse()
-          .map((job, index) => ({
-            label: job.domain.split(".")[0] || `Run ${index + 1}`,
-            clones: 1,
-            pages: job.pages || 0,
-          }))
-      : range === "7 days"
-        ? CLONE_ACTIVITY.map((item) => ({ ...item, label: item.day }))
-        : range === "30 days"
-          ? [
-              { label: "Week 1", clones: 0, pages: 0 },
-              { label: "Week 2", clones: 0, pages: 0 },
-              { label: "Week 3", clones: 0, pages: 0 },
-              { label: "Week 4", clones: 0, pages: 0 },
-            ]
-          : MONTHLY_PAGES.map((item) => ({
-              label: item.month,
-              pages: 0,
-              clones: 0,
-            }));
-  const totals = {
-    pages: CLONES.length ? realPages : activity.reduce((sum, item) => sum + item.pages, 0),
-    clones: CLONES.length || activity.reduce((sum, item) => sum + item.clones, 0),
-  };
+  const now = useMemo(() => new Date(), []);
+  const inRange = CLONES.filter((job) => {
+    const t = Date.parse(job.capturedAt || "");
+    return Number.isFinite(t) && t >= rangeStart(range, now).getTime();
+  });
+  const activity = buckets(range, now).map((bucket) => {
+    const jobs = inRange.filter((job) => {
+      const t = Date.parse(job.capturedAt || "");
+      return t >= bucket.from && t < bucket.to;
+    });
+    return {
+      label: bucket.label,
+      clones: jobs.length,
+      pages: jobs.reduce((sum, job) => sum + (job.pages || 0), 0),
+    };
+  });
+  const monthly = buckets("6 months", now).map((bucket) => ({
+    month: bucket.label,
+    pages: CLONES.filter((job) => {
+      const t = Date.parse(job.capturedAt || "");
+      return t >= bucket.from && t < bucket.to;
+    }).reduce((sum, job) => sum + (job.pages || 0), 0),
+  }));
+  const rangePages = inRange.reduce((sum, job) => sum + (job.pages || 0), 0);
   const stats = [
-    { label: "Clones", value: totals.clones },
-    { label: "Pages captured", value: totals.pages },
+    { label: "Clones", value: inRange.length },
+    { label: "Pages captured", value: rangePages },
     {
       label: "Avg pages / clone",
-      value: totals.clones ? Math.round(totals.pages / totals.clones) : 0,
+      value: inRange.length ? Math.round(rangePages / inRange.length) : 0,
     },
-    { label: "Assets", value: realAssets },
+    { label: "Assets", value: inRange.reduce((sum, job) => sum + (job.assets || 0), 0) },
   ];
+  const outcomes = [
+    { name: "Finished", value: CLONES.filter((job) => job.status === "done").length },
+    { name: "Failed", value: CLONES.filter((job) => job.status === "error").length },
+    {
+      name: "In progress",
+      value: CLONES.filter((job) => job.status === "running" || job.status === "queued").length,
+    },
+  ].filter((item) => item.value > 0);
+  const largest = [...CLONES]
+    .filter((job) => job.pages > 0)
+    .sort((a, b) => b.pages - a.pages)
+    .slice(0, 5);
+  const maxPages = largest[0]?.pages || 1;
+  const domains = topDomains(CLONES);
+  const maxDomain = domains[0]?.count || 1;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -141,7 +144,7 @@ function AnalyticsPage() {
           <p className="eyebrow">Overview</p>
           <h1 className="mt-2 display-lg">Analytics</h1>
           <p className="mt-2 max-w-xl text-sm text-muted-foreground">
-            Everything your workspace has cloned — volume, depth, assets and exports.
+            Everything your workspace has cloned — volume, depth, outcomes and top sites.
           </p>
         </div>
         <div className="flex rounded-full border border-border p-1">
@@ -178,7 +181,11 @@ function AnalyticsPage() {
             </p>
             <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <TrendingUp className="h-3.5 w-3.5" />
-              {CLONES.length ? "From your captures" : "No captures yet"}
+              {inRange.length
+                ? `Last ${range}`
+                : CLONES.length
+                  ? `None in the last ${range}`
+                  : "No clones yet"}
             </p>
           </motion.div>
         ))}
@@ -217,6 +224,7 @@ function AnalyticsPage() {
                 tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
               />
               <YAxis
+                allowDecimals={false}
                 tickLine={false}
                 axisLine={false}
                 tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
@@ -271,7 +279,7 @@ function AnalyticsPage() {
         <Panel title="Pages captured" hint="last 6 months" delay={0.1}>
           <div className="h-[240px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={MONTHLY_PAGES} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+              <BarChart data={monthly} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
                 <XAxis
                   dataKey="month"
                   tickLine={false}
@@ -279,6 +287,7 @@ function AnalyticsPage() {
                   tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
                 />
                 <YAxis
+                  allowDecimals={false}
                   tickLine={false}
                   axisLine={false}
                   tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
@@ -295,91 +304,75 @@ function AnalyticsPage() {
           </div>
         </Panel>
 
-        <Panel title="Asset breakdown" hint="all clones" delay={0.14}>
-          <div className="flex flex-wrap items-center justify-center gap-6">
-            <div className="h-[200px] w-[200px] shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    isAnimationActive={!reduceMotion}
-                    data={ASSET_SPLIT}
-                    dataKey="value"
-                    innerRadius={58}
-                    outerRadius={86}
-                    paddingAngle={3}
-                    stroke="none"
-                  >
-                    {ASSET_SPLIT.map((asset, i) => (
-                      <Cell
-                        key={asset.name}
-                        aria-label={`${asset.name}: ${asset.value} assets`}
-                        fill={MONO[i % MONO.length]}
-                      />
-                    ))}
-                  </Pie>
-                  <Tooltip contentStyle={tooltipStyle} />
-                </PieChart>
-              </ResponsiveContainer>
+        <Panel title="Clone outcomes" hint="all clones" delay={0.14}>
+          {outcomes.length ? (
+            <div className="flex flex-wrap items-center justify-center gap-6">
+              <div className="h-[200px] w-[200px] shrink-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      isAnimationActive={!reduceMotion}
+                      data={outcomes}
+                      dataKey="value"
+                      innerRadius={58}
+                      outerRadius={86}
+                      paddingAngle={outcomes.length > 1 ? 3 : 0}
+                      stroke="none"
+                    >
+                      {outcomes.map((item, i) => (
+                        <Cell
+                          key={item.name}
+                          aria-label={`${item.name}: ${item.value}`}
+                          fill={MONO[i % MONO.length]}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip contentStyle={tooltipStyle} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <ul className="min-w-[160px] flex-1 space-y-3">
+                {outcomes.map((item, i) => (
+                  <li key={item.name} className="flex items-center gap-3 text-sm">
+                    <span
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ background: MONO[i % MONO.length] }}
+                    />
+                    <span className="flex-1 text-muted-foreground">{item.name}</span>
+                    <span className="font-mono text-xs">{item.value}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
-            <ul className="min-w-[160px] flex-1 space-y-3">
-              {ASSET_SPLIT.map((a, i) => (
-                <li key={a.name} className="flex items-center gap-3 text-sm">
-                  <span
-                    className="h-2.5 w-2.5 rounded-full"
-                    style={{ background: MONO[i % MONO.length] }}
-                  />
-                  <span className="flex-1 text-muted-foreground">{a.name}</span>
-                  <span className="font-mono text-xs">{a.value}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
+          ) : (
+            <EmptyPanel />
+          )}
         </Panel>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Panel title="Clone quality" hint="average score" delay={0.18}>
-          <ul className="space-y-5">
-            {CLONE_QUALITY.map((q, i) => (
-              <li key={q.label}>
-                <div className="mb-2 flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">{q.label}</span>
-                  <span className="font-mono text-xs">{q.value}%</span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-accent">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${q.value}%` }}
-                    transition={{ duration: 1, delay: 0.2 + i * 0.08, ease: [0.16, 1, 0.3, 1] }}
-                    className="h-full rounded-full"
-                    style={{ background: "var(--analytics-pages)" }}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
+        <Panel title="Largest clones" hint="by pages captured" delay={0.18}>
+          {largest.length ? (
+            <BarList
+              items={largest.map((job) => ({ key: job.id, label: job.domain, value: job.pages }))}
+              max={maxPages}
+              unit="pages"
+            />
+          ) : (
+            <EmptyPanel />
+          )}
         </Panel>
 
-        <Panel title="Export formats" hint="share of exports" delay={0.22}>
-          <ul className="space-y-5">
-            {EXPORT_SPLIT.map((e, i) => (
-              <li key={e.name}>
-                <div className="mb-2 flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">{e.name}</span>
-                  <span className="font-mono text-xs">{e.value}%</span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-accent">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${e.value}%` }}
-                    transition={{ duration: 1, delay: 0.25 + i * 0.08, ease: [0.16, 1, 0.3, 1] }}
-                    className="h-full rounded-full"
-                    style={{ background: MONO[i % MONO.length] }}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
+        <Panel title="Most cloned sites" hint="clones per domain" delay={0.22}>
+          {domains.length ? (
+            <BarList
+              items={domains.map((d) => ({ key: d.domain, label: d.domain, value: d.count }))}
+              max={maxDomain}
+              unit="clones"
+            />
+          ) : (
+            <EmptyPanel />
+          )}
         </Panel>
       </div>
 
@@ -387,5 +380,95 @@ function AnalyticsPage() {
         <CaptureTable jobs={CLONES} caption="Recent clones" />
       </Panel>
     </div>
+  );
+}
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function startOfDay(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function rangeStart(range: (typeof RANGES)[number], now: Date) {
+  if (range === "6 months") return new Date(now.getFullYear(), now.getMonth() - 5, 1);
+  return new Date(startOfDay(now).getTime() - ((range === "7 days" ? 7 : 30) - 1) * DAY);
+}
+
+/** Day buckets for 7/30 days, month buckets for 6 months, oldest first. */
+function buckets(range: (typeof RANGES)[number], now: Date) {
+  if (range === "6 months") {
+    return Array.from({ length: 6 }, (_, i) => {
+      const from = new Date(now.getFullYear(), now.getMonth() - 5 + i, 1);
+      const to = new Date(from.getFullYear(), from.getMonth() + 1, 1);
+      return {
+        label: from.toLocaleDateString("en-US", { month: "short" }),
+        from: from.getTime(),
+        to: to.getTime(),
+      };
+    });
+  }
+  const days = range === "7 days" ? 7 : 30;
+  const first = rangeStart(range, now).getTime();
+  return Array.from({ length: days }, (_, i) => {
+    const from = new Date(first + i * DAY);
+    return {
+      label:
+        days === 7
+          ? from.toLocaleDateString("en-US", { weekday: "short" })
+          : from.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      from: from.getTime(),
+      to: from.getTime() + DAY,
+    };
+  });
+}
+
+function topDomains(jobs: CloneJob[]) {
+  const counts = new Map<string, number>();
+  for (const job of jobs) counts.set(job.domain, (counts.get(job.domain) || 0) + 1);
+  return [...counts.entries()]
+    .map(([domain, count]) => ({ domain, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+}
+
+function BarList({
+  items,
+  max,
+  unit,
+}: {
+  items: { key: string; label: string; value: number }[];
+  max: number;
+  unit: string;
+}) {
+  return (
+    <ul className="space-y-5">
+      {items.map((item) => (
+        <li key={item.key}>
+          <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+            <span className="truncate text-muted-foreground">{item.label}</span>
+            <span className="shrink-0 font-mono text-xs">
+              {item.value} {unit}
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-accent">
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${Math.max(4, Math.round((item.value / max) * 100))}%`,
+                background: "var(--analytics-pages)",
+              }}
+            />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function EmptyPanel() {
+  return (
+    <p className="py-10 text-center text-sm text-muted-foreground">
+      Nothing here yet. Clone a website and your numbers appear here.
+    </p>
   );
 }

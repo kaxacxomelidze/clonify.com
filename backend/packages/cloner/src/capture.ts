@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, extname } from 'path';
 import mime from 'mime-types';
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext, Page } from 'playwright-core';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
 import { logger } from './logger.js';
 import { isPublicUrl, safeFetch } from './ssrfGuard.js';
@@ -513,12 +513,48 @@ export interface CaptureHooks {
   onArtifactWritten?: (event: ArtifactWrittenEvent) => Promise<void>;
 }
 
+const CONTAINER_TAGS = 'div|ul|ol|span|nav|section|select|tbody|dl|aside';
+const EMPTY_CONTAINER_RE = new RegExp(`<(${CONTAINER_TAGS})\\b([^>]*)>\\s*</\\1\\s*>`, 'gi');
+const INLINE_SCRIPT_RE = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi;
+
+function cssAttrValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * Selectors for elements that are empty in the server HTML and referenced (by id or
+ * data-* attribute name) from an inline script — i.e. filled in client-side.
+ */
+export function findScriptBuiltContainers(serverHtml: string): string[] {
+  if (!serverHtml) return [];
+  let scripts = '';
+  for (const m of serverHtml.matchAll(INLINE_SCRIPT_RE)) scripts += `${m[1]}\n`;
+  if (!scripts) return [];
+  const out = new Set<string>();
+  for (const m of serverHtml.matchAll(EMPTY_CONTAINER_RE)) {
+    const attrs = m[2] || '';
+    const id = attrs.match(/\bid\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (id && scripts.includes(id)) {
+      out.add(`[id="${cssAttrValue(id)}"]`);
+      continue;
+    }
+    for (const d of attrs.matchAll(/\b(data-[a-z0-9_-]+)(?:\s*=\s*["']([^"']*)["'])?/gi)) {
+      const name = d[1];
+      if (!scripts.includes(name)) continue;
+      out.add(d[2] != null ? `${m[1]}[${name}="${cssAttrValue(d[2])}"]` : `${m[1]}[${name}]`);
+      break;
+    }
+    if (out.size >= 50) break;
+  }
+  return [...out];
+}
+
 export async function capturePage(
   context: BrowserContext,
   pageUrl: string,
   assetsDir: string,
   hooks: CaptureHooks = {},
-): Promise<{ record: PageRecord; links: string[] }> {
+): Promise<{ record: PageRecord; links: string[]; navLinks: string[] }> {
   ensurePlaceholderAsset(assetsDir);
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
   // Marketing/deep pages need deeper scroll even on hosted fast clones.
@@ -547,7 +583,7 @@ export async function capturePage(
       if (!IO) return;
       window.IntersectionObserver = class ForcedIntersectingObserver {
         readonly root: Element | Document | null = null;
-        readonly rootMargin = '0px';
+        readonly rootMargin: string = '0px';
         readonly thresholds: ReadonlyArray<number> = [0];
         private readonly cb: IntersectionObserverCallback;
         constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
@@ -943,8 +979,10 @@ export async function capturePage(
 
   try { // outer try - ensures page.close() always runs
   logger.debug(`  [NAV] -> ${pageUrl}`);
+  let serverHtml = '';
   try {
     const mainResponse = await page.goto(pageUrl, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT });
+    try { serverHtml = (await mainResponse?.text()) || ''; } catch { /* body unavailable */ }
     const status = mainResponse?.status();
     if (status && status >= 400) {
       throw new Error(`HTTP ${status}`);
@@ -1725,12 +1763,21 @@ export async function capturePage(
         img.loading = 'eager';
         img.decoding = 'sync';
         const cs = window.getComputedStyle(video);
+        // Keep the site's own CSS hooks (e.g. `.hero-bg{position:absolute;inset:0}`) —
+        // without them a background video's poster lands in normal flow and pushes content down.
+        if (video.className) img.className = String(video.className);
+        if (video.id) img.id = video.id;
+        const layered = cs.position === 'absolute' || cs.position === 'fixed';
         img.style.cssText = [
           'display:block',
           'width:100%',
           'height:100%',
           'max-width:100%',
           'object-fit:cover',
+          cs.objectPosition ? `object-position:${cs.objectPosition}` : '',
+          layered ? `position:${cs.position}` : '',
+          layered ? `top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : '',
+          layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
           cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
         ].filter(Boolean).join(';');
         img.setAttribute('data-clonyfy-video-poster', '1');
@@ -1793,12 +1840,19 @@ export async function capturePage(
             img.loading = 'eager';
             img.setAttribute('data-clonyfy-video-frame', '1');
             const cs = window.getComputedStyle(video);
+            if (video.className) img.className = String(video.className);
+            if (video.id) img.id = video.id;
+            const layered = cs.position === 'absolute' || cs.position === 'fixed';
             img.style.cssText = [
               'display:block',
               'width:100%',
               'height:100%',
               'max-width:100%',
               'object-fit:cover',
+              cs.objectPosition ? `object-position:${cs.objectPosition}` : '',
+              layered ? `position:${cs.position}` : '',
+              layered ? `top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : '',
+              layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
               cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
             ].filter(Boolean).join(';');
             video.replaceWith(img);
@@ -1827,7 +1881,7 @@ export async function capturePage(
     }
   }
 
-  await page.evaluate(async (fast: boolean, carouselSkip: string, _shopifyDeep: boolean) => {
+  await page.evaluate(async ({ fast, carouselSkip }: { fast: boolean; carouselSkip: string }) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await delay(fast ? 500 : 1500);
 
@@ -1939,7 +1993,7 @@ export async function capturePage(
         el.classList.add('aos-animate');
       }
     });
-  }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
+  }, { fast: fastScroll, carouselSkip: CAROUSEL_SKIP_SELECTOR }).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
 
@@ -2091,6 +2145,28 @@ export async function capturePage(
 
   if (!(await restoreRequestedUrl(page, pageUrl, 'after nav interaction recording'))) {
     throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
+  }
+
+  // Containers that the server sent empty and an inline script fills (widgets, pickers,
+  // menus) must be saved empty again: the site's script still runs in the preview and
+  // would otherwise build them a second time next to the captured copy.
+  const scriptBuilt = findScriptBuiltContainers(serverHtml);
+  if (scriptBuilt.length) {
+    const reset = await page.evaluate((selectors: string[]) => {
+      let n = 0;
+      for (const sel of selectors) {
+        let nodes: Element[] = [];
+        try { nodes = Array.from(document.querySelectorAll(sel)); } catch { continue; }
+        for (const el of nodes) {
+          if (!el.childNodes.length) continue;
+          el.innerHTML = '';
+          el.setAttribute('data-clonyfy-script-built', '1');
+          n++;
+        }
+      }
+      return n;
+    }, scriptBuilt).catch(() => 0);
+    if (reset) logger.debug(`  [SCRIPT-BUILT] reset ${reset} container(s) the page's own JS rebuilds`);
   }
 
   let html = await page.content();

@@ -152,7 +152,9 @@ export function GitHubPushDialog({
       const pushedWhat = [
         data.files ? `${data.files.toLocaleString()} files` : "",
         data.lfsFiles ? `${data.lfsFiles} large via Git LFS` : "",
-      ].filter(Boolean).join(", ");
+      ]
+        .filter(Boolean)
+        .join(", ");
       toast.success(
         (data.createdRepo ? "Created the GitHub repo and pushed the clone" : "Pushed to GitHub") +
           (pushedWhat ? ` (${pushedWhat}).` : "."),
@@ -182,8 +184,8 @@ export function GitHubPushDialog({
         <DialogDescription>
           Pushes captured clone files to GitHub. Needs a paid plan and a PAT with{" "}
           <strong>repo</strong> scope. Empty repos are fine (we create the first commit). If{" "}
-          <code>owner/repo</code> does not exist under your user, we try to create it. Token stays in
-          this browser tab only.
+          <code>owner/repo</code> does not exist under your user, we try to create it. Token stays
+          in this browser tab only.
         </DialogDescription>
         <div className="mt-4 space-y-3">
           <label className="block text-sm">

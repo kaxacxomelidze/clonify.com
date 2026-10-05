@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import type { Page } from 'playwright';
+import type { Page } from 'playwright-core';
 import { logger } from './logger.js';
 import { IS_FAST_CLONE } from './serverlessBudget.js';
 
