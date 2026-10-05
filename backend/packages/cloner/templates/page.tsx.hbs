@@ -279,7 +279,7 @@ function stripStaleClonyfyPatches(html: string): string {
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-interactions-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-animation-runtime\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
-  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
+  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_(?:fix|css)__["'][^>]*>[\s\S]*?<\/style>/gi, '');
   return out;
 }
 
