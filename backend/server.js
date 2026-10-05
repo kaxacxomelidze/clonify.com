@@ -34,7 +34,7 @@ import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
-import { buildPreviewNavigationScript, buildInteractionRuntimeScript } from './lib/clonePreviewRuntime.js';
+import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript } from './lib/clonePreviewRuntime.js';
 import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
@@ -2439,7 +2439,7 @@ function sanitizeStoredCloneHtml(html) {
   out = out.replace(/\sdata-clonyfy-editor-[a-z-]+(?:\s*=\s*(["'])[^"']*\1)?/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
-  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
+  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_(?:fix|css)__["'][^>]*>[\s\S]*?<\/style>/gi, '');
   out = out.replace(/<style\b[^>]*\bid\s*=\s*["']clonyfy-editor-style["'][^>]*>[\s\S]*?<\/style>/gi, '');
   out = out.replace(/<base\b[^>]*>/gi, '');
   out = out.replace(/\scontenteditable\s*=\s*(["']?)true\1/gi, '');
