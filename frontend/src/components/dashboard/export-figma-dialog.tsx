@@ -93,12 +93,12 @@ export function ExportFigmaDialog({
       triggerBrowserDownload(blob, sceneFileName());
       if (reason === "SCENE_TOO_LARGE_FOR_CLIPBOARD") {
         setHint(
-          "Scene was too large for the clipboard. JSON downloaded — in Figma Desktop open Clonyfy Import and paste or use Import.",
+          "Scene was too large for the clipboard. JSON downloaded — in Figma Desktop open Clonyfy Import and click “Open scene file…”.",
         );
         toast.message("Scene JSON downloaded (too large for clipboard).");
       } else {
         setHint(
-          "Clipboard was blocked. JSON downloaded — paste it into Clonyfy Import in Figma Desktop.",
+          "Clipboard was blocked. JSON downloaded — in Figma Desktop open Clonyfy Import and click “Open scene file…”.",
         );
         toast.message("Clipboard blocked — scene JSON downloaded instead.");
       }

@@ -168,29 +168,43 @@ function ensureFigmaExportBase(html) {
   return `<!doctype html><html><head>${baseTag}</head><body>${html}</body></html>`;
 }
 
-async function installAssetRoutes(context, readAsset) {
-  if (!readAsset) return;
-  await context.route(`${FIGMA_EXPORT_BASE}/**`, async (route) => {
+const FIGMA_EXPORT_DOC_PATH = '/__clonyfy_figma_export__';
+
+function isCloneAssetPath(pathname) {
+  return pathname === '/api/asset' || pathname.startsWith('/_assets/');
+}
+
+async function installAssetRoutes(context, readAsset, html) {
+  const exportOrigin = new URL(FIGMA_EXPORT_BASE).origin;
+  // Clone HTML may carry absolute asset URLs (e.g. http://localhost:5000/api/asset?…).
+  // Serve every clone asset from this export's outDir, on any host, with CORS
+  // so the in-page exporter can fetch() and embed it.
+  await context.route((url) => url.origin === exportOrigin || isCloneAssetPath(url.pathname), async (route) => {
     const reqUrl = new URL(route.request().url());
+    if (reqUrl.origin === exportOrigin && reqUrl.pathname === FIGMA_EXPORT_DOC_PATH) {
+      return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: html });
+    }
     let relPath = '';
     if (reqUrl.pathname === '/api/asset') {
       relPath = reqUrl.searchParams.get('path') || '';
     } else if (reqUrl.pathname.startsWith('/_assets/')) {
       relPath = `_assets${reqUrl.pathname.slice('/_assets'.length)}`;
-    } else {
-      return route.continue();
     }
+    const cors = { 'Access-Control-Allow-Origin': '*' };
+    // The export origin is fictional — never let requests hit DNS.
+    if (!relPath || !readAsset) return route.fulfill({ status: 404, headers: cors, body: 'Not found' });
     try {
-      relPath = decodeURIComponent(relPath);
+      try { relPath = decodeURIComponent(relPath); } catch {}
       const asset = await readAsset(relPath);
-      if (!asset?.body) return route.fulfill({ status: 404, body: 'Not found' });
+      if (!asset?.body) return route.fulfill({ status: 404, headers: cors, body: 'Not found' });
       return route.fulfill({
         status: 200,
+        headers: cors,
         contentType: asset.contentType || 'application/octet-stream',
         body: asset.body,
       });
     } catch {
-      return route.fulfill({ status: 404, body: 'Not found' });
+      return route.fulfill({ status: 404, headers: cors, body: 'Not found' });
     }
   });
 }
@@ -205,12 +219,9 @@ async function waitForPageReady(page) {
         el.style.setProperty('transform', 'none', 'important');
       });
       document.getElementById('clonyfy-scroll-reveal-style')?.remove();
-      document.querySelectorAll('[style*="opacity"]').forEach((el) => {
-        if (parseFloat(el.style.opacity || '1') <= 0.05) el.style.setProperty('opacity', '1', 'important');
-      });
-      document.querySelectorAll('[style*="visibility"]').forEach((el) => {
-        if (/hidden/i.test(el.style.visibility || '')) el.style.setProperty('visibility', 'visible', 'important');
-      });
+      // Do not force-show inline opacity:0 / visibility:hidden: the preview
+      // visibility patch already reveals real content, and the rest are
+      // inactive carousel / rotator layers that would stack up as clutter.
       document.documentElement.style.setProperty('opacity', '1', 'important');
       document.documentElement.style.setProperty('visibility', 'visible', 'important');
       if (document.body) {
@@ -240,7 +251,7 @@ export async function htmlToFigmaSvg(html, {
   title = 'Clonyfy export',
   readAsset = null,
 } = {}) {
-  const attempts = IS_CONSTRAINED ? 2 : 1;
+  const attempts = 2;
   let lastErr;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -277,14 +288,15 @@ async function renderFigmaExportOnce(html, { viewportWidth, title, readAsset, fo
     });
     const page = await context.newPage();
     try {
-      await installAssetRoutes(context, readAsset);
-
-      let cleaned = stripScrollReveal(html)
+      const cleaned = ensureFigmaExportBase(stripScrollReveal(html)
         .replace(/<script[^>]*data-clonyfy-preview-nav[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/<script[^>]*data-clonyfy-share-nav[^>]*>[\s\S]*?<\/script>/gi, '');
-      if (readAsset) cleaned = ensureFigmaExportBase(cleaned);
+        .replace(/<script[^>]*data-clonyfy-share-nav[^>]*>[\s\S]*?<\/script>/gi, ''));
+      await installAssetRoutes(context, readAsset, cleaned);
 
-      await page.setContent(cleaned, {
+      // Navigate (instead of setContent) so the document lives on the export
+      // origin: relative asset URLs resolve to the route above and in-page
+      // fetch() of images stays same-origin.
+      await page.goto(`${FIGMA_EXPORT_BASE}${FIGMA_EXPORT_DOC_PATH}`, {
         waitUntil: 'domcontentloaded',
         timeout: FIGMA_SET_CONTENT_MS,
       });
@@ -296,8 +308,10 @@ async function renderFigmaExportOnce(html, { viewportWidth, title, readAsset, fo
       }, {
         viewportWidth,
         maxLayers: FIGMA_MAX_LAYERS,
-        maxEmbeddedImageBytes: IS_CONSTRAINED ? 120_000 : 900_000,
-        embeddedImageBudget: IS_CONSTRAINED ? 1_600_000 : 8_000_000,
+        // Scene JSON travels clipboard → plugin UI → plugin main thread, so
+        // bitmaps are kept smaller than in the self-contained SVG.
+        maxEmbeddedImageBytes: IS_CONSTRAINED ? 120_000 : (format === 'scene' ? 650_000 : 2_000_000),
+        embeddedImageBudget: IS_CONSTRAINED ? 1_600_000 : (format === 'scene' ? 14_000_000 : 20_000_000),
         format,
         name: title,
         route,
@@ -337,7 +351,7 @@ export async function htmlToFigmaScene(html, {
   route = '/',
   readAsset = null,
 } = {}) {
-  const attempts = IS_CONSTRAINED ? 2 : 1;
+  const attempts = 2;
   let lastErr;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {

@@ -290,6 +290,8 @@ export function normalizeAllMotionStacksInDocument(): void {
 
   normalizeCarouselsInDocument();
   normalizeStackedTextRotatorsInDocument();
+  normalizeShellCaptureOverlapsInDocument();
+  restoreHeroBlendLayersInDocument();
 }
 
 export function isInsideCarousel(el: Element | null): boolean {

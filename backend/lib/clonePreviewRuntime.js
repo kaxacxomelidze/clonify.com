@@ -517,6 +517,9 @@ function interactionRuntime() {
     return null;
   }
   function setAttr(el, name, value) {
+    // Recordings from older clones may carry animation-driven inline styles on
+    // <html>/<body> (e.g. rotateX(4140deg)) that flip the whole page.
+    if (name === 'style' && (el === document.documentElement || el === document.body)) return;
     try { if (value === null) el.removeAttribute(name); else el.setAttribute(name, value); } catch (e) { /* ignore */ }
   }
   function closeItem(id) {
@@ -549,12 +552,56 @@ function interactionRuntime() {
     for (var i = 0; i < st.zones.length; i++) if (st.zones[i] && st.zones[i].contains(node)) return true;
     return false;
   }
+  /* Floating-UI panels carry absolute coordinates from the live capture (often
+     from a scrolled/transformed page) — re-anchor them under the current menu root. */
+  function placeFloating(nodes, anchor) {
+    if (!anchor || !anchor.getBoundingClientRect) return;
+    var r = anchor.getBoundingClientRect();
+    var sx = window.scrollX || window.pageXOffset || 0;
+    var sy = window.scrollY || window.pageYOffset || 0;
+    for (var n = 0; n < nodes.length; n++) {
+      var node = nodes[n];
+      if (!node.querySelectorAll) continue;
+      var list = Array.prototype.slice.call(node.querySelectorAll('[style*="--position-y"]'));
+      if (node.getAttribute && /--position-y/.test(node.getAttribute('style') || '')) list.unshift(node);
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        var fixed = getComputedStyle(el).position === 'fixed';
+        el.style.setProperty('--position-x', Math.round(r.left + (fixed ? 0 : sx)) + 'px');
+        el.style.setProperty('--position-y', Math.round(r.bottom + (fixed ? 0 : sy)) + 'px');
+        el.style.setProperty('--anchor-width', Math.round(r.width) + 'px');
+        el.style.setProperty('--anchor-height', Math.round(r.height) + 'px');
+        el.style.setProperty('--root-width', Math.round(r.width) + 'px');
+        el.style.setProperty('--root-height', Math.round(r.height) + 'px');
+        el.style.setProperty('--available-width', window.innerWidth + 'px');
+        el.style.setProperty('--available-height', Math.max(0, Math.round(window.innerHeight - r.bottom)) + 'px');
+      }
+    }
+  }
+  /* Portaled panels are often serialized mid-transition (data-status="close"),
+     which their CSS clips away — show them in the open state. */
+  function markOpen(nodes) {
+    for (var n = 0; n < nodes.length; n++) {
+      var node = nodes[n];
+      if (!node.querySelectorAll) continue;
+      var list = Array.prototype.slice.call(node.querySelectorAll('[data-status],[data-state]'));
+      list.unshift(node);
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        var s = el.getAttribute('data-status');
+        if (s === 'close' || s === 'closed' || s === 'closing') el.setAttribute('data-status', 'open');
+        var st = el.getAttribute('data-state');
+        if (st === 'closed' || st === 'closing') el.setAttribute('data-state', 'open');
+      }
+    }
+  }
   function openItem(item, trigger) {
     if (open[item.i]) return;
     for (var id in open) {
       if (!inZones(open[id], trigger)) closeItem(id);
     }
     var added = [];
+    var anchor = null;
     var zones = [trigger];
     var li = trigger.closest('li');
     if (li) zones.push(li);
@@ -569,7 +616,10 @@ function interactionRuntime() {
           for (var r = 0; r < op.r.length; r++) el.classList.remove(op.r[r]);
           for (var a = 0; a < op.a.length; a++) el.classList.add(op.a[a]);
         }
-        if (el !== document.documentElement && el !== document.body && !el.contains(trigger)) zones.push(el);
+        if (el !== document.documentElement && el !== document.body) {
+          if (!el.contains(trigger)) zones.push(el);
+          else if (!anchor && el !== trigger) anchor = el;
+        }
       } else if (op.k === 'add') {
         var parent = refEl(op.p, trigger);
         if (!parent) continue;
@@ -585,7 +635,11 @@ function interactionRuntime() {
         if (node.tagName !== 'STYLE') zones.push(node);
       }
     }
-    open[item.i] = { item: item, trigger: trigger, added: added, zones: zones, timer: 0 };
+    if (added.length) {
+      placeFloating(added, anchor || trigger.closest('nav,header,[role="navigation"]') || trigger);
+      markOpen(added);
+    }
+    open[item.i] = { item: item, trigger: trigger, added: added, zones: zones, timer: 0, at: Date.now() };
   }
   function scheduleClose(id, delay) {
     var st = open[id];
@@ -610,7 +664,12 @@ function interactionRuntime() {
       if (item.ev === 'hover' && isRealLink(trigger.closest('a'))) return;
       e.preventDefault();
       markHandled(e);
-      if (open[item.i]) closeItem(item.i);
+      var cur = open[item.i];
+      // Hover menus are opened by the pointer on the way to the click; leaving,
+      // clicking outside or Escape closes them.
+      if (cur && item.ev === 'hover' && Date.now() - cur.at < 600) { clearTimeout(cur.timer); cur.timer = 0; return; }
+      if (cur && item.ev === 'hover' && e.pointerType !== 'touch' && e.detail > 0) { clearTimeout(cur.timer); cur.timer = 0; return; }
+      if (cur) closeItem(item.i);
       else openItem(item, trigger);
     });
   });
@@ -1041,6 +1100,8 @@ function animationRuntime() {
       + '@keyframes clonyfy-fade-left{from{opacity:0;transform:translate3d(-28px,0,0)}to{opacity:1;transform:none}}'
       + '@keyframes clonyfy-fade-right{from{opacity:0;transform:translate3d(28px,0,0)}to{opacity:1;transform:none}}'
       + '@keyframes clonyfy-zoom-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}'
+      + '@keyframes clonyfy-hero-wave-drift{0%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(-1.8%,1.2%,0) scale(1.025)}100%{transform:translate3d(0,0,0) scale(1)}}'
+      + '@keyframes clonyfy-logo-marquee-scroll{from{transform:translate3d(0,0,0)}to{transform:translate3d(-50%,0,0)}}'
       + '[data-clonyfy-anim].clonyfy-anim-run{animation-duration:.7s;animation-fill-mode:both;'
       + 'animation-timing-function:cubic-bezier(.22,.61,.36,1);will-change:opacity,transform}'
       + '[data-clonyfy-anim][data-clonyfy-anim="fade-up"].clonyfy-anim-run{animation-name:clonyfy-fade-up}'
@@ -1048,8 +1109,79 @@ function animationRuntime() {
       + '[data-clonyfy-anim][data-clonyfy-anim="fade-left"].clonyfy-anim-run{animation-name:clonyfy-fade-left}'
       + '[data-clonyfy-anim][data-clonyfy-anim="fade-right"].clonyfy-anim-run{animation-name:clonyfy-fade-right}'
       + '[data-clonyfy-anim][data-clonyfy-anim="zoom-in"].clonyfy-anim-run{animation-name:clonyfy-zoom-in}'
-      + '.marquee,.marquee-inner,[class*="marquee" i],[class*="ticker" i]{animation-play-state:running!important}';
+      + '.marquee,.marquee-inner,[class*="marquee" i],[class*="ticker" i]{animation-play-state:running!important}'
+      // Hero layering + live-like title colors (Stripe dual-title + hard-light blend).
+      + '.hero-section-container,.hero-section__layout{isolation:auto!important}'
+      + '.hero-section__background,.hero-wave-animation{z-index:1!important;pointer-events:none!important}'
+      + '.hero-section__title--foreground,.hero-section__title--background,.hero-section__actions{position:relative!important;z-index:3!important}'
+      + '.hero-section__title--foreground{display:block!important;visibility:visible!important;opacity:1!important;'
+      + 'mix-blend-mode:hard-light!important;color:rgba(0,14,255,.5)!important}'
+      + '.hero-section__title--foreground .hero-section__title-main{color:#2d2564!important}'
+      + '.hero-section__title--foreground .hero-section__title-copy{color:rgba(0,14,255,.55)!important}'
+      + '.hero-section__title--background .hero-section__title-main{color:#061b31!important}'
+      + '.hero-section__title--background .hero-section__title-copy{color:#81b81a!important}'
+      + '.hero-logo-wall-section,.hero-logo-section,.logo-carousel{position:relative!important;z-index:2!important}'
+      + '.hero-wave-animation img[data-clonyfy-canvas-capture]{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;object-fit:contain!important;object-position:70% center!important;'
+      + 'animation:clonyfy-hero-wave-drift 14s ease-in-out infinite!important;transform-origin:70% 45%}'
+      + '.hero-wave-animation__static img{animation:clonyfy-hero-wave-drift 16s ease-in-out infinite!important}'
+      // Logo marquee (live Stripe uses JS translateX; clones often freeze as a static grid).
+      + '.clonyfy-logo-marquee-host,.logo-carousel__marquee-container{overflow:hidden!important;width:100%!important}'
+      + '.clonyfy-logo-marquee-track,.logo-carousel__marquee.clonyfy-logo-marquee-track{'
+      + 'display:flex!important;flex-wrap:nowrap!important;align-items:center!important;'
+      + 'width:max-content!important;max-width:none!important;grid-template-columns:none!important;'
+      + 'gap:0!important;margin:0!important;padding:0!important;list-style:none!important;'
+      + 'animation:clonyfy-logo-marquee-scroll 42s linear infinite!important;'
+      + 'will-change:transform}'
+      + '.clonyfy-logo-marquee-track>* , .logo-carousel__marquee.clonyfy-logo-marquee-track>*{'
+      + 'flex:0 0 172px!important;width:172px!important;min-width:172px!important;height:72px!important;'
+      + 'display:flex!important;align-items:center!important;justify-content:center!important;'
+      + 'padding:0 12px!important;box-sizing:border-box!important}'
+      + '.clonyfy-logo-marquee-track img,.clonyfy-logo-marquee-track svg,'
+      + '.logo-carousel__marquee.clonyfy-logo-marquee-track img,.logo-carousel__marquee.clonyfy-logo-marquee-track svg{'
+      + 'max-width:142px!important;max-height:34px!important;width:auto!important;height:auto!important}';
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  /** Turn frozen logo grids / marquees into a continuous left scroll. */
+  function installLogoMarquees() {
+    // US-style carousel frozen mid-JS transform
+    var liveTracks = document.querySelectorAll('.logo-carousel__marquee');
+    for (var i = 0; i < liveTracks.length; i++) {
+      var track = liveTracks[i];
+      if (track.getAttribute('data-clonyfy-marquee') === '1') continue;
+      track.setAttribute('data-clonyfy-marquee', '1');
+      track.classList.add('clonyfy-logo-marquee-track');
+      track.style.transform = 'none';
+      var host = track.closest('.logo-carousel__marquee-container, .logo-carousel, .hero-logo-section');
+      if (host) host.classList.add('clonyfy-logo-marquee-host');
+      // Ensure enough content for a seamless -50% loop
+      if (track.children.length > 0 && track.children.length < 24) {
+        var original = Array.prototype.slice.call(track.children);
+        for (var c = 0; c < original.length; c++) {
+          var clone = original[c].cloneNode(true);
+          clone.setAttribute('aria-hidden', 'true');
+          track.appendChild(clone);
+        }
+      }
+    }
+
+    // JP / static grid capture → single-row marquee
+    var grids = document.querySelectorAll('.hero-logo-wall-section__grid');
+    for (var g = 0; g < grids.length; g++) {
+      var grid = grids[g];
+      if (grid.getAttribute('data-clonyfy-marquee') === '1') continue;
+      var cells = Array.prototype.slice.call(grid.children);
+      if (cells.length < 4) continue;
+      grid.setAttribute('data-clonyfy-marquee', '1');
+      grid.classList.add('clonyfy-logo-marquee-track');
+      var section = grid.closest('.hero-logo-wall-section, .section-container') || grid.parentElement;
+      if (section) section.classList.add('clonyfy-logo-marquee-host');
+      for (var k = 0; k < cells.length; k++) {
+        var dup = cells[k].cloneNode(true);
+        dup.setAttribute('aria-hidden', 'true');
+        grid.appendChild(dup);
+      }
+    }
   }
 
   function reviveCssAnimations() {
@@ -1174,6 +1306,7 @@ function animationRuntime() {
   function run() {
     try {
       injectCss();
+      installLogoMarquees();
       reviveCssAnimations();
       observe();
     } catch (e) { /* ignore */ }
@@ -1183,6 +1316,7 @@ function animationRuntime() {
   else run();
   setTimeout(run, 500);
   setTimeout(reviveCssAnimations, 1600);
+  setTimeout(installLogoMarquees, 800);
 }
 
 /* ---------------------------------------------------------------- builders */

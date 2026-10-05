@@ -16,6 +16,9 @@
     "db:status": "node scripts/db-migrate.mjs --status",
     "db:schema": "node scripts/db-migrate.mjs --schema",
     "db:push": "npx supabase db push",
+    "db:local:up": "node scripts/local-db.mjs up",
+    "db:local:down": "node scripts/local-db.mjs down",
+    "db:local:reset": "node scripts/local-db.mjs reset",
     "smoke:week3": "node scripts/week3-smoke.mjs",
     "smoke:week4": "node scripts/week4-smoke.mjs"
   },
