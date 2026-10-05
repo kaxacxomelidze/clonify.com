@@ -59,9 +59,15 @@ export function isSelectable(el: Element | null): el is HTMLElement {
   return !NOT_SELECTABLE.test(el.tagName.toUpperCase());
 }
 
-/** Clicks on SVG internals select the whole <svg>. */
+/**
+ * Clicks on SVG internals select the whole <svg>.
+ * Uses nodeType, not `instanceof Element`: iframe nodes belong to the frame's
+ * realm, so the parent window's Element constructor never matches them.
+ */
 export function selectableTarget(node: EventTarget | null): HTMLElement | null {
-  let el = node instanceof Element ? node : null;
+  const n = node as Node | null;
+  if (!n || typeof n.nodeType !== "number") return null;
+  let el: Element | null = n.nodeType === 1 ? (n as Element) : n.parentElement;
   if (!el) return null;
   const svg = el.closest("svg");
   if (svg) el = svg;

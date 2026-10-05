@@ -4,7 +4,8 @@
  * Stable JSON the Figma plugin consumes. Built from the DOM exporter
  * (format: "scene") or from scene-graph SVG.
  *
- * Node types: FRAME, RECT, TEXT, IMAGE.
+ * Node types: FRAME, RECT, TEXT, IMAGE, SVG, IMAGE_FULL (full-res bitmap whose
+ * `legacyTile` IMAGE siblings serve plugins that predate it).
  *
  * Step 5 (additive, still version 1):
  * - RECT.fill may be a CSS color string or { type: 'GRADIENT_LINEAR', angle, stops }
@@ -175,7 +176,7 @@ export function validateFigmaScene(scene) {
     throw new Error('page.width and page.height must be numbers');
   }
   if (!Array.isArray(s.nodes)) throw new Error('nodes must be an array');
-  const allowed = new Set(['FRAME', 'RECT', 'TEXT', 'IMAGE']);
+  const allowed = new Set(['FRAME', 'RECT', 'TEXT', 'IMAGE', 'IMAGE_FULL', 'SVG']);
 
   const walk = (nodes) => {
     for (const node of nodes || []) {
@@ -187,8 +188,11 @@ export function validateFigmaScene(scene) {
       if (node.type === 'TEXT' && typeof node.characters !== 'string') {
         throw new Error('TEXT.characters must be a string');
       }
-      if (node.type === 'IMAGE' && typeof node.src !== 'string') {
+      if ((node.type === 'IMAGE' || node.type === 'IMAGE_FULL') && typeof node.src !== 'string') {
         throw new Error('IMAGE.src must be a string');
+      }
+      if (node.type === 'SVG' && typeof node.svg !== 'string') {
+        throw new Error('SVG.svg must be a string');
       }
       if (node.type === 'RECT' && node.fill != null) {
         const f = node.fill;
@@ -209,9 +213,19 @@ export function validateFigmaScene(scene) {
  * Keep scene JSON under Storage / Vercel response limits by replacing oversized
  * embedded images with solid placeholder rects (layout preserved).
  */
-export function slimFigmaSceneForTransport(scene, maxBytes = 2_500_000) {
+export function slimFigmaSceneForTransport(scene, maxBytes = 20_000_000) {
   const clone = JSON.parse(JSON.stringify(scene));
-  const maxSrc = 120_000;
+  const maxSrc = 1_000_000;
+
+  // IMAGE_FULL always has IMAGE tiles beside it, so it can simply be dropped.
+  const dropFull = (nodes, test) => {
+    if (!Array.isArray(nodes)) return nodes;
+    return nodes.filter((n) => !(n && n.type === 'IMAGE_FULL' && test(n))).map((n) => {
+      if (n && Array.isArray(n.children)) n.children = dropFull(n.children, test);
+      return n;
+    });
+  };
+  clone.nodes = dropFull(clone.nodes, (n) => typeof n.src !== 'string' || n.src.length > maxSrc);
 
   const walk = (nodes) => {
     for (const node of nodes || []) {
@@ -227,6 +241,10 @@ export function slimFigmaSceneForTransport(scene, maxBytes = 2_500_000) {
   walk(clone.nodes);
 
   let json = JSON.stringify(clone);
+  if (json.length <= maxBytes) return clone;
+
+  clone.nodes = dropFull(clone.nodes, () => true);
+  json = JSON.stringify(clone);
   if (json.length <= maxBytes) return clone;
 
   // Second pass: drop all remaining data: images.

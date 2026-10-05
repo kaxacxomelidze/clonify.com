@@ -5,6 +5,7 @@
 
 figma.showUI(__html__, { width: 440, height: 560, themeColors: true });
 
+const PLUGIN_VERSION = '2.0';
 const KIND = 'clonyfy-figma-scene';
 const VERSION = 1;
 const MAX_NODES = 4000;
@@ -209,10 +210,13 @@ const fontCache = new Map();
 async function loadFont(family, style) {
   const key = `${family}::${style}`;
   if (fontCache.has(key)) return fontCache.get(key);
+  // The site's own font first (Figma Desktop can use locally installed fonts),
+  // then Inter as the metric-closest common fallback.
   const candidates = [
+    { family, style },
+    { family, style: 'Regular' },
     { family: 'Inter', style },
     { family: 'Inter', style: 'Regular' },
-    { family, style },
     { family: 'Roboto', style: 'Regular' },
   ];
   let lastErr;
@@ -234,6 +238,25 @@ async function loadFont(family, style) {
   throw lastErr || new Error('Could not load a fallback font');
 }
 
+/**
+ * A substituted font (site font not installed) renders wider or narrower than
+ * the browser did; nudge letter spacing so the line keeps its measured width
+ * and does not run into the next text run.
+ */
+function fitTextWidth(text, spec) {
+  const target = Number(spec.textWidth);
+  const chars = String(spec.characters || '').length;
+  if (!Number.isFinite(target) || target <= 0 || chars < 2) return;
+  const actual = text.width;
+  if (!Number.isFinite(actual) || actual <= 0) return;
+  if (Math.abs(actual - target) <= Math.max(1, target * 0.01)) return;
+  const fontSize = Number(spec.fontSize) || 16;
+  const base = Number(spec.letterSpacing) || 0;
+  const perChar = (target - actual) / chars;
+  const delta = Math.max(-0.12 * fontSize, Math.min(0.06 * fontSize, perChar));
+  text.letterSpacing = { unit: 'PIXELS', value: base + delta };
+}
+
 function decodeDataUrl(src) {
   const m = String(src).match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return null;
@@ -253,26 +276,27 @@ async function bytesFromSrc(src) {
   return new Uint8Array(buf);
 }
 
-async function paintImage(node, src, objectFit, opacity) {
-  const bytes = await bytesFromSrc(src);
-  const image = figma.createImage(bytes);
-  const paint = {
-    type: 'IMAGE',
-    imageHash: image.hash,
-    scaleMode: imageScaleMode(objectFit),
-  };
-  const op = Number(opacity);
-  if (Number.isFinite(op) && op < 0.999) paint.opacity = Math.min(1, Math.max(0, op));
-  node.fills = [paint];
-}
-
 let created = 0;
+// Older scenes/plugins interop: IMAGE_FULL is followed by `legacyTile` IMAGEs
+// and SVG by an `svgFallback` IMAGE — draw those only when the primary failed.
+let lastFullOk = false;
+let lastSvgOk = false;
+const failures = { image: 0, svg: 0, text: 0, other: 0, first: '' };
+
+function noteFailure(kind, err) {
+  failures[kind] = (failures[kind] || 0) + 1;
+  if (!failures.first) failures.first = `${kind}: ${err && err.message ? err.message : String(err)}`.slice(0, 160);
+}
 
 async function createNode(spec, parentFigma, parentSpec) {
   if (!spec || created >= MAX_NODES) return null;
+  const type = spec.type;
+  if (type === 'IMAGE' && spec.legacyTile && lastFullOk) return null;
+  if (type === 'IMAGE' && spec.svgFallback && lastSvgOk) return null;
+  if (!(type === 'IMAGE' && spec.legacyTile)) lastFullOk = false;
+  if (!(type === 'IMAGE' && spec.svgFallback)) lastSvgOk = false;
   try {
     const box = relativeBox(spec, parentSpec);
-    const type = spec.type;
 
     if (type === 'FRAME') {
       const frame = figma.createFrame();
@@ -306,11 +330,17 @@ async function createNode(spec, parentFigma, parentSpec) {
     }
 
     if (type === 'TEXT') {
+      let font;
+      try {
+        font = await loadFont(String(spec.fontFamily || 'Inter'), figmaFontStyle(spec.fontWeight, spec.fontStyle));
+      } catch (err) {
+        noteFailure('text', err);
+        return null;
+      }
       const text = figma.createText();
       text.name = String(spec.name || 'Text').slice(0, 100);
       text.x = box.x;
       text.y = box.y;
-      const font = await loadFont(String(spec.fontFamily || 'Inter'), figmaFontStyle(spec.fontWeight, spec.fontStyle));
       text.fontName = font;
       text.characters = String(spec.characters || ' ').slice(0, 2000) || ' ';
       text.fontSize = Number(spec.fontSize) || 16;
@@ -338,13 +368,49 @@ async function createNode(spec, parentFigma, parentSpec) {
         }
       } catch { /* ignore */ }
       try { text.fills = fillsFromSpec(spec.fill || '#000000', spec.opacity); } catch { /* ignore */ }
-      safeResize(text, box.w, box.h);
+      // Lines are pre-split from the browser layout — never let Figma re-wrap them.
+      if (spec.autoWidth) {
+        try { text.textAutoResize = 'WIDTH_AND_HEIGHT'; } catch { safeResize(text, box.w, box.h); }
+        try { fitTextWidth(text, spec); } catch { /* ignore */ }
+      } else {
+        safeResize(text, box.w, box.h);
+      }
       parentFigma.appendChild(text);
       created += 1;
       return text;
     }
 
-    if (type === 'IMAGE') {
+    if (type === 'SVG' && typeof spec.svg === 'string') {
+      let node;
+      try {
+        node = figma.createNodeFromSvg(spec.svg);
+      } catch (err) {
+        noteFailure('svg', err);
+        return null;
+      }
+      node.name = String(spec.name || 'Vector').slice(0, 100);
+      node.x = box.x;
+      node.y = box.y;
+      safeResize(node, box.w, box.h);
+      if (Number.isFinite(spec.opacity) && spec.opacity < 1) node.opacity = spec.opacity;
+      parentFigma.appendChild(node);
+      created += 1;
+      lastSvgOk = true;
+      return node;
+    }
+
+    if (type === 'IMAGE' || type === 'IMAGE_FULL') {
+      let bytes;
+      let image;
+      try {
+        bytes = await bytesFromSrc(spec.src);
+        image = figma.createImage(bytes);
+      } catch (err) {
+        noteFailure('image', err);
+        // Tiles follow a failed IMAGE_FULL — let them render instead of a grey box.
+        if (type === 'IMAGE_FULL') return null;
+        image = null;
+      }
       const rect = figma.createRectangle();
       rect.name = String(spec.name || 'Image').slice(0, 100);
       rect.x = box.x;
@@ -353,16 +419,20 @@ async function createNode(spec, parentFigma, parentSpec) {
       try { applyCornerRadii(rect, spec); } catch { /* ignore */ }
       parentFigma.appendChild(rect);
       created += 1;
-      try {
-        await paintImage(rect, spec.src, spec.objectFit, spec.opacity);
-      } catch {
+      if (image) {
+        const paint = { type: 'IMAGE', imageHash: image.hash, scaleMode: imageScaleMode(spec.objectFit) };
+        const op = Number(spec.opacity);
+        if (Number.isFinite(op) && op < 0.999) paint.opacity = Math.min(1, Math.max(0, op));
+        rect.fills = [paint];
+        if (type === 'IMAGE_FULL') lastFullOk = true;
+      } else {
         rect.fills = [{ type: 'SOLID', color: { r: 0.9, g: 0.9, b: 0.9 } }];
         rect.name = `${rect.name} (image skipped)`;
       }
       return rect;
     }
-  } catch {
-    /* skip broken node */
+  } catch (err) {
+    noteFailure('other', err);
   }
   return null;
 }
@@ -370,6 +440,9 @@ async function createNode(spec, parentFigma, parentSpec) {
 async function importScene(scene) {
   validateScene(scene);
   created = 0;
+  lastFullOk = false;
+  lastSvgOk = false;
+  Object.assign(failures, { image: 0, svg: 0, text: 0, other: 0, first: '' });
   await figma.loadFontAsync({ family: 'Inter', style: 'Regular' }).catch(() => {});
 
   const pageW = Math.max(1, Number(scene.page.width) || 1);
@@ -405,7 +478,7 @@ async function handleImportScene(scene) {
   figma.ui.postMessage({ type: 'received' });
   try {
     const count = await importScene(scene);
-    figma.ui.postMessage({ type: 'ok', count });
+    figma.ui.postMessage({ type: 'ok', count, failures: { ...failures } });
     figma.notify(`Imported ${count} layers`);
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
@@ -418,7 +491,7 @@ figma.ui.onmessage = async (msg) => {
   if (!msg || typeof msg !== 'object') return;
 
   if (msg.type === 'ping') {
-    figma.ui.postMessage({ type: 'pong' });
+    figma.ui.postMessage({ type: 'pong', version: PLUGIN_VERSION });
     return;
   }
 

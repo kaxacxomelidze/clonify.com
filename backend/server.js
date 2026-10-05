@@ -2421,17 +2421,7 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   return neutralizeCloneScripts(out);
 }
 
-async function cloneAssetDataUrl(outDir, relPath) {
-  let storageRel;
-  try { storageRel = assetStorageRel(relPath); } catch { return null; }
-  if (!storageRel) return null;
-  const bytes = await readCloneFile(outDir, storageRel).catch(() => null);
-  if (!bytes?.length) return null;
-  const assetName = storageRel.replace(/^public\/_assets\//, '');
-  return `data:${contentTypeForPath(assetName)};base64,${bytes.toString('base64')}`;
-}
-
-/** Serve clone assets to headless Figma export without inlining (serverless-safe). */
+/** Serve clone assets to headless Figma export without inlining. */
 async function readCloneAssetForFigmaExport(outDir, relPath) {
   let normalized;
   try { normalized = normalizeCloneRelPath(relPath, ['_assets', 'public/_assets']); }
@@ -2464,40 +2454,6 @@ function figmaAssetReader(outDir) {
   return (relPath) => readCloneAssetForFigmaExport(outDir, relPath);
 }
 
-/** Inline cloned assets so headless Figma export can render the same HTML as preview. */
-async function inlinePreviewAssetsForRender(html, outDir) {
-  let out = String(html);
-  out = out.replace(/<base\s+href=["']\/["']\s*\/?>/gi, '');
-  const replacements = new Map();
-
-  for (const match of out.matchAll(/\/api\/asset\?[^"')\s]+/g)) {
-    const full = match[0];
-    if (replacements.has(full)) continue;
-    const pathMatch = full.match(/[?&]path=([^&"')\s]+)/);
-    if (!pathMatch) continue;
-    let rel;
-    try { rel = decodeURIComponent(pathMatch[1]); } catch { continue; }
-    let dataUrl = null;
-    try { dataUrl = await cloneAssetDataUrl(outDir, rel); } catch {}
-    if (dataUrl) replacements.set(full, dataUrl);
-  }
-
-  for (const match of out.matchAll(/\/_assets\/([A-Za-z0-9._%-]+)/g)) {
-    const full = match[0];
-    if (replacements.has(full)) continue;
-    let name;
-    try { name = decodeURIComponent(match[1]); } catch { name = match[1]; }
-    let dataUrl = null;
-    try { dataUrl = await cloneAssetDataUrl(outDir, `_assets/${name}`); } catch {}
-    if (dataUrl) replacements.set(full, dataUrl);
-  }
-
-  for (const [from, to] of [...replacements.entries()].sort((a, b) => b[0].length - a[0].length)) {
-    out = out.split(from).join(to);
-  }
-  return out;
-}
-
 async function prepareHtmlForFigmaExport(html, outDir) {
   // Do not inject scroll-reveal — it sets opacity:0 on layers and the Figma
   // exporter skips them, producing an empty scene.
@@ -2506,16 +2462,12 @@ async function prepareHtmlForFigmaExport(html, outDir) {
     injectScrollReveal: false,
     injectInteractions: false,
   });
-  out = String(out)
+  // Assets are served by figmaAssetReader via Playwright route interception —
+  // inlining them as data URLs duplicates each reference and can exceed
+  // Chromium's page-content limits (e.g. 160MB+ for Stripe), killing the page.
+  return String(out)
     .replace(/<script[^>]*data-clonyfy-scroll-reveal[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*id="clonyfy-scroll-reveal-style"[^>]*>[\s\S]*?<\/style>/gi, '');
-  // Hosted/low-memory: never inline dozens of assets as data-URLs (Shopify OOMs / times out).
-  // Playwright serves assets via figmaAssetReader + route interception instead.
-  if (IS_SERVERLESS || IS_HOSTED || IS_LOW_MEMORY) {
-    return out;
-  }
-  out = await inlinePreviewAssetsForRender(out, outDir);
-  return out;
 }
 
 function readRequestCookie(req, name) {
@@ -5188,13 +5140,14 @@ async function handleRequest(req, res) {
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
     try {
       let prepared = String(html);
-      if (outDir && await canUseCloneOutput(figmaUser, outDir)) {
+      const canReadOut = !!outDir && await canUseCloneOutput(figmaUser, outDir);
+      if (canReadOut) {
         prepared = await prepareHtmlForFigmaExport(prepared, outDir);
       }
       const svg = await htmlToFigmaSvg(prepared, {
         viewportWidth,
         title: title || route || 'Clonyfy export',
-        readAsset: IS_HOSTED && outDir ? figmaAssetReader(outDir) : null,
+        readAsset: canReadOut ? figmaAssetReader(outDir) : null,
       });
       audit(figmaUser.id, figmaUser.name, 'figma_render', `outDir=${outDir || ''} route=${route || ''}`, ip);
       res.writeHead(200, {
@@ -5231,14 +5184,15 @@ async function handleRequest(req, res) {
         scene = svgToFigmaScene(String(svg), { name: sceneTitle, route: sceneRoute });
       } else if (html) {
         let prepared = String(html);
-        if (outDir && await canUseCloneOutput(figmaUser, outDir)) {
+        const canReadOut = !!outDir && await canUseCloneOutput(figmaUser, outDir);
+        if (canReadOut) {
           prepared = await prepareHtmlForFigmaExport(prepared, outDir);
         }
         scene = await htmlToFigmaScene(prepared, {
           viewportWidth,
           title: sceneTitle,
           route: sceneRoute,
-          readAsset: IS_HOSTED && outDir ? figmaAssetReader(outDir) : null,
+          readAsset: canReadOut ? figmaAssetReader(outDir) : null,
         });
       } else {
         return json(res, { error: 'Provide html or svg' }, 400);
@@ -5279,7 +5233,7 @@ async function handleRequest(req, res) {
           viewportWidth,
           title: route,
           route,
-          readAsset: (IS_HOSTED || IS_SERVERLESS || IS_LOW_MEMORY) ? figmaAssetReader(outDir) : null,
+          readAsset: figmaAssetReader(outDir),
         });
       };
       const scene = await Promise.race([
@@ -5328,7 +5282,7 @@ async function handleRequest(req, res) {
         return htmlToFigmaSvg(html, {
           viewportWidth,
           title: route,
-          readAsset: (IS_HOSTED || IS_SERVERLESS || IS_LOW_MEMORY) ? figmaAssetReader(outDir) : null,
+          readAsset: figmaAssetReader(outDir),
         });
       };
       const svg = await Promise.race([
@@ -5387,7 +5341,7 @@ async function handleRequest(req, res) {
           if (!pageData) throw new Error(`Missing page file for ${route}`);
           return pageData.toString('utf8');
         },
-        readAsset: IS_HOSTED ? figmaAssetReader(outDir) : null,
+        readAsset: figmaAssetReader(outDir),
         viewportWidth,
         zipPath,
       });

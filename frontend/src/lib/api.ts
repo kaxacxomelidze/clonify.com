@@ -741,7 +741,7 @@ export async function fetchFigmaScene(outDir: string, route = "/"): Promise<{
 }
 
 /** Clipboard soft limit — browsers / OS often fail silently above ~1–2MB. */
-const FIGMA_CLIPBOARD_SOFT_MAX = 1_400_000;
+const FIGMA_CLIPBOARD_SOFT_MAX = 20_000_000;
 
 export async function copyFigmaSceneToClipboard(scene: FigmaScene): Promise<{
   bytes: number;

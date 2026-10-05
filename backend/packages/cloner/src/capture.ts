@@ -347,13 +347,19 @@ export function bakeStaticMediaVisibility(html: string): string {
   const bakeCss = `<style id="clonyfy-static-media-bake">
 html,body,#__next,#root{opacity:1!important;visibility:visible!important}
 html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
-.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
-.invisible:not([aria-hidden="true"]){visibility:visible!important}
-[style*="opacity:0"]:not([aria-hidden="true"]),[style*="opacity: 0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
-[style*="visibility:hidden"]:not([aria-hidden="true"]),[style*="visibility: hidden"]:not([aria-hidden="true"]){visibility:visible!important}
-[data-aos]:not([aria-hidden="true"]),[data-framer-appear-id]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important;transform:none!important}
+[data-clonyfy-stack-hidden],[data-clonyfy-stack-hidden] *{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important}
+.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+[data-aos]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[data-framer-appear-id]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important;transform:none!important}
 img,picture,video,source{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
+.hero-section__background,.hero-wave-animation,.hero-wave-animation__layout,.hero-wave-animation__contents{z-index:1!important;pointer-events:none!important}
+.hero-section__title--background,.hero-section__title--foreground,.hero-section__actions{position:relative!important;z-index:3!important}
+.hero-section__title--foreground{display:block!important;visibility:visible!important;opacity:1!important}
+.hero-logo-wall-section{position:relative!important;z-index:2!important}
+.hero-wave-animation img[data-clonyfy-canvas-capture]{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;object-fit:contain!important;object-position:70% center!important}
 </style>`;
 
   if (/<head[^>]*>/i.test(out)) {
@@ -1958,6 +1964,18 @@ export async function capturePage(
         const cs = window.getComputedStyle(el);
         if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
         const cls = String(el.className || '');
+        // Full-bleed decorative borders/overlays screenshot sibling titles/buttons into the PNG.
+        if (/(?:^|[\s_-])(?:border|overlay|frame|mask|outline)(?:[\s_-]|$)|__border\b/i.test(cls)) continue;
+        if (
+          cs.pointerEvents === 'none'
+          && (cs.position === 'absolute' || cs.position === 'fixed')
+          && el.parentElement
+          && Array.from(el.parentElement.children).some((sib) => {
+            if (sib === el) return false;
+            const t = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+            return t.length > 8 || !!sib.querySelector('h1,h2,h3,h4,button,svg,[aria-haspopup]');
+          })
+        ) continue;
         const looksGraphic = /lottie|graphic|animation|bento|hero.?media|visual|illustration|rive|spline|canvas|globe|scene/i.test(cls)
           || /lottie|graphic|animation/i.test(el.id || '');
         // Large empty painted boxes also count (background-only heroes).
@@ -1976,7 +1994,49 @@ export async function capturePage(
       try {
         const loc = page.locator(`[data-clonyfy-shell-id="${shellId}"]`).first();
         if (!(await loc.count())) continue;
+        // Bounding-box screenshots include overlapping sibling chrome — hide it first.
+        await page.evaluate((id: string) => {
+          const el = document.querySelector(`[data-clonyfy-shell-id="${id}"]`) as HTMLElement | null;
+          if (!el) return;
+          const shellRect = el.getBoundingClientRect();
+          const nodes = Array.from(document.body.querySelectorAll('h1,h2,h3,h4,h5,h6,button,a,p,span,div,svg,label'));
+          for (const node of nodes) {
+            const other = node as HTMLElement;
+            if (other === el || el.contains(other) || other.contains(el)) continue;
+            if (other.closest('[data-clonyfy-shell-mask]')) continue;
+            const r = other.getBoundingClientRect();
+            if (r.width < 8 || r.height < 8) continue;
+            const ix = Math.max(0, Math.min(shellRect.right, r.right) - Math.max(shellRect.left, r.left));
+            const iy = Math.max(0, Math.min(shellRect.bottom, r.bottom) - Math.max(shellRect.top, r.top));
+            const inter = ix * iy;
+            if (inter <= 0) continue;
+            const otherArea = Math.max(1, r.width * r.height);
+            if (inter / otherArea < 0.35) continue;
+            const text = (other.innerText || other.textContent || '').replace(/\s+/g, ' ').trim();
+            const looksChrome = /^H[1-6]$/i.test(other.tagName)
+              || /button|svg|a/i.test(other.tagName)
+              || !!other.querySelector('h1,h2,h3,h4,button,svg,[aria-haspopup]')
+              || (text.length >= 4 && text.length <= 120);
+            if (!looksChrome) continue;
+            other.setAttribute('data-clonyfy-shell-mask', '1');
+            other.setAttribute('data-clonyfy-shell-mask-prev', other.style.cssText || '');
+            other.style.setProperty('visibility', 'hidden', 'important');
+            other.style.setProperty('opacity', '0', 'important');
+          }
+        }, shellId);
+
         const buf = await loc.screenshot({ type: 'png', timeout: 4000 });
+
+        await page.evaluate(() => {
+          document.querySelectorAll('[data-clonyfy-shell-mask="1"]').forEach((node) => {
+            const el = node as HTMLElement;
+            const prev = el.getAttribute('data-clonyfy-shell-mask-prev');
+            el.style.cssText = prev || '';
+            el.removeAttribute('data-clonyfy-shell-mask');
+            el.removeAttribute('data-clonyfy-shell-mask-prev');
+          });
+        });
+
         if (!buf || buf.length < 800) continue;
         if (buf.length > maxAssetBytes) continue;
         if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
@@ -2003,6 +2063,15 @@ export async function capturePage(
         }, { shellId, webPath });
         logger.debug(`  [SHELL CAPTURE] ${shellId} -> ${webPath} (${(buf.length / 1024).toFixed(1)}KB)`);
       } catch (err) {
+        await page.evaluate(() => {
+          document.querySelectorAll('[data-clonyfy-shell-mask="1"]').forEach((node) => {
+            const el = node as HTMLElement;
+            const prev = el.getAttribute('data-clonyfy-shell-mask-prev');
+            el.style.cssText = prev || '';
+            el.removeAttribute('data-clonyfy-shell-mask');
+            el.removeAttribute('data-clonyfy-shell-mask-prev');
+          });
+        }).catch(() => {});
         logger.debug(`  [SHELL CAPTURE WARN] ${shellId}: ${(err as Error).message}`);
       }
     }

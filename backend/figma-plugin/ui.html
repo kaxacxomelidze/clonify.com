@@ -36,7 +36,7 @@
     }
     button:disabled { opacity: 0.55; cursor: wait; }
     #import { background: #0d99ff; color: #fff; }
-    #clipboard, #sample { background: var(--figma-color-bg-secondary, #eee); color: inherit; }
+    #clipboard, #sample, #open-file { background: var(--figma-color-bg-secondary, #eee); color: inherit; }
     #status { margin-top: 10px; min-height: 40px; white-space: pre-wrap; word-break: break-word; }
     .err { color: #c00; }
     .ok { color: #0a7; }
@@ -52,7 +52,7 @@
   </style>
 </head>
 <body>
-  <h1>Clonyfy Import</h1>
+  <h1>Clonyfy Import <span id="version" style="font-weight:400;opacity:.6"></span></h1>
   <p>Export from Clonyfy, then Import. Install this plugin from <strong>Figma Community</strong> (customers). Use <strong>Import sample</strong> to verify.</p>
   <label class="auto">
     <input id="auto-import" type="checkbox" checked />
@@ -64,8 +64,10 @@
     <button id="import" type="button">Import</button>
   </div>
   <div class="row">
+    <button id="open-file" type="button">Open scene file…</button>
     <button id="sample" type="button" onclick="window.__clonyfyImportSample && window.__clonyfyImportSample()">Import sample</button>
   </div>
+  <input id="file" type="file" accept=".json,application/json" hidden />
   <div id="status">Starting…</div>
   <script>
     window.onerror = function (message, source, line) {
@@ -83,8 +85,15 @@
     const importBtn = document.getElementById('import');
     const clipboardBtn = document.getElementById('clipboard');
     const sampleBtn = document.getElementById('sample');
+    const openBtn = document.getElementById('open-file');
+    const fileEl = document.getElementById('file');
+    let loadedText = '';
     const CHUNK = 80000;
     const INLINE_LIMIT = 350000;
+    // Images arrive as chunks, so only truly oversized bitmaps are dropped.
+    const MAX_IMAGE_SRC = 2000000;
+    // Rendering multi-MB JSON in the textarea freezes the plugin window.
+    const TEXTAREA_LIMIT = 300000;
     let importing = false;
     let unlockTimer = null;
     let pongOk = false;
@@ -153,6 +162,7 @@
       importBtn.disabled = !!busy;
       clipboardBtn.disabled = !!busy;
       sampleBtn.disabled = !!busy;
+      openBtn.disabled = !!busy;
       importBtn.textContent = busy ? (label || 'Importing…') : 'Import';
       if (unlockTimer) {
         clearTimeout(unlockTimer);
@@ -193,7 +203,10 @@
       function walk(nodes) {
         for (var i = 0; i < (nodes || []).length; i++) {
           var n = nodes[i];
-          if (n && n.type === 'IMAGE' && typeof n.src === 'string' && n.src.length > 120000) {
+          if (n && n.type === 'IMAGE_FULL' && typeof n.src === 'string' && n.src.length > MAX_IMAGE_SRC) {
+            n.type = 'SKIPPED';
+            delete n.src;
+          } else if (n && n.type === 'IMAGE' && typeof n.src === 'string' && n.src.length > MAX_IMAGE_SRC) {
             n.src = '__skipped__';
             stripped += 1;
           }
@@ -248,8 +261,11 @@
         setStatus(err.message || String(err), fromAuto ? '' : 'err');
         return;
       }
-      if (typeof raw === 'string') jsonEl.value = raw.trim();
-      else jsonEl.value = JSON.stringify(scene, null, 2);
+      if (typeof raw === 'string') jsonEl.value = raw.length <= TEXTAREA_LIMIT ? raw.trim() : '';
+      else {
+        const pretty = JSON.stringify(scene, null, 2);
+        jsonEl.value = pretty.length <= TEXTAREA_LIMIT ? pretty : '';
+      }
       setBusy(true, 'Importing…');
       setStatus(fromAuto ? 'Clonyfy scene found — importing…' : 'Importing…');
       try {
@@ -267,15 +283,33 @@
           setStatus('Clipboard is empty.', 'err');
           return;
         }
-        jsonEl.value = text;
         parseSceneText(text);
+        loadedText = text;
+        jsonEl.value = text.length <= TEXTAREA_LIMIT ? text : '';
         setStatus('Clonyfy scene loaded (' + Math.round(text.length / 1024) + ' KB). Click Import.', 'ok');
       } catch (err) {
         setStatus('Could not read clipboard. Paste JSON into the box instead.', 'err');
       }
     };
 
-    importBtn.onclick = function () { runImport(jsonEl.value, { fromAuto: false }); };
+    importBtn.onclick = function () {
+      const typed = jsonEl.value.trim();
+      runImport(typed || loadedText, { fromAuto: false });
+    };
+
+    fileEl.onchange = function () {
+      const file = fileEl.files && fileEl.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function () {
+        const text = String(reader.result || '');
+        fileEl.value = '';
+        runImport(text, { fromAuto: false });
+      };
+      reader.onerror = function () { setStatus('Could not read that file.', 'err'); };
+      reader.readAsText(file);
+    };
+    openBtn.onclick = function () { fileEl.click(); };
     sampleBtn.onclick = function () { runImport(SAMPLE, { fromAuto: false }); };
     window.__clonyfyImportSample = function () { runImport(SAMPLE, { fromAuto: false }); };
 
@@ -284,6 +318,8 @@
       if (!msg) return;
       if (msg.type === 'pong') {
         pongOk = true;
+        const v = document.getElementById('version');
+        if (v && msg.version) v.textContent = 'v' + msg.version;
         return;
       }
       if (msg.type === 'auto-import') {
@@ -300,7 +336,17 @@
       }
       if (msg.type === 'ok') {
         setBusy(false);
-        setStatus('Imported ' + msg.count + ' layers.', 'ok');
+        const f = msg.failures || {};
+        const parts = [];
+        if (f.image) parts.push(f.image + ' image(s)');
+        if (f.svg) parts.push(f.svg + ' vector(s)');
+        if (f.text) parts.push(f.text + ' text layer(s)');
+        if (f.other) parts.push(f.other + ' other layer(s)');
+        if (parts.length) {
+          setStatus('Imported ' + msg.count + ' layers. Fallbacks used for ' + parts.join(', ') + '.\n' + (f.first || ''), 'ok');
+        } else {
+          setStatus('Imported ' + msg.count + ' layers.', 'ok');
+        }
         return;
       }
       if (msg.type === 'error') {
@@ -332,7 +378,6 @@
           setStatus('Ready. Click Import sample to verify the plugin, then export from Clonyfy.');
           return;
         }
-        jsonEl.value = text;
         runImport(text, { fromAuto: true });
       } catch (err) {
         setStatus('Clipboard blocked — click Import sample to verify, or paste JSON and Import.');

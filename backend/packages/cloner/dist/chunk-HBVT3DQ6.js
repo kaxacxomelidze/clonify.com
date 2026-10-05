@@ -1084,6 +1084,9 @@ function looksLikeTextLayer(el) {
   if (/^(SCRIPT|STYLE|LINK|META|SVG|PATH|IMG|VIDEO|SOURCE|IFRAME|CANVAS)$/i.test(tag)) return false;
   return true;
 }
+function normText(el) {
+  return (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
 function layerScore(el) {
   const cs = window.getComputedStyle(el);
   const z = parseInt(cs.zIndex, 10) || 0;
@@ -1092,20 +1095,43 @@ function layerScore(el) {
   const activeClass = /\b(is-active|active|current|visible|show|in)\b/i.test(el.className || "") ? 40 : 0;
   return z * 100 + op * 20 + ariaHidden + activeClass;
 }
-function hideInactiveLayer(el, active) {
+function duplicateKeepScore(el) {
+  const cs = window.getComputedStyle(el);
+  let score = layerScore(el);
+  if (cs.position === "absolute" || cs.position === "fixed") score -= 90;
+  if (cs.whiteSpace === "nowrap" || cs.whiteSpace === "pre") score -= 25;
+  if (/^H[1-6]$/.test(el.tagName)) score += 55;
+  if (/^(P|FIGCAPTION|LABEL|BLOCKQUOTE)$/.test(el.tagName)) score += 20;
+  if (el.getAttribute("aria-hidden") === "true") score -= 120;
+  if (el.hasAttribute("data-clonyfy-stack-hidden")) score -= 200;
+  const r = el.getBoundingClientRect();
+  score += Math.min(50, r.height / 3);
+  return score;
+}
+function hideInactiveLayer(el, active, soft = false) {
   if (active) {
+    el.removeAttribute("data-clonyfy-stack-hidden");
     el.style.opacity = "1";
     el.style.visibility = "visible";
     el.style.pointerEvents = "";
     el.style.position = el.style.position || "";
+    if (!soft) el.style.removeProperty("display");
     el.removeAttribute("aria-hidden");
     el.removeAttribute("hidden");
-  } else {
+  } else if (soft) {
     el.style.opacity = "0";
     el.style.visibility = "hidden";
     el.style.pointerEvents = "none";
     el.style.transform = "none";
     el.setAttribute("aria-hidden", "true");
+  } else {
+    el.setAttribute("data-clonyfy-stack-hidden", "1");
+    el.setAttribute("aria-hidden", "true");
+    el.style.setProperty("display", "none", "important");
+    el.style.setProperty("visibility", "hidden", "important");
+    el.style.setProperty("opacity", "0", "important");
+    el.style.setProperty("pointer-events", "none", "important");
+    el.style.setProperty("transform", "none", "important");
   }
 }
 function normalizeCarouselsInDocument() {
@@ -1133,23 +1159,26 @@ function normalizeCarouselsInDocument() {
     slides.forEach((slide) => {
       const el = slide;
       const isActive = slide === active || slide.contains(active) || active?.contains(slide);
-      hideInactiveLayer(el, !!isActive);
+      hideInactiveLayer(el, !!isActive, true);
     });
   });
 }
 function normalizeStackedTextRotatorsInDocument() {
   const seen = /* @__PURE__ */ new Set();
   document.querySelectorAll('[aria-hidden="true"]').forEach((animated) => {
+    if (isIntentionalBlendLayer(animated)) return;
     const absCount = animated.querySelectorAll('[class*="absolute"],.absolute').length;
     const fadedCount = animated.querySelectorAll('[class*="opacity-0"],.opacity-0').length;
     if (absCount < 1 && fadedCount < 2) return;
     const prev = animated.previousElementSibling;
     if (!prev) return;
+    if (isIntentionalBlendLayer(prev)) return;
     const prevClass = String(prev.className || "");
     const hasFallbackHeading = !!(prev.querySelector("h1,h2,h3") || /^H[1-3]$/.test(prev.tagName));
     const looksSrOnly = /\bsr-only\b|visually-hidden|clip-rect|js-disabled:not-sr-only/i.test(prevClass) || prevClass.includes("sr-only");
     if (!hasFallbackHeading && !looksSrOnly) return;
     animated.style.setProperty("display", "none", "important");
+    animated.setAttribute("data-clonyfy-stack-hidden", "1");
     seen.add(animated);
     prev.classList.remove("sr-only");
     prev.style.setProperty("position", "static", "important");
@@ -1194,9 +1223,9 @@ function normalizeStackedTextRotatorsInDocument() {
     rel.classList.add("clonyfy-stacked-rotator");
     phraseRoots.forEach((el) => {
       seen.add(el);
-      hideInactiveLayer(el, el === active);
+      hideInactiveLayer(el, el === active, false);
       el.querySelectorAll("span").forEach((span) => {
-        hideInactiveLayer(span, el === active);
+        hideInactiveLayer(span, el === active, false);
       });
     });
   });
@@ -1256,13 +1285,56 @@ function normalizeStackedTextRotatorsInDocument() {
     if (heavy < Math.max(1, Math.floor(maxPairs * 0.4))) return;
     collapseStack(kids, seen);
   });
+  normalizeDuplicateTextOverlays(seen);
+}
+function normalizeDuplicateTextOverlays(seen) {
+  const candidates = [];
+  document.querySelectorAll("h1,h2,h3,h4,h5,h6,p,span,a,li,div,label,figcaption,blockquote,strong,em,b").forEach((el) => {
+    if (seen.has(el)) return;
+    if (el.closest?.("[data-clonyfy-ui],[data-clonyfy-stack-hidden]")) return;
+    if (isIntentionalBlendLayer(el)) return;
+    if (!looksLikeTextLayer(el)) return;
+    const text = normText(el);
+    if (text.length < 4 || text.length > 120) return;
+    if (el.children.length > 8) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 24 || r.height < 12) return;
+    if (el.children.length === 1 && normText(el.children[0]) === text) return;
+    candidates.push(el);
+  });
+  const groups = /* @__PURE__ */ new Map();
+  for (const el of candidates) {
+    const key = normText(el);
+    const list = groups.get(key);
+    if (list) list.push(el);
+    else groups.set(key, [el]);
+  }
+  for (const els of groups.values()) {
+    if (els.length < 2) continue;
+    if (els.some((el) => isIntentionalBlendLayer(el))) continue;
+    const rects = els.map((el) => el.getBoundingClientRect());
+    const scores = els.map((el) => duplicateKeepScore(el));
+    const hideIdx = /* @__PURE__ */ new Set();
+    for (let i = 0; i < els.length; i++) {
+      for (let j = i + 1; j < els.length; j++) {
+        if (els[i].contains(els[j]) || els[j].contains(els[i])) continue;
+        if (!rectsOverlapHeavily(rects[i], rects[j])) continue;
+        if (scores[i] >= scores[j]) hideIdx.add(j);
+        else hideIdx.add(i);
+      }
+    }
+    for (const idx of hideIdx) {
+      hideInactiveLayer(els[idx], false, false);
+      seen.add(els[idx]);
+    }
+  }
 }
 function collapseStack(layers, seen) {
   let active = layers.find(
     (el) => el.getAttribute("aria-hidden") === "false" || /\b(is-active|active|current|visible|show|in)\b/i.test(el.className || "")
   ) || null;
   if (!active) {
-    active = layers.reduce((best, el) => layerScore(el) > layerScore(best) ? el : best, layers[0]);
+    active = layers.reduce((best, el) => duplicateKeepScore(el) > duplicateKeepScore(best) ? el : best, layers[0]);
   }
   const parent = layers[0]?.parentElement;
   if (parent) {
@@ -1272,12 +1344,86 @@ function collapseStack(layers, seen) {
   }
   layers.forEach((el) => {
     seen.add(el);
-    hideInactiveLayer(el, el === active);
+    hideInactiveLayer(el, el === active, false);
+  });
+}
+function normalizeShellCaptureOverlapsInDocument() {
+  document.querySelectorAll("img[data-clonyfy-shell-capture]").forEach((img) => {
+    const host = img.parentElement;
+    if (!host || host.hasAttribute("data-clonyfy-stack-hidden")) return;
+    const cls = String(host.className || "");
+    const looksDecorativeBorder = /(?:^|[\s_-])(?:border|overlay|frame|mask|outline)(?:[\s_-]|$)|__border\b/i.test(cls);
+    const imgRect = img.getBoundingClientRect();
+    if (imgRect.width < 40 || imgRect.height < 40) return;
+    let overlapsChrome = looksDecorativeBorder;
+    if (!overlapsChrome) {
+      const root = host.parentElement || host;
+      for (const sib of Array.from(root.children)) {
+        if (sib === host) continue;
+        const text = (sib.textContent || "").replace(/\s+/g, " ").trim();
+        const hasUi = !!sib.querySelector("h1,h2,h3,h4,h5,h6,button,a,svg,[aria-haspopup],summary");
+        const isHeading = /^H[1-6]$/.test(sib.tagName);
+        if (!hasUi && !isHeading && text.length < 4) continue;
+        const r = sib.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        if (rectsOverlapHeavily(imgRect, r)) {
+          overlapsChrome = true;
+          break;
+        }
+        const ix = Math.max(0, Math.min(imgRect.right, r.right) - Math.max(imgRect.left, r.left));
+        const iy = Math.max(0, Math.min(imgRect.bottom, r.bottom) - Math.max(imgRect.top, r.top));
+        const inter = ix * iy;
+        const sibArea = Math.max(1, r.width * r.height);
+        if (inter / sibArea >= 0.35) {
+          overlapsChrome = true;
+          break;
+        }
+      }
+    }
+    if (!overlapsChrome) return;
+    host.setAttribute("data-clonyfy-stack-hidden", "1");
+    host.setAttribute("aria-hidden", "true");
+    img.setAttribute("data-clonyfy-stack-hidden", "1");
+    host.style.setProperty("display", "none", "important");
+    host.style.setProperty("visibility", "hidden", "important");
+    host.style.setProperty("opacity", "0", "important");
+    img.style.setProperty("display", "none", "important");
+  });
+}
+function isIntentionalBlendLayer(el) {
+  const cls = String(el.className || "");
+  if (/title--foreground|title--background|hero-section__title/i.test(cls)) return true;
+  try {
+    const cs = window.getComputedStyle(el);
+    if (cs.mixBlendMode && cs.mixBlendMode !== "normal") return true;
+  } catch {
+  }
+  const sib = el.nextElementSibling || el.previousElementSibling;
+  if (sib && /title--foreground|title--background/i.test(String(sib.className || ""))) return true;
+  return false;
+}
+function restoreHeroBlendLayersInDocument() {
+  document.querySelectorAll(
+    '.hero-section__title--foreground, .hero-section__title--background, [class*="title--foreground"], [class*="title--background"]'
+  ).forEach((node) => {
+    const el = node;
+    el.removeAttribute("data-clonyfy-stack-hidden");
+    el.style.removeProperty("display");
+    el.style.removeProperty("visibility");
+    el.style.removeProperty("opacity");
+    el.style.removeProperty("pointer-events");
+    if (/title--foreground/i.test(String(el.className || ""))) {
+      el.style.setProperty("position", "relative");
+      el.style.setProperty("z-index", "3");
+    }
   });
 }
 function normalizeAllMotionStacksInDocument() {
+  restoreHeroBlendLayersInDocument();
   normalizeCarouselsInDocument();
   normalizeStackedTextRotatorsInDocument();
+  normalizeShellCaptureOverlapsInDocument();
+  restoreHeroBlendLayersInDocument();
 }
 function domAssetUrlScore(url) {
   if (/shopify-brochure|\/b\/shopify/i.test(url)) return 12;
@@ -1542,6 +1688,7 @@ async function setupRecorder(page, maxTriggers, maxAddHtml) {
         if (name.startsWith("data-clonyfy")) continue;
         if (!el.isConnected || added.has(el) || insideAdded(el)) continue;
         if (ROOTS.has(el)) {
+          if (name === "style") continue;
           if (st.noisyRootAttrs.get(el)?.has(name)) continue;
         } else if (st.isNoisy(el)) continue;
         let m = firstOld.get(el);
@@ -1721,6 +1868,7 @@ async function resolveItems(page, items) {
         if (op.k === "attr") {
           const t = resolveEl(op.t, trigger);
           if (!t) continue;
+          if ((t === "html" || t === "body") && op.n === "style") continue;
           const el = elementFor(t, trigger);
           const off = el ? el.getAttribute(op.n) : op.off;
           if (off === op.on) continue;
@@ -2183,13 +2331,19 @@ function bakeStaticMediaVisibility(html) {
   const bakeCss = `<style id="clonyfy-static-media-bake">
 html,body,#__next,#root{opacity:1!important;visibility:visible!important}
 html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
-.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
-.invisible:not([aria-hidden="true"]){visibility:visible!important}
-[style*="opacity:0"]:not([aria-hidden="true"]),[style*="opacity: 0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
-[style*="visibility:hidden"]:not([aria-hidden="true"]),[style*="visibility: hidden"]:not([aria-hidden="true"]){visibility:visible!important}
-[data-aos]:not([aria-hidden="true"]),[data-framer-appear-id]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important;transform:none!important}
+[data-clonyfy-stack-hidden],[data-clonyfy-stack-hidden] *{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important}
+.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+[data-aos]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[data-framer-appear-id]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important;transform:none!important}
 img,picture,video,source{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
+.hero-section__background,.hero-wave-animation,.hero-wave-animation__layout,.hero-wave-animation__contents{z-index:1!important;pointer-events:none!important}
+.hero-section__title--background,.hero-section__title--foreground,.hero-section__actions{position:relative!important;z-index:3!important}
+.hero-section__title--foreground{display:block!important;visibility:visible!important;opacity:1!important}
+.hero-logo-wall-section{position:relative!important;z-index:2!important}
+.hero-wave-animation img[data-clonyfy-canvas-capture]{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;max-width:none!important;object-fit:contain!important;object-position:70% center!important}
 </style>`;
   if (/<head[^>]*>/i.test(out)) {
     out = out.replace(/<head[^>]*>/i, (m) => `${m}${bakeCss}`);
@@ -3588,6 +3742,12 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           const cs = window.getComputedStyle(el);
           if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) continue;
           const cls = String(el.className || "");
+          if (/(?:^|[\s_-])(?:border|overlay|frame|mask|outline)(?:[\s_-]|$)|__border\b/i.test(cls)) continue;
+          if (cs.pointerEvents === "none" && (cs.position === "absolute" || cs.position === "fixed") && el.parentElement && Array.from(el.parentElement.children).some((sib) => {
+            if (sib === el) return false;
+            const t = (sib.textContent || "").replace(/\s+/g, " ").trim();
+            return t.length > 8 || !!sib.querySelector("h1,h2,h3,h4,button,svg,[aria-haspopup]");
+          })) continue;
           const looksGraphic = /lottie|graphic|animation|bento|hero.?media|visual|illustration|rive|spline|canvas|globe|scene/i.test(cls) || /lottie|graphic|animation/i.test(el.id || "");
           const hasBg = /url\(|gradient/i.test(cs.backgroundImage) || cs.backgroundColor && cs.backgroundColor !== "rgba(0, 0, 0, 0)" && cs.backgroundColor !== "transparent";
           if (!looksGraphic && !(hasBg && rect.height >= 180 && text.length < 8)) continue;
@@ -3602,7 +3762,42 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         try {
           const loc = page.locator(`[data-clonyfy-shell-id="${shellId}"]`).first();
           if (!await loc.count()) continue;
+          await page.evaluate((id) => {
+            const el = document.querySelector(`[data-clonyfy-shell-id="${id}"]`);
+            if (!el) return;
+            const shellRect = el.getBoundingClientRect();
+            const nodes = Array.from(document.body.querySelectorAll("h1,h2,h3,h4,h5,h6,button,a,p,span,div,svg,label"));
+            for (const node of nodes) {
+              const other = node;
+              if (other === el || el.contains(other) || other.contains(el)) continue;
+              if (other.closest("[data-clonyfy-shell-mask]")) continue;
+              const r = other.getBoundingClientRect();
+              if (r.width < 8 || r.height < 8) continue;
+              const ix = Math.max(0, Math.min(shellRect.right, r.right) - Math.max(shellRect.left, r.left));
+              const iy = Math.max(0, Math.min(shellRect.bottom, r.bottom) - Math.max(shellRect.top, r.top));
+              const inter = ix * iy;
+              if (inter <= 0) continue;
+              const otherArea = Math.max(1, r.width * r.height);
+              if (inter / otherArea < 0.35) continue;
+              const text = (other.innerText || other.textContent || "").replace(/\s+/g, " ").trim();
+              const looksChrome = /^H[1-6]$/i.test(other.tagName) || /button|svg|a/i.test(other.tagName) || !!other.querySelector("h1,h2,h3,h4,button,svg,[aria-haspopup]") || text.length >= 4 && text.length <= 120;
+              if (!looksChrome) continue;
+              other.setAttribute("data-clonyfy-shell-mask", "1");
+              other.setAttribute("data-clonyfy-shell-mask-prev", other.style.cssText || "");
+              other.style.setProperty("visibility", "hidden", "important");
+              other.style.setProperty("opacity", "0", "important");
+            }
+          }, shellId);
           const buf = await loc.screenshot({ type: "png", timeout: 4e3 });
+          await page.evaluate(() => {
+            document.querySelectorAll('[data-clonyfy-shell-mask="1"]').forEach((node) => {
+              const el = node;
+              const prev = el.getAttribute("data-clonyfy-shell-mask-prev");
+              el.style.cssText = prev || "";
+              el.removeAttribute("data-clonyfy-shell-mask");
+              el.removeAttribute("data-clonyfy-shell-mask-prev");
+            });
+          });
           if (!buf || buf.length < 800) continue;
           if (buf.length > maxAssetBytes) continue;
           if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
@@ -3629,6 +3824,16 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           }, { shellId, webPath });
           logger.debug(`  [SHELL CAPTURE] ${shellId} -> ${webPath} (${(buf.length / 1024).toFixed(1)}KB)`);
         } catch (err) {
+          await page.evaluate(() => {
+            document.querySelectorAll('[data-clonyfy-shell-mask="1"]').forEach((node) => {
+              const el = node;
+              const prev = el.getAttribute("data-clonyfy-shell-mask-prev");
+              el.style.cssText = prev || "";
+              el.removeAttribute("data-clonyfy-shell-mask");
+              el.removeAttribute("data-clonyfy-shell-mask-prev");
+            });
+          }).catch(() => {
+          });
           logger.debug(`  [SHELL CAPTURE WARN] ${shellId}: ${err.message}`);
         }
       }
@@ -13676,43 +13881,6 @@ function safeName(route) {
   }
   return name;
 }
-function htmlEsc(value) {
-  return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
-}
-function authPageHtml(hostname, kind) {
-  const isRegister = kind === "register";
-  const title = isRegister ? "Create account" : "Sign in";
-  const subtitle = isRegister ? `Start using ${hostname}` : `Welcome back to ${hostname}`;
-  const altHref = isRegister ? "/login" : "/register";
-  const altText = isRegister ? "Already have an account? Sign in" : "Need an account? Register";
-  const fields = isRegister ? '<label>Full name<input name="name" autocomplete="name" placeholder="Jane Doe" required></label>' : "";
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${htmlEsc(title)} | ${htmlEsc(hostname)}</title>
-  <style>
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:#f5f7fb;color:#111827;display:grid;place-items:center;padding:24px}.auth-shell{width:min(100%,420px);background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 18px 55px rgba(15,23,42,.12);padding:32px}.brand{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#2563eb;margin-bottom:22px}h1{font-size:30px;line-height:1.1;margin:0 0 8px}p{margin:0 0 24px;color:#6b7280;line-height:1.6}form{display:grid;gap:14px}label{display:grid;gap:7px;font-size:13px;font-weight:700;color:#374151}input{height:44px;border:1px solid #d1d5db;border-radius:6px;padding:0 12px;font:inherit;color:#111827;background:#fff}input:focus{outline:3px solid rgba(37,99,235,.16);border-color:#2563eb}button{height:46px;border:0;border-radius:6px;background:#2563eb;color:#fff;font:inherit;font-weight:800;cursor:pointer;margin-top:4px}button:hover{background:#1d4ed8}.alt{display:block;margin-top:18px;color:#2563eb;text-decoration:none;font-size:14px;font-weight:700}.fine{font-size:12px;color:#9ca3af;margin-top:18px;margin-bottom:0}
-  </style>
-</head>
-<body>
-  <main class="auth-shell">
-    <div class="brand">${htmlEsc(hostname)}</div>
-    <h1>${htmlEsc(title)}</h1>
-    <p>${htmlEsc(subtitle)}</p>
-    <form>
-      ${fields}
-      <label>Email<input type="email" name="email" autocomplete="email" placeholder="you@example.com" required></label>
-      <label>Password<input type="password" name="password" autocomplete="${isRegister ? "new-password" : "current-password"}" placeholder="********" required></label>
-      <button type="submit">${htmlEsc(title)}</button>
-    </form>
-    <a class="alt" href="${altHref}">${htmlEsc(altText)}</a>
-    <p class="fine">This generated auth page is ready to connect to your real backend.</p>
-  </main>
-</body>
-</html>`;
-}
 function routeSegments(path) {
   return path.replace(/^\/+/, "").split("/").filter(Boolean).map((segment) => segment.replace(/:/g, "_"));
 }
@@ -13744,16 +13912,6 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
     } else if (page.route !== "/") {
       routeMap[`${page.route}.html`] ??= filename;
     }
-  }
-  const authRoutes = [
-    { route: "/login", kind: "login" },
-    { route: "/register", kind: "register" }
-  ];
-  for (const auth of authRoutes) {
-    if (routeMap[auth.route]) continue;
-    const name = safeName(auth.route);
-    writeFileSync4(join5(pagesDataDir, `${name}.html`), authPageHtml(hostname, auth.kind), "utf8");
-    routeMap[auth.route] = `${name}.html`;
   }
   writeFileSync4(join5(outDir, "route-map.json"), JSON.stringify(routeMap, null, 2), "utf8");
   const fixturesDir = join5(outDir, "fixtures");
@@ -14112,4 +14270,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-HWO7SCJD.js.map
+//# sourceMappingURL=chunk-HBVT3DQ6.js.map

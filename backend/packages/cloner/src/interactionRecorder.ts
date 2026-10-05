@@ -280,6 +280,9 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
         if (name.startsWith('data-clonyfy')) continue;
         if (!el.isConnected || added.has(el) || insideAdded(el)) continue;
         if (ROOTS.has(el)) {
+          // Inline style on <html>/<body> is driven by scroll/animation JS
+          // (e.g. rotateX, CSS vars) — replaying it can flip or shift the whole page.
+          if (name === 'style') continue;
           if (st.noisyRootAttrs.get(el)?.has(name)) continue;
         } else if (st.isNoisy(el)) continue;
         let m = firstOld.get(el);
@@ -452,6 +455,7 @@ async function resolveItems(page: Page, items: RawItem[]): Promise<FinalItem[]> 
         if (op.k === 'attr') {
           const t = resolveEl(op.t, trigger);
           if (!t) continue;
+          if ((t === 'html' || t === 'body') && op.n === 'style') continue;
           const el = elementFor(t, trigger);
           // Closed state must match this page (cached recordings come from a sibling page).
           const off = el ? el.getAttribute(op.n) : op.off;
