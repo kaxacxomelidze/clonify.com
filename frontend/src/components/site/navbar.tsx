@@ -5,6 +5,7 @@ import { Menu, X } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Brand } from "./brand";
 import { LanguageSwitcher } from "./language-switcher";
+import { useSignedIn } from "@/hooks/use-auth";
 
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,9 @@ export function Navbar() {
   const { t: tr, language } = useSiteLanguage();
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const signedIn = useSignedIn();
+  const accountHref = signedIn ? "/dashboard" : language === "fr" ? "/fr/login" : "/login";
+  const accountLabel = signedIn ? tr("Dashboard") : tr("Log in");
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
@@ -60,10 +64,10 @@ export function Navbar() {
         <div className="flex items-center gap-2">
           <LanguageSwitcher />
           <Link
-            to={language === "fr" ? "/fr/login" : "/login"}
+            to={accountHref}
             className="hidden items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-[0_18px_50px_-22px_var(--foreground)] transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03] sm:inline-flex"
           >
-            {tr("Log in")}
+            {accountLabel}
           </Link>
           <button
             onClick={() => setOpen((v) => !v)}
@@ -103,11 +107,11 @@ export function Navbar() {
               ))}
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <Link
-                  to={language === "fr" ? "/fr/login" : "/login"}
+                  to={accountHref}
                   onClick={() => setOpen(false)}
                   className="rounded-full bg-primary px-5 py-3 text-sm font-medium text-primary-foreground"
                 >
-                  {tr("Log in")}
+                  {accountLabel}
                 </Link>
               </div>
             </div>

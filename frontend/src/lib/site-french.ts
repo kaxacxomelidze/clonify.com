@@ -5,6 +5,7 @@ export const frenchCopy: Record<string, string> = {
   Pricing: "Tarifs",
   FAQ: "FAQ",
   Dashboard: "Tableau de bord",
+  Affiliates: "Affiliation",
   "Log in": "Se connecter",
   "Clonyfy home": "Accueil Clonyfy",
   "Open menu": "Ouvrir le menu",

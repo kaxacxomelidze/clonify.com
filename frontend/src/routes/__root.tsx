@@ -14,6 +14,7 @@ import { useSiteLanguage } from "@/hooks/use-site-language";
 import { SiteNotFound } from "@/components/site/not-found";
 import { AuthProvider } from "@/hooks/use-auth";
 import { Toaster } from "@/components/ui/sonner";
+import { captureAffiliateCode } from "@/lib/affiliate";
 
 import appCss from "../styles.css?url";
 import { SmoothScroll } from "../components/smooth-scroll";
@@ -78,12 +79,12 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: "Clonyfy" },
-      { property: "og:image", content: "https://www.clonyfy.com/og-image.png" },
+      { property: "og:image", content: "https://clonyfy.com/og-image.png" },
       { property: "og:image:width", content: "1200" },
       { property: "og:image:height", content: "630" },
       { property: "og:image:alt", content: "Clonyfy — Clone any website with AI in seconds." },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:image", content: "https://www.clonyfy.com/og-image.png" },
+      { name: "twitter:image", content: "https://clonyfy.com/og-image.png" },
       { name: "twitter:image:alt", content: "Clonyfy — Clone any website with AI in seconds." },
     ],
     links: [
@@ -123,6 +124,10 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+
+  useEffect(() => {
+    captureAffiliateCode();
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>

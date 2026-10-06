@@ -1,8 +1,12 @@
+import { useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { useSiteLanguage } from "@/hooks/use-site-language";
 
 export function SiteNotFound() {
   const { t: tr, language } = useSiteLanguage();
+  useEffect(() => {
+    document.title = `${tr("Page not found")} — Clonyfy`;
+  }, [tr]);
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">

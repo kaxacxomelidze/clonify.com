@@ -71,7 +71,10 @@ function IntegrationsPage() {
         </p>
       </header>
       <div className="grid gap-5 md:grid-cols-2">
-        <section className="integration-card surface rounded-3xl p-6" data-connected={!!githubLogin}>
+        <section
+          className="integration-card surface rounded-3xl p-6"
+          data-connected={!!githubLogin}
+        >
           <div className="flex items-center gap-4">
             <span className="grid h-12 w-12 place-items-center rounded-2xl border border-border">
               <Github size={24} strokeWidth={1.5} />
@@ -147,7 +150,10 @@ function IntegrationsPage() {
             Import, or download SVG for Figma Web.
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
-            <Link to="/dashboard/library" className="dashboard-button bg-primary text-primary-foreground">
+            <Link
+              to="/dashboard/library"
+              className="dashboard-button bg-primary text-primary-foreground"
+            >
               Open library to export
             </Link>
           </div>
@@ -189,8 +195,7 @@ function IntegrationsPage() {
         ))}
       </div>
       <p className="surface rounded-2xl p-5 text-sm text-muted-foreground" role="status">
-        {notice ||
-          "GitHub push and Figma export are available from finished captures in Library."}
+        {notice || "GitHub push and Figma export are available from finished captures in Library."}
       </p>
     </div>
   );
