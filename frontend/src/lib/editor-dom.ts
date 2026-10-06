@@ -51,7 +51,18 @@ export function htmlForSave(doc: Document): string {
   clone
     .querySelectorAll("[contenteditable]")
     .forEach((el) => el.removeAttribute("contenteditable"));
+  stripThemeOutput(clone);
   return "<!DOCTYPE html>\n" + clone.outerHTML;
+}
+
+/** Theme engine output is regenerated from theme.json; never persist it. */
+export function stripThemeOutput(root: Element) {
+  root
+    .querySelectorAll("#__clonyfy_theme_style__, #__clonyfy_theme_font__, #__clonyfy_theme_freeze__")
+    .forEach((el) => el.remove());
+  root.querySelectorAll("[data-cth]").forEach((el) => el.removeAttribute("data-cth"));
+  root.removeAttribute("data-cth");
+  root.removeAttribute("data-cth-theme");
 }
 
 export function isSelectable(el: Element | null): el is HTMLElement {

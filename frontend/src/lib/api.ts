@@ -568,6 +568,72 @@ export async function savePage(outDir: string, route: string, html: string) {
   );
 }
 
+export type ThemeModel = {
+  id: string;
+  name: string;
+  group: string;
+  colors: {
+    bg: string;
+    surface: string;
+    surface2: string;
+    inverse: string;
+    text: string;
+    muted: string;
+    border: string;
+    accent: string;
+    accent2: string;
+    onAccent: string;
+  };
+  fonts: { heading: string; body: string };
+};
+
+export type ThemeEngine = {
+  models: ThemeModel[];
+  apply: (doc: Document, id: string | null) => { elements: number; tokens: number } | null;
+};
+
+declare global {
+  interface Window {
+    ClonyfyTheme?: ThemeEngine;
+  }
+}
+
+let themeEnginePromise: Promise<ThemeEngine> | null = null;
+
+/** Loads the backend theme engine once (same code that runs inside exported pages). */
+export function loadThemeEngine(): Promise<ThemeEngine> {
+  if (typeof window === "undefined") return Promise.reject(new Error("No window"));
+  if (window.ClonyfyTheme) return Promise.resolve(window.ClonyfyTheme);
+  if (themeEnginePromise) return themeEnginePromise;
+  themeEnginePromise = new Promise<ThemeEngine>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `${getApiBaseUrl()}/api/theme-engine.js`;
+    script.async = true;
+    script.onload = () => {
+      if (window.ClonyfyTheme) resolve(window.ClonyfyTheme);
+      else reject(new Error("Theme engine did not initialize"));
+    };
+    script.onerror = () => reject(new Error("Could not load theme engine"));
+    document.head.appendChild(script);
+  }).catch((err) => {
+    themeEnginePromise = null;
+    throw err;
+  });
+  return themeEnginePromise;
+}
+
+export async function fetchCloneTheme(outDir: string) {
+  return apiFetch<{ themeId: string | null }>(`/api/clone-theme?outDir=${encodeURIComponent(outDir)}`);
+}
+
+export async function setCloneTheme(outDir: string, themeId: string | null) {
+  return apiFetch<{ ok: boolean; themeId: string | null; pages: number }>("/api/clone-theme", {
+    method: "POST",
+    body: { outDir, themeId },
+    timeoutMs: 180_000,
+  });
+}
+
 export async function importAsset(outDir: string, dataUrl: string, filename?: string) {
   return apiFetch<{
     ok: boolean;
