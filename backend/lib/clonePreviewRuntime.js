@@ -198,10 +198,27 @@ function navigationRuntime(CFG) {
     if (hash && norm(k) === norm(currentRoute)) return { kind: 'hash', hash: hash };
     return { kind: 'cloned', route: k, hash: hash || '', url: pageUrl(k, hash) };
   }
+  function openNative(href) {
+    var value = String(href || '').trim();
+    if (!value) return;
+    // Sandboxed preview iframes often block bare mailto:/tel: navigation — open via
+    // window.open / top navigation so Contact us and phone links still work.
+    try {
+      var w = nativeOpen.call(window, value, '_blank', 'noopener');
+      if (w) return;
+    } catch (e) { /* ignore */ }
+    try {
+      if (window.top && window.top !== window) {
+        window.top.location.href = value;
+        return;
+      }
+    } catch (e2) { /* cross-origin top */ }
+    try { location.href = value; } catch (e3) { /* ignore */ }
+  }
   function classify(raw) {
     var value = String(raw == null ? '' : raw).trim();
     if (!value || /^#!?$/.test(value) || /^javascript:/i.test(value)) return { kind: 'noop' };
-    if (/^(mailto|tel|sms|data|blob):/i.test(value)) return { kind: 'native' };
+    if (/^(mailto|tel|sms|data|blob):/i.test(value)) return { kind: 'native', href: value };
     if (value.charAt(0) === '#') return { kind: 'hash', hash: value };
     var url;
     try {
@@ -273,7 +290,7 @@ function navigationRuntime(CFG) {
     }
     notify('clonyfy-preview-nav-blocked', { reason: d.kind, target: d.route || d.href || '' });
   }
-  window.__clonyfyNav = { classify: classify, go: go, explain: explain, scrollToHash: scrollToHash };
+  window.__clonyfyNav = { classify: classify, go: go, explain: explain, scrollToHash: scrollToHash, openNative: openNative };
 
   function inlineNavTarget(el) {
     var code = el.getAttribute && el.getAttribute('onclick');
@@ -308,7 +325,14 @@ function navigationRuntime(CFG) {
     var link = linkFromEvent(e);
     if (!link) return;
     var d = classify(link.href);
-    if (d.kind === 'native') return;
+    if (d.kind === 'native') {
+      if (d.href && /^(mailto|tel|sms):/i.test(d.href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        openNative(d.href);
+      }
+      return;
+    }
     if (link.download && /^\/(api|_assets)\//.test(String(link.href || ''))) return;
     if (d.kind === 'noop') {
       // "#" / javascript: links are usually JS buttons - let the interaction runtime handle them.
@@ -561,7 +585,7 @@ function interactionRuntime() {
     var sy = window.scrollY || window.pageYOffset || 0;
     for (var n = 0; n < nodes.length; n++) {
       var node = nodes[n];
-      if (!node.querySelectorAll) continue;
+      if (!node || !node.querySelectorAll) continue;
       var list = Array.prototype.slice.call(node.querySelectorAll('[style*="--position-y"]'));
       if (node.getAttribute && /--position-y/.test(node.getAttribute('style') || '')) list.unshift(node);
       for (var i = 0; i < list.length; i++) {
@@ -575,6 +599,94 @@ function interactionRuntime() {
         el.style.setProperty('--root-height', Math.round(r.height) + 'px');
         el.style.setProperty('--available-width', window.innerWidth + 'px');
         el.style.setProperty('--available-height', Math.max(0, Math.round(window.innerHeight - r.bottom)) + 'px');
+      }
+      // Panels recorded with baked top/left (e.g. remakeit language menu) ignore
+      // Floating UI vars — pin them under the trigger in the current preview.
+      var styleAttr = node.getAttribute('style') || '';
+      var cs = getComputedStyle(node);
+      if ((cs.position === 'fixed' || cs.position === 'absolute')
+        && (/(\s|^)(top|left)\s*:/.test(styleAttr) || node.style.top || node.style.left)) {
+        var width = node.getBoundingClientRect().width || parseFloat(cs.minWidth) || 180;
+        var top;
+        var left;
+        if (cs.position === 'fixed') {
+          top = Math.round(r.bottom + 8);
+          left = Math.round(r.left + r.width / 2 - width / 2);
+          left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+        } else {
+          top = Math.round(r.bottom + sy + 8);
+          left = Math.round(r.left + sx + r.width / 2 - width / 2);
+        }
+        node.style.top = top + 'px';
+        node.style.left = left + 'px';
+        node.style.right = 'auto';
+        node.style.marginLeft = '0';
+        node.style.transform = 'none';
+        node.style.opacity = '1';
+      }
+    }
+  }
+
+  /* Language switcher buttons are plain <button>s in recordings — map labels to
+     locale routes so preview can navigate (or show “not cloned”) instead of a dead toast.
+     Labels are often localized (Inglese, Français, …), not only English names. */
+  function wireLocaleButtons(nodes) {
+    var LOCALE_CODES = { en: 1, fr: 1, es: 1, it: 1, de: 1, pt: 1, nl: 1, ja: 1, zh: 1, pl: 1, ru: 1, ko: 1, ar: 1, tr: 1, sv: 1, da: 1, fi: 1, no: 1, cs: 1, hu: 1, ro: 1, uk: 1 };
+    var LOCALE_BY_LABEL = {
+      // English UI
+      english: 'en', en: 'en',
+      french: 'fr', fr: 'fr',
+      spanish: 'es', es: 'es',
+      italian: 'it', it: 'it',
+      german: 'de', de: 'de',
+      portuguese: 'pt', pt: 'pt',
+      dutch: 'nl', nl: 'nl',
+      japanese: 'ja', ja: 'ja',
+      chinese: 'zh', zh: 'zh',
+      // Italian UI (Francese / Inglese / Spagnolo / Italiano / Tedesco)
+      inglese: 'en', francese: 'fr', spagnolo: 'es', italiano: 'it', tedesco: 'de',
+      // French UI
+      anglais: 'en', francais: 'fr', 'français': 'fr', espagnol: 'es', italien: 'it', allemand: 'de',
+      // Spanish UI
+      ingles: 'en', 'inglés': 'en', frances: 'fr', 'francés': 'fr', espanol: 'es', 'español': 'es',
+      italiano: 'it', aleman: 'de', 'alemán': 'de',
+      // German UI
+      englisch: 'en', franzoesisch: 'fr', 'französisch': 'fr', spanisch: 'es', italienisch: 'it', deutsch: 'de',
+    };
+    // Prefer switching the same path under another locale when possible.
+    var curPath = '/';
+    try {
+      var route = new URL(location.href).searchParams.get('route') || '/';
+      curPath = route;
+    } catch (e) { /* ignore */ }
+    function localePath(code) {
+      var segs = String(curPath || '/').split('/').filter(Boolean);
+      if (segs.length && LOCALE_CODES[segs[0].toLowerCase()]) segs = segs.slice(1);
+      if (!code || code === 'en') return segs.length ? '/' + segs.join('/') : '/';
+      return '/' + code + (segs.length ? '/' + segs.join('/') : '');
+    }
+    function normLabel(s) {
+      return String(s || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, ''); // français → francais
+    }
+    for (var n = 0; n < nodes.length; n++) {
+      var root = nodes[n];
+      if (!root || !root.querySelectorAll) continue;
+      var buttons = root.querySelectorAll('button');
+      for (var i = 0; i < buttons.length; i++) {
+        var btn = buttons[i];
+        if (btn.getAttribute('data-href') || btn.getAttribute('href')) continue;
+        var label = normLabel(btn.textContent);
+        // Skip close (X) / icon-only controls.
+        if (!label || label.length > 24) continue;
+        var code = LOCALE_BY_LABEL[label];
+        if (!code) continue;
+        btn.setAttribute('data-href', localePath(code));
+        btn.setAttribute('role', 'link');
       }
     }
   }
@@ -636,8 +748,9 @@ function interactionRuntime() {
       }
     }
     if (added.length) {
-      placeFloating(added, anchor || trigger.closest('nav,header,[role="navigation"]') || trigger);
+      placeFloating(added, trigger);
       markOpen(added);
+      wireLocaleButtons(added);
     }
     open[item.i] = { item: item, trigger: trigger, added: added, zones: zones, timer: 0, at: Date.now() };
   }
@@ -982,6 +1095,150 @@ function interactionRuntime() {
     return 0;
   }
 
+  /* FAQ answers often exist only in JSON-LD — inject a panel on click when the
+     captured DOM has the question button but no answer sibling (common SPA pattern). */
+  var faqAnswers = null;
+  function loadFaqAnswers() {
+    if (faqAnswers) return faqAnswers;
+    faqAnswers = {};
+    function ingest(node) {
+      if (!node) return;
+      if (Array.isArray(node)) { node.forEach(ingest); return; }
+      if (typeof node !== 'object') return;
+      var entities = node.mainEntity;
+      if ((!entities || !entities.length) && Array.isArray(node['@graph'])) {
+        node['@graph'].forEach(ingest);
+        return;
+      }
+      if (node['@type'] === 'FAQPage' && entities) { /* use entities below */ }
+      else if (!entities || !entities.length) return;
+      if (!Array.isArray(entities)) entities = [entities];
+      for (var e = 0; e < entities.length; e++) {
+        var q = entities[e];
+        if (!q || !q.name) continue;
+        var ans = q.acceptedAnswer && (q.acceptedAnswer.text || q.acceptedAnswer);
+        if (typeof ans === 'string' && ans.trim()) {
+          faqAnswers[String(q.name).replace(/\s+/g, ' ').trim().toLowerCase()] = ans.trim();
+        }
+      }
+    }
+    var scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (var i = 0; i < scripts.length; i++) {
+      try {
+        ingest(JSON.parse(scripts[i].textContent || 'null'));
+      } catch (err) { /* ignore bad JSON-LD */ }
+    }
+    return faqAnswers;
+  }
+  function toggleFaqFromSchema(btn) {
+    var span = btn.querySelector('span');
+    var qText = String((span && span.textContent) || btn.textContent || '').replace(/\s+/g, ' ').trim();
+    // Plus-icon clicks still land on the question button via closest().
+    if (!qText || qText.length < 8 || qText.length > 160) return false;
+    if (!/[?？]$/.test(qText) && !/^(what|why|how|can|do|does|is|are|will|qui|quoi|comment|pourquoi|puedo|cosa)/i.test(qText)) {
+      if (!btn.closest('[class*="faq" i], [class*="accordion" i], [class*="light-gray" i]')) return false;
+    }
+    var map = loadFaqAnswers();
+    var answer = map[qText.toLowerCase()];
+    if (!answer) return false;
+    var wrap = btn.parentElement;
+    if (!wrap) return false;
+    var panel = wrap.querySelector('[data-clonyfy-faq-panel]');
+    var plus = btn.querySelector('span.flex-shrink-0, span[class*="shrink"]');
+    var vert = plus && plus.querySelector('span:last-child');
+    if (panel) {
+      var open = panel.style.display !== 'none';
+      panel.style.display = open ? 'none' : 'block';
+      if (vert) vert.style.opacity = open ? '1' : '0';
+      return true;
+    }
+    panel = document.createElement('div');
+    panel.setAttribute('data-clonyfy-faq-panel', '1');
+    panel.style.cssText = 'padding:0 1.5rem 1.25rem;color:#333;font-size:0.95rem;line-height:1.5';
+    panel.textContent = answer;
+    wrap.appendChild(panel);
+    if (vert) vert.style.opacity = '0';
+    return true;
+  }
+
+  /* Monthly / Yearly (and similar) pill toggles — swap active styles when JS is gone. */
+  function toggleSegmentedControl(btn) {
+    var label = String(btn.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!/^(monthly|yearly|annual|annually|mensuel|mensuelle|annuel|annuelle|mensile|annuale|monatlich|jährlich|mensual|anual)$/i.test(label)) {
+      return false;
+    }
+    var row = btn.parentElement;
+    if (!row) return false;
+    var buttons = row.querySelectorAll(':scope > button');
+    if (buttons.length < 2 || buttons.length > 4) return false;
+    var idx = Array.prototype.indexOf.call(buttons, btn);
+    if (idx < 0) return false;
+    var pill = row.querySelector('div[style*="position:absolute"], div[style*="position: absolute"]');
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      var on = b === btn;
+      b.style.color = on ? '#fff' : '#9A999B';
+      b.classList.toggle('text-white', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    if (pill && buttons.length === 2) {
+      pill.style.width = pill.style.width || 'calc(50% - 4px)';
+      pill.style.left = idx === 0 ? '4px' : '50%';
+      pill.style.transition = pill.style.transition || 'left .2s ease';
+    }
+    // Soften/restore "Save 30%" hint under the toggle.
+    var hint = row.parentElement && row.parentElement.querySelector('p');
+    if (hint && /save|économ|risparm|spar/i.test(hint.textContent || '')) {
+      var yearly = /year|annuel|annual|jähr|anual/i.test(label);
+      hint.style.opacity = yearly ? '1' : '0.45';
+    }
+    return true;
+  }
+
+  /* Plan CTAs ("Choose plan") usually go to the hosted app — reuse a captured app data-href. */
+  function activatePlanCta(btn) {
+    var label = String(btn.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!/^(choose plan|choisir|choisissez|elige|elegir|scegli|plan wählen|get plan|select plan|prendre|s'abonner|subscribe)$/i.test(label)) {
+      return false;
+    }
+    if (!window.__clonyfyNav) return false;
+    var app = document.querySelector('[data-href*="app."], [data-href*="signup"], [data-href*="sign-up"], [data-href*="sign-in"], a[href*="app."], a[href*="signup"]');
+    var href = app && (app.getAttribute('data-href') || app.getAttribute('data-url') || app.getAttribute('href'));
+    if (!href) {
+      toast('Plan checkout is not cloned yet', 'Checkout runs on the original site’s app, which is outside this clone.');
+      return true;
+    }
+    var dest = window.__clonyfyNav.classify(href);
+    if (dest.kind === 'cloned') window.__clonyfyNav.go(dest, false);
+    else if (dest.kind === 'native' && dest.href) window.__clonyfyNav.openNative(dest.href);
+    else if (dest.kind !== 'noop') window.__clonyfyNav.explain(dest);
+    return true;
+  }
+
+  function activateContactCta(btn) {
+    var label = String(btn.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!/^(contact us|contactez|contáctanos|contattaci|kontakt|nous contacter|get in touch)$/i.test(label)) {
+      return false;
+    }
+    // Prefer a real mailto already on the page (Remakeit uses mailto:app@…).
+    var mail = document.querySelector('a[href^="mailto:"]');
+    var href = (btn.getAttribute && (btn.getAttribute('href') || btn.getAttribute('data-href'))) || (mail && mail.getAttribute('href'));
+    if (href && /^mailto:/i.test(href) && window.__clonyfyNav && window.__clonyfyNav.openNative) {
+      window.__clonyfyNav.openNative(href);
+      return true;
+    }
+    if (href && window.__clonyfyNav) {
+      var dest = window.__clonyfyNav.classify(href);
+      if (dest.kind === 'cloned') window.__clonyfyNav.go(dest, false);
+      else if (dest.kind === 'hash') window.__clonyfyNav.scrollToHash(dest.hash);
+      else if (dest.kind === 'native' && dest.href) window.__clonyfyNav.openNative(dest.href);
+      else if (dest.kind !== 'noop') window.__clonyfyNav.explain(dest);
+      return true;
+    }
+    toast('Contact action is not cloned yet', 'No email or contact page was captured for this control.');
+    return true;
+  }
+
   /* ---- click dispatcher (bubble phase: recorded triggers run first) ---- */
   var BUTTON_SEL = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], a[href="#"], a[href="#!"], a[href^="javascript:"], summary, [aria-haspopup], [data-state]';
   document.addEventListener('click', function (e) {
@@ -1046,6 +1303,18 @@ function interactionRuntime() {
       if (toggleAccordion(btn) || toggleDialog(btn)) { e.preventDefault(); return; }
     }
 
+    // FAQ question rows (no aria-controls; answers live in JSON-LD only).
+    if (toggleFaqFromSchema(btn)) { e.preventDefault(); markHandled(e); return; }
+
+    // Billing period pill (Monthly / Yearly).
+    if (toggleSegmentedControl(btn)) { e.preventDefault(); markHandled(e); return; }
+
+    // Pricing plan CTAs.
+    if (activatePlanCta(btn)) { e.preventDefault(); markHandled(e); return; }
+
+    // Contact us (mailto often blocked inside the preview iframe).
+    if (activateContactCta(btn)) { e.preventDefault(); markHandled(e); return; }
+
     var menu = burgerOpen ? burgerOpen.get(btn) : null;
     if (menu) {
       conceal(menu);
@@ -1060,6 +1329,40 @@ function interactionRuntime() {
       if (burgerOpen) burgerOpen.set(btn, menu);
       if (btn.hasAttribute('aria-expanded')) btn.setAttribute('aria-expanded', 'true');
       e.preventDefault();
+      return;
+    }
+
+    // Nothing above applied: if capture tagged a destination, navigate like a link.
+    var hrefEl = btn.closest('[data-href], [data-url], [data-link]');
+    if (hrefEl && window.__clonyfyNav) {
+      var href = hrefEl.getAttribute('data-href') || hrefEl.getAttribute('data-url') || hrefEl.getAttribute('data-link');
+      if (href) {
+        var dest = window.__clonyfyNav.classify(href);
+        e.preventDefault();
+        markHandled(e);
+        if (dest.kind === 'cloned') window.__clonyfyNav.go(dest, false);
+        else if (dest.kind === 'hash') window.__clonyfyNav.scrollToHash(dest.hash);
+        else if (dest.kind === 'native' && dest.href) window.__clonyfyNav.openNative(dest.href);
+        else if (dest.kind !== 'noop') window.__clonyfyNav.explain(dest);
+        return;
+      }
+    }
+
+    // Common "back / return" controls are JS-only on SPAs — use preview history.
+    var backLabel = String(btn.getAttribute('aria-label') || btn.textContent || '')
+      .replace(/\s+/g, ' ').trim();
+    if (/^(back|go back|return|previous|←|‹|retour|zurück|atras|indietro)$/i.test(backLabel)
+      || /\b(back|retour)\b/i.test(String(btn.className || ''))
+      || btn.getAttribute('data-action') === 'back') {
+      e.preventDefault();
+      markHandled(e);
+      try {
+        if (window.history.length > 1) history.back();
+        else if (window.__clonyfyNav) {
+          var home = window.__clonyfyNav.classify('/');
+          if (home.kind === 'cloned') window.__clonyfyNav.go(home, false);
+        }
+      } catch (err) { /* ignore */ }
       return;
     }
 
@@ -1347,4 +1650,144 @@ export function buildInteractionRuntimeScript() {
 
 export function buildAnimationRuntimeScript() {
   return `<script data-clonyfy-animation-runtime>(${animationRuntime.toString()})();</script>`;
+}
+
+/**
+ * Bridge injected into origin-proxied Live JS pages.
+ * Rewrites same-origin fetch/XHR/navigation through /api/live-site so the real
+ * site scripts run while staying on the API host. No interaction heuristics.
+ *
+ * @param {{ prefix: string, targetOrigin: string, outDir?: string, route?: string }} opts
+ */
+export function buildLiveBridgeScript(opts = {}) {
+  const config = {
+    prefix: String(opts.prefix || '').replace(/\/$/, ''),
+    targetOrigin: String(opts.targetOrigin || '').replace(/\/$/, ''),
+    outDir: String(opts.outDir || ''),
+    route: String(opts.route || '/'),
+  };
+  return `<script data-clonyfy-live-bridge>(${liveBridgeRuntime.toString()})(${safeJson(config)});</script>`;
+}
+
+function liveBridgeRuntime(CFG) {
+  if (window.__clonyfyLiveBridge) return;
+  window.__clonyfyLiveBridge = true;
+  var prefix = String(CFG.prefix || '').replace(/\/$/, '');
+  var targetOrigin = String(CFG.targetOrigin || '').replace(/\/$/, '');
+  if (!prefix || !targetOrigin) return;
+
+  function bareHost(h) {
+    return String(h || '').replace(/:\d+$/, '').toLowerCase();
+  }
+  function targetHost() {
+    try { return bareHost(new URL(targetOrigin).host); } catch (e) { return ''; }
+  }
+  function routeFromPath(pathname) {
+    var p = String(pathname || '/');
+    if (prefix && p.indexOf(prefix) === 0) {
+      p = p.slice(prefix.length) || '/';
+    }
+    if (!p || p.charAt(0) !== '/') p = '/' + p;
+    return p;
+  }
+  function toLive(raw) {
+    var value = String(raw == null ? '' : raw).trim();
+    if (!value || /^(mailto|tel|sms|javascript|data|blob):/i.test(value)) return value;
+    if (value.charAt(0) === '#') return value;
+    var url;
+    try {
+      url = new URL(value, targetOrigin + '/');
+    } catch (e) { return value; }
+    if (!/^https?:$/i.test(url.protocol)) return value;
+    var same = bareHost(url.host) === targetHost();
+    var viaLive = prefix && url.pathname.indexOf(prefix) === 0;
+    if (viaLive) return url.pathname + url.search + url.hash;
+    if (!same) return value;
+    return prefix + (url.pathname || '/') + url.search + url.hash;
+  }
+  function notifyRoute() {
+    try {
+      var route = routeFromPath(location.pathname) + location.search + location.hash;
+      window.parent.postMessage({ type: 'clonyfy-preview-nav', route: route, live: true }, '*');
+    } catch (e) { /* ignore */ }
+  }
+
+  // fetch
+  var nativeFetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      var reqUrl = typeof input === 'string' ? input : (input && input.url);
+      var mapped = toLive(reqUrl);
+      if (mapped && mapped !== reqUrl) {
+        if (typeof input === 'string') input = mapped;
+        else if (input && typeof Request !== 'undefined') input = new Request(mapped, input);
+      }
+    } catch (e) { /* ignore */ }
+    return nativeFetch.call(this, input, init);
+  };
+
+  // XHR
+  var XO = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    var args = Array.prototype.slice.call(arguments);
+    if (typeof url === 'string') args[1] = toLive(url);
+    return XO.apply(this, args);
+  };
+
+  // window.open
+  var nativeOpen = window.open;
+  window.open = function (url, name, specs) {
+    return nativeOpen.call(this, url != null ? toLive(String(url)) : url, name, specs);
+  };
+
+  // history
+  var nativePush = history.pushState;
+  var nativeReplace = history.replaceState;
+  history.pushState = function (state, title, url) {
+    var next = url != null && url !== '' ? toLive(String(url)) : url;
+    var ret = nativePush.call(this, state, title, next);
+    notifyRoute();
+    return ret;
+  };
+  history.replaceState = function (state, title, url) {
+    var next = url != null && url !== '' ? toLive(String(url)) : url;
+    var ret = nativeReplace.call(this, state, title, next);
+    notifyRoute();
+    return ret;
+  };
+  window.addEventListener('popstate', notifyRoute);
+  window.addEventListener('hashchange', notifyRoute);
+
+  // Clicks on same-origin anchors
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest && e.target.closest('a[href]');
+    if (!a || a.hasAttribute('download')) return;
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var href = a.getAttribute('href');
+    if (!href || /^(mailto|tel|sms|javascript):/i.test(href) || href.charAt(0) === '#') return;
+    var mapped = toLive(href);
+    if (!mapped || mapped === href) return;
+    // Only rewrite when the raw href pointed at the live origin / root-relative path.
+    var abs;
+    try { abs = new URL(href, targetOrigin + '/'); } catch (err) { return; }
+    if (bareHost(abs.host) !== targetHost() && href.charAt(0) !== '/') return;
+    e.preventDefault();
+    if (/^_(blank|new)$/i.test(a.getAttribute('target') || '')) {
+      nativeOpen.call(window, mapped, '_blank', 'noopener');
+    } else {
+      location.href = mapped;
+    }
+  }, true);
+
+  // Forms posting to same origin
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || !form.getAttribute) return;
+    var action = form.getAttribute('action');
+    if (action == null || action === '') action = location.href;
+    var mapped = toLive(action);
+    if (mapped && mapped !== action) form.setAttribute('action', mapped);
+  }, true);
+
+  notifyRoute();
 }

@@ -396,16 +396,16 @@ export default async function figmaExportPage(options = {}) {
     const key = `${abs}@${edge}`;
     if (imageCache.has(key)) return imageCache.get(key);
     const job = (async () => {
-      if (embeddedImageBudget <= 0) return '';
-      try {
-        const res = await fetch(abs, { credentials: 'omit' });
-        if (!res.ok) return '';
-        const blob = await res.blob();
-        if (!blob.size) return '';
+    if (embeddedImageBudget <= 0) return '';
+    try {
+      const res = await fetch(abs, { credentials: 'omit' });
+      if (!res.ok) return '';
+      const blob = await res.blob();
+      if (!blob.size) return '';
         let out = '';
         if (typeof createImageBitmap === 'function' && /^image\/(png|jpeg|jpg|webp|gif|avif)/i.test(blob.type || 'image/png')) {
-          try {
-            const bmp = await createImageBitmap(blob);
+        try {
+          const bmp = await createImageBitmap(blob);
             out = encodeBitmap(bmp, bmp.width, bmp.height, edge, maxEmbeddedImageBytes, /^image\/jpe?g/i.test(blob.type || ''));
             try { bmp.close(); } catch {}
           } catch {}
@@ -423,7 +423,7 @@ export default async function figmaExportPage(options = {}) {
                 const h = img.naturalHeight || drawH || 150;
                 const fit = Math.max((drawW || w) * 2 / w, (drawH || h) * 2 / h, 1);
                 enc = encodeBitmap(img, w * fit, h * fit, edge, maxEmbeddedImageBytes);
-              } catch {}
+        } catch {}
               URL.revokeObjectURL(url);
               resolve(enc);
             };
@@ -433,18 +433,18 @@ export default async function figmaExportPage(options = {}) {
         }
         if (!out && blob.size <= maxEmbeddedImageBytes && (format !== 'scene' || /^image\/(png|jpe?g|gif)/i.test(blob.type || ''))) {
           out = await new Promise((resolve) => {
-            const reader = new FileReader();
+        const reader = new FileReader();
             reader.onload = () => resolve(String(reader.result || ''));
             reader.onerror = () => resolve('');
-            reader.readAsDataURL(blob);
-          });
+        reader.readAsDataURL(blob);
+      });
           if (out.length > maxEmbeddedImageBytes * 1.37) out = '';
         }
         if (out) embeddedImageBudget -= out.length;
         return out;
-      } catch {
-        return '';
-      }
+    } catch {
+      return '';
+    }
     })();
     imageCache.set(key, job);
     return job;
@@ -559,13 +559,13 @@ export default async function figmaExportPage(options = {}) {
     const id = `g${++defSeq}`;
     if (lin) {
       const parts = splitTopLevel(lin[2]);
-      let angle = 180;
+    let angle = 180;
       if (/^(-?[\d.]+(deg|turn|rad|grad)|to\s)/i.test(parts[0])) {
         const head = parts.shift();
         const deg = head.match(/(-?[\d.]+)deg/i);
         const turn = head.match(/(-?[\d.]+)turn/i);
         const radv = head.match(/(-?[\d.]+)rad/i);
-        if (deg) angle = parseFloat(deg[1]);
+      if (deg) angle = parseFloat(deg[1]);
         else if (turn) angle = parseFloat(turn[1]) * 360;
         else if (radv) angle = (parseFloat(radv[1]) * 180) / Math.PI;
         else {
@@ -1053,7 +1053,7 @@ export default async function figmaExportPage(options = {}) {
     const grow = (parseFloat(cs.outlineOffset) || 0) + ow / 2;
     const or = { x: r.x - grow, y: r.y - grow, w: r.w + 2 * grow, h: r.h + 2 * grow };
     if (or.w <= 0 || or.h <= 0) return;
-    const rad = radii(cs);
+      const rad = radii(cs);
     const g = (v) => (v > 0 ? Math.max(0, v + grow) : 0);
     const orad = { ...rad, tl: g(rad.tl), tr: g(rad.tr), br: g(rad.br), bl: g(rad.bl), rx: g(rad.rx) };
     const dash = /dashed/.test(style) ? ` stroke-dasharray="${num(ow * 3)} ${num(ow * 2)}"` : (/dotted/.test(style) ? ` stroke-dasharray="${num(ow)} ${num(ow)}"` : '');
@@ -1206,7 +1206,7 @@ export default async function figmaExportPage(options = {}) {
         d.setAttribute('stop-color', hex(c));
         const so = (parseFloat(scs.stopOpacity) || 1) * c.a;
         if (so < 0.999) d.setAttribute('stop-opacity', String(num(so)));
-      } else {
+        } else {
         for (const [prop, attr] of SVG_PAINT) {
           let v = scs[prop];
           if (!v) continue;
@@ -1314,9 +1314,9 @@ export default async function figmaExportPage(options = {}) {
   /* ------------------------------------------------------------------ text */
 
   function addTextLine(el, cs, e, paint, line, group, overrides = {}) {
-    const fontSize = parseFloat(cs.fontSize) || 16;
-    const rc = line.rect;
-    const x = num(rc.left + window.scrollX);
+      const fontSize = parseFloat(cs.fontSize) || 16;
+        const rc = line.rect;
+        const x = num(rc.left + window.scrollX);
     const top = num(rc.top + window.scrollY);
     const h = rc.height;
     const { asc, desc } = fontMetrics(cs);
@@ -1332,7 +1332,7 @@ export default async function figmaExportPage(options = {}) {
       blend: e.blend,
       fontStack: fontStack(cs),
       fontFamily: primaryFont(cs),
-      fontWeight: String(cs.fontWeight || '400'),
+            fontWeight: String(cs.fontWeight || '400'),
       fontStyle: /italic|oblique/i.test(cs.fontStyle || '') ? 'italic' : 'normal',
       letterSpacing: cs.letterSpacing && cs.letterSpacing !== 'normal' ? (parseFloat(cs.letterSpacing) || 0) : 0,
       decoration: mapTextDecoration(cs),

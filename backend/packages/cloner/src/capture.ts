@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, extname } from 'path';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
+import { join, extname, basename } from 'path';
 import mime from 'mime-types';
 import type { BrowserContext, Page } from 'playwright';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
@@ -789,6 +789,32 @@ export async function capturePage(
       await route.continue();
       return;
     }
+
+    // Shell/canvas/video replacements write img.src="/_assets/…". On a live
+    // origin that path 404s (e.g. remakeit.io/_assets/shell_*.png), which
+    // crashes Next/React hydration into __next_error__. Serve from disk first.
+    try {
+      const assetUrl = new URL(url);
+      if (assetUrl.pathname.startsWith('/_assets/')) {
+        const name = basename(decodeURIComponent(assetUrl.pathname));
+        if (name && name !== '_assets' && !name.includes('..')) {
+          const localPath = join(assetsDir, name);
+          if (existsSync(localPath)) {
+            const ext = extname(name).toLowerCase();
+            const contentType = (mime.lookup(ext) as string)
+              || (ext === '.png' ? 'image/png'
+                : ext === '.svg' ? 'image/svg+xml'
+                : 'application/octet-stream');
+            await route.fulfill({
+              status: 200,
+              contentType,
+              body: readFileSync(localPath),
+            });
+            return;
+          }
+        }
+      }
+    } catch { /* fall through to normal fetch */ }
 
     if (resourceType === 'script' && SCRIPT_STUB_PATTERNS.some((p) => p.test(url))) {
       logger.debug(`  [SCRIPT STUB] ${url}`);
@@ -2095,24 +2121,35 @@ export async function capturePage(
 
   let html = await page.content();
 
-  // Shopify/Remix/Next sometimes paint an Application Error boundary mid-capture when
-  // stubbed XHR/JS races hydration. Prefer a second snapshot after a short settle if so.
+  // Shopify/Remix/Next sometimes paint an Application Error / __next_error__
+  // boundary mid-capture when stubbed XHR/JS races hydration, or when in-page
+  // /_assets replacements 404 against the live origin. Prefer a reload snapshot.
   let finalHtml = html;
   try {
     const isAppError = await page.evaluate(() => {
+      if (document.documentElement?.id === '__next_error__') return true;
+      if (document.getElementById('__next_error__')) return true;
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
       return /Application Error/i.test(text)
         && /page could not be displayed|Something has gone wrong/i.test(text);
     });
     if (isAppError) {
-      logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; waiting and re-snapshotting`);
+      logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; reloading and re-snapshotting`);
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: IS_FAST ? 20_000 : 45_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 12_000 }).catch(() => {});
       await page.waitForTimeout(IS_FAST ? 800 : 2000);
-      await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 6_000 }).catch(() => {});
       const retryHtml = await page.content();
-      const stillError = /Application Error/i.test(retryHtml)
-        && /page could not be displayed|Something has gone wrong/i.test(retryHtml);
+      const stillError = await page.evaluate(() => {
+        if (document.documentElement?.id === '__next_error__') return true;
+        if (document.getElementById('__next_error__')) return true;
+        const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+        if (/This page could not/i.test(text) && text.length < 400) return true;
+        return /Application Error/i.test(text)
+          && /page could not be displayed|Something has gone wrong/i.test(text);
+      }).catch(() => true);
       if (!stillError) finalHtml = retryHtml;
-      else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
+      else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
     }
   } catch { /* best-effort */ }
 

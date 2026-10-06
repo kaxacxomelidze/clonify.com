@@ -51,6 +51,13 @@ describe('locale path detection', () => {
     expect(shouldSkipLocaleVariant('https://stripe.com/fr-be', start)).toBe(true);
     expect(shouldSkipLocaleVariant('https://stripe.com/payments', start)).toBe(false);
   });
+
+  it('keeps other-locale variants when fullSite/Max is enabled', () => {
+    const start = 'https://remakeit.io/fr';
+    expect(shouldSkipLocaleVariant('https://remakeit.io/es', start, true)).toBe(false);
+    expect(shouldSkipLocaleVariant('https://remakeit.io/de/pricing', start, true)).toBe(false);
+    expect(shouldSkipLocaleVariant('https://remakeit.io/es', start, false)).toBe(true);
+  });
 });
 
 describe('prioritizeSitemapUrls locale filtering', () => {
@@ -71,5 +78,21 @@ describe('prioritizeSitemapUrls locale filtering', () => {
     expect(urls).not.toContain('https://stripe.com/es-us');
     expect(urls).not.toContain('https://stripe.com/ae');
     expect(urls).not.toContain('https://stripe.com/zh-us');
+  });
+
+  it('includes all locale roots when fullSite/Max is enabled', () => {
+    const urls = prioritizeSitemapUrls([
+      'https://remakeit.io/',
+      'https://remakeit.io/fr',
+      'https://remakeit.io/es',
+      'https://remakeit.io/it',
+      'https://remakeit.io/de',
+      'https://remakeit.io/pricing',
+    ], 'https://remakeit.io/fr', 20, true);
+
+    expect(urls).toContain('https://remakeit.io/es');
+    expect(urls).toContain('https://remakeit.io/it');
+    expect(urls).toContain('https://remakeit.io/de');
+    expect(urls).toContain('https://remakeit.io/fr');
   });
 });

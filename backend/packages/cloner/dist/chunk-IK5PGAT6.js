@@ -187,7 +187,7 @@ var require_eventemitter3 = __commonJS({
 });
 
 // src/runClone.ts
-import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync2, existsSync as existsSync5 } from "fs";
+import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync3, existsSync as existsSync5 } from "fs";
 import { resolve as resolve2, join as join6 } from "path";
 
 // src/robots.ts
@@ -794,8 +794,8 @@ import mime2 from "mime-types";
 
 // src/capture.ts
 import { createHash as createHash2 } from "crypto";
-import { writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync2 } from "fs";
-import { join as join3, extname as extname2 } from "path";
+import { writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync2, readFileSync } from "fs";
+import { join as join3, extname as extname2, basename } from "path";
 import mime from "mime-types";
 
 // src/logger.ts
@@ -1454,14 +1454,14 @@ function cacheGet(key) {
     recordedNavCache.delete(key);
     return null;
   }
-  return hit.items;
+  return { items: hit.items, hrefs: hit.hrefs || [], hrefLabels: hit.hrefLabels || [] };
 }
-function cacheSet(key, items) {
+function cacheSet(key, items, hrefs = [], hrefLabels = []) {
   if (recordedNavCache.size >= CACHE_MAX) {
     const oldest = recordedNavCache.keys().next().value;
     if (oldest !== void 0) recordedNavCache.delete(oldest);
   }
-  recordedNavCache.set(key, { at: Date.now(), items });
+  recordedNavCache.set(key, { at: Date.now(), items, hrefs, hrefLabels });
 }
 function interactionsScriptHtml(items) {
   if (!items.length) return "";
@@ -1785,17 +1785,51 @@ async function setupRecorder(page, maxTriggers, maxAddHtml) {
       }
       return out;
     };
+    st.pendingNav = null;
+    const rememberNav = (raw) => {
+      if (raw == null || raw === "") return;
+      try {
+        const href = new URL(String(raw), document.baseURI).href;
+        if (/^https?:/i.test(href)) st.pendingNav = href;
+      } catch {
+      }
+    };
     const nav = w.navigation;
     if (nav && typeof nav.addEventListener === "function") {
       w.__clonyfyIxNav = (e) => {
-        if (st.guard && !e.hashChange && e.cancelable) e.preventDefault();
+        if (!st.guard) return;
+        try {
+          if (e && e.destination && e.destination.url) rememberNav(e.destination.url);
+        } catch {
+        }
+        if (!e.hashChange && e.cancelable) e.preventDefault();
       };
       nav.addEventListener("navigate", w.__clonyfyIxNav);
     }
     w.__clonyfyIxOpen = window.open;
-    window.open = () => null;
+    window.open = (url) => {
+      if (st.guard && url != null && url !== "") rememberNav(url);
+      return null;
+    };
+    w.__clonyfyIxPush = history.pushState.bind(history);
+    w.__clonyfyIxReplace = history.replaceState.bind(history);
+    history.pushState = function(state, title, url) {
+      if (st.guard && url != null && url !== "") rememberNav(url);
+      if (st.guard && url != null && url !== "") return;
+      return w.__clonyfyIxPush(state, title, url);
+    };
+    history.replaceState = function(state, title, url) {
+      if (st.guard && url != null && url !== "") rememberNav(url);
+      if (st.guard && url != null && url !== "") return;
+      return w.__clonyfyIxReplace(state, title, url);
+    };
     w.__clonyfyIxSubmit = (e) => e.preventDefault();
     document.addEventListener("submit", w.__clonyfyIxSubmit, true);
+    st.takePendingNav = () => {
+      const v = st.pendingNav;
+      st.pendingNav = null;
+      return v;
+    };
     return { count: list.length, signature: signature.join("|"), clickable };
   }, { maxTriggers, maxAddHtml });
 }
@@ -1812,10 +1846,14 @@ async function teardownRecorder(page, keep) {
     }
     if (w.__clonyfyIxNav && w.navigation) w.navigation.removeEventListener("navigate", w.__clonyfyIxNav);
     if (w.__clonyfyIxOpen) window.open = w.__clonyfyIxOpen;
+    if (w.__clonyfyIxPush) history.pushState = w.__clonyfyIxPush;
+    if (w.__clonyfyIxReplace) history.replaceState = w.__clonyfyIxReplace;
     if (w.__clonyfyIxSubmit) document.removeEventListener("submit", w.__clonyfyIxSubmit, true);
     delete w.__clonyfyIx;
     delete w.__clonyfyIxNav;
     delete w.__clonyfyIxOpen;
+    delete w.__clonyfyIxPush;
+    delete w.__clonyfyIxReplace;
     delete w.__clonyfyIxSubmit;
     document.querySelectorAll("[data-clonyfy-ix-root]").forEach((el) => el.removeAttribute("data-clonyfy-ix-root"));
     const keepSet = new Set(keep2.map(String));
@@ -1904,71 +1942,243 @@ async function recordNavInteractions(page, pageUrl) {
     } catch {
     }
     const cacheKey = `${origin}|${createHash("sha1").update(setup.signature).digest("hex")}`;
-    let raw = cacheGet(cacheKey);
-    if (!raw) {
+    const cached = cacheGet(cacheKey);
+    let raw = cached?.items ? [...cached.items] : [];
+    let hrefEntries = cached?.hrefs ? [...cached.hrefs] : [];
+    let hrefLabels = cached?.hrefLabels ? [...cached.hrefLabels] : [];
+    if (!cached) {
       raw = [];
+      const hrefByIndex = /* @__PURE__ */ new Map();
+      const hrefTextByIndex = /* @__PURE__ */ new Map();
       const viewport = page.viewportSize() || { width: 1440, height: 900 };
       const restX = Math.round(viewport.width / 2);
       const restY = Math.max(1, viewport.height - 4);
-      await page.keyboard.press("Escape").catch(() => {
-      });
-      await page.mouse.move(restX, restY).catch(() => {
-      });
-      await page.evaluate(() => window.__clonyfyIx.start());
-      await page.waitForTimeout(400);
-      await page.evaluate(() => window.__clonyfyIx.baseline());
-      for (let i = 0; i < setup.count; i++) {
-        if (Date.now() - started > TIME_BUDGET_MS) break;
-        const loc = page.locator(`[data-clonyfy-ix="${i}"]`).first();
-        if (!await loc.isVisible().catch(() => false)) continue;
-        let ev = "hover";
-        await page.evaluate(() => window.__clonyfyIx.start());
-        const hovered = await loc.hover({ timeout: 900 }).then(() => true).catch(() => false);
-        if (hovered) await page.waitForTimeout(HOVER_WAIT_MS);
-        let ops = await page.evaluate(() => window.__clonyfyIx.stop());
-        if (!ops.length && setup.clickable[i]) {
-          ev = "click";
-          await page.evaluate(() => window.__clonyfyIx.start());
-          const clicked = await loc.click({ timeout: 900, force: true, noWaitAfter: true }).then(() => true).catch(() => false);
-          if (clicked) await page.waitForTimeout(CLICK_WAIT_MS);
-          ops = await page.evaluate(() => window.__clonyfyIx.stop());
+      let blockedNavUrl = null;
+      const startPath = (() => {
+        try {
+          const u = new URL(startUrl);
+          return u.origin + u.pathname.replace(/\/$/, "") + (u.search || "");
+        } catch {
+          return startUrl;
         }
-        await page.mouse.move(restX, restY).catch(() => {
+      })();
+      const sameCapturePage = (href) => {
+        try {
+          const u = new URL(href);
+          const p = u.origin + u.pathname.replace(/\/$/, "") + (u.search || "");
+          return p === startPath;
+        } catch {
+          return href === startUrl;
+        }
+      };
+      const blockNavRoute = async (route) => {
+        const req = route.request();
+        if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+          const dest = req.url();
+          if (dest && !sameCapturePage(dest) && !dest.startsWith("about:")) {
+            blockedNavUrl = dest;
+            await route.abort("aborted");
+            return;
+          }
+        }
+        await route.continue();
+      };
+      await page.route("**/*", blockNavRoute);
+      const CTA_LABELS = [
+        "Login",
+        "Log in",
+        "Sign in",
+        "Sign up",
+        "Register",
+        "Get started",
+        "Se connecter",
+        "S'inscrire",
+        "Essayer",
+        "Try",
+        "Commencer"
+      ];
+      const healCapturePage = async () => {
+        await teardownRecorder(page, []).catch(() => {
         });
+        await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 2e4 });
+        await page.waitForLoadState("networkidle", { timeout: 8e3 }).catch(() => {
+        });
+        await page.waitForTimeout(400);
+        const again = await setupRecorder(page, MAX_TRIGGERS, MAX_ADD_HTML);
+        if (!again || !again.count) return false;
+        setup.clickable = again.clickable;
+        setup.count = again.count;
+        return true;
+      };
+      const probeNavCtas = async () => {
+        for (const name of CTA_LABELS) {
+          if (Date.now() - started > TIME_BUDGET_MS) break;
+          const loc = page.getByRole("button", { name, exact: true }).first();
+          if (!await loc.count().catch(() => 0)) continue;
+          if (!await loc.isVisible().catch(() => false)) continue;
+          blockedNavUrl = null;
+          await page.evaluate(() => {
+            const st = window.__clonyfyIx;
+            if (st) st.pendingNav = null;
+          }).catch(() => {
+          });
+          const clicked = await loc.click({ timeout: 900, force: true, noWaitAfter: true }).then(() => true).catch(() => false);
+          if (!clicked) continue;
+          await page.waitForTimeout(CLICK_WAIT_MS + 400);
+          let pendingNav = await page.evaluate(() => {
+            const st = window.__clonyfyIx;
+            return st?.takePendingNav ? st.takePendingNav() : null;
+          }).catch(() => null);
+          if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
+          if (!pendingNav && page.url() !== startUrl) pendingNav = page.url();
+          if (!pendingNav) continue;
+          const key = -1 - hrefTextByIndex.size;
+          hrefByIndex.set(key, pendingNav);
+          hrefTextByIndex.set(key, name);
+          logger.debug(`  [INTERACTIONS] CTA "${name}" -> ${pendingNav}`);
+          if (blockedNavUrl || page.url() !== startUrl) {
+            if (!await healCapturePage()) return;
+          }
+        }
+      };
+      const indexLabels = [];
+      for (let i = 0; i < setup.count; i++) {
+        const t = await page.locator(`[data-clonyfy-ix="${i}"]`).first().innerText().catch(() => "");
+        indexLabels[i] = String(t || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      }
+      try {
+        await probeNavCtas();
         await page.keyboard.press("Escape").catch(() => {
         });
-        await page.waitForTimeout(SETTLE_MS);
-        if (page.url() !== startUrl) {
-          logger.warn(`  [INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
-          raw = [];
-          try {
-            await page.goto(startUrl, { waitUntil: "load", timeout: 15e3 });
-            await page.waitForLoadState("networkidle", { timeout: 5e3 }).catch(() => {
+        await page.mouse.move(restX, restY).catch(() => {
+        });
+        await page.evaluate(() => window.__clonyfyIx?.start?.());
+        await page.waitForTimeout(400);
+        await page.evaluate(() => window.__clonyfyIx?.baseline?.());
+        for (let i = 0; i < setup.count; i++) {
+          if (Date.now() - started > TIME_BUDGET_MS) break;
+          const loc = page.locator(`[data-clonyfy-ix="${i}"]`).first();
+          if (!await loc.isVisible().catch(() => false)) continue;
+          const already = (indexLabels[i] || "").trim().toLowerCase();
+          if (already && [...hrefTextByIndex.values()].some((t) => t.toLowerCase() === already)) continue;
+          let ev = "hover";
+          blockedNavUrl = null;
+          await page.evaluate(() => {
+            const st = window.__clonyfyIx;
+            if (st) st.pendingNav = null;
+            st?.start();
+          });
+          const hovered = await loc.hover({ timeout: 900 }).then(() => true).catch(() => false);
+          if (hovered) await page.waitForTimeout(HOVER_WAIT_MS);
+          let ops = await page.evaluate(() => window.__clonyfyIx.stop()).catch(() => []);
+          let pendingNav = await page.evaluate(() => {
+            const st = window.__clonyfyIx;
+            return st?.takePendingNav ? st.takePendingNav() : null;
+          }).catch(() => null);
+          if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
+          if (!ops.length && !pendingNav && setup.clickable[i]) {
+            ev = "click";
+            blockedNavUrl = null;
+            await page.evaluate(() => {
+              const st = window.__clonyfyIx;
+              if (st) st.pendingNav = null;
+              st?.start();
             });
-          } catch {
+            const clicked = await loc.click({ timeout: 900, force: true, noWaitAfter: true }).then(() => true).catch(() => false);
+            if (clicked) await page.waitForTimeout(CLICK_WAIT_MS + 200);
+            ops = await page.evaluate(() => window.__clonyfyIx.stop()).catch(() => []);
+            pendingNav = await page.evaluate(() => {
+              const st = window.__clonyfyIx;
+              return st?.takePendingNav ? st.takePendingNav() : null;
+            }).catch(() => null);
+            if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
           }
-          break;
+          const leftPage = page.url() !== startUrl;
+          if (leftPage && !pendingNav) pendingNav = page.url();
+          if (pendingNav) {
+            hrefByIndex.set(i, pendingNav);
+            const label = indexLabels[i] || "";
+            if (label) hrefTextByIndex.set(i, label);
+          }
+          if (pendingNav && (blockedNavUrl || leftPage)) {
+            if (!await healCapturePage()) break;
+            await page.evaluate(() => window.__clonyfyIx?.start?.());
+            await page.waitForTimeout(200);
+            await page.evaluate(() => window.__clonyfyIx?.baseline?.());
+            await page.mouse.move(restX, restY).catch(() => {
+            });
+            continue;
+          }
+          await page.mouse.move(restX, restY).catch(() => {
+          });
+          await page.keyboard.press("Escape").catch(() => {
+          });
+          await page.waitForTimeout(SETTLE_MS);
+          const finalized = ops.length ? await page.evaluate(({ ops: ops2, i: i2 }) => {
+            const st = window.__clonyfyIx;
+            if (!st) return [];
+            st.revert(ops2);
+            return st.finalize(ops2, i2);
+          }, { ops, i }).catch(() => []) : [];
+          if (finalized.length) raw.push({ i, ev, ops: finalized });
         }
-        const finalized = await page.evaluate(({ ops: ops2, i: i2 }) => {
-          const st = window.__clonyfyIx;
-          st.revert(ops2);
-          return st.finalize(ops2, i2);
-        }, { ops, i });
-        if (finalized.length) raw.push({ i, ev, ops: finalized });
+      } finally {
+        await page.unroute("**/*", blockNavRoute).catch(() => {
+        });
       }
-      if (raw.length) cacheSet(cacheKey, raw);
+      hrefEntries = [...hrefByIndex.entries()];
+      hrefLabels = [...hrefTextByIndex.entries()];
+      if (hrefEntries.length) {
+        await teardownRecorder(page, []).catch(() => {
+        });
+        try {
+          await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 2e4 });
+          await page.waitForLoadState("networkidle", { timeout: 8e3 }).catch(() => {
+          });
+          await page.waitForTimeout(500);
+        } catch {
+        }
+        await setupRecorder(page, MAX_TRIGGERS, MAX_ADD_HTML).catch(() => null);
+      }
+      if (raw.length || hrefEntries.length) cacheSet(cacheKey, raw, hrefEntries, hrefLabels);
     }
-    let items = raw.length ? await resolveItems(page, raw) : [];
-    while (items.length && JSON.stringify(items).length > MAX_TOTAL_JSON) items = items.slice(0, -1);
-    keep = items.map((it) => it.i);
-    await teardownRecorder(page, keep);
-    if (items.length) {
-      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s) recorded in ${Date.now() - started}ms`);
+    if (hrefEntries.length) {
+      await page.evaluate(({ entries, labels }) => {
+        const norm = (s) => s.replace(/\s+/g, " ").trim().toLowerCase();
+        const byLabel = new Map(labels.map(([i, t]) => [i, norm(t)]));
+        for (const [idx, href] of entries) {
+          let el = document.querySelector(`[data-clonyfy-ix="${idx}"]`);
+          if (!el) {
+            const want = byLabel.get(idx) || "";
+            if (want) {
+              el = [...document.querySelectorAll('button, [role="button"], a')].find((node) => norm(node.textContent || "") === want) || null;
+            }
+          }
+          if (el) el.setAttribute("data-href", href);
+        }
+      }, { entries: hrefEntries, labels: hrefLabels }).catch(() => {
+      });
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${hrefEntries.length} navigation CTA(s) tagged with data-href`);
+    }
+    let items = [];
+    try {
+      items = raw.length ? await resolveItems(page, raw) : [];
+      while (items.length && JSON.stringify(items).length > MAX_TOTAL_JSON) items = items.slice(0, -1);
+      keep = items.map((it) => it.i);
+      await teardownRecorder(page, keep);
+    } catch (err) {
+      logger.debug(`  [INTERACTIONS WARN] resolve/teardown: ${err.message}`);
+      await teardownRecorder(page, keep).catch(() => {
+      });
+    }
+    if (items.length || hrefEntries.length) {
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s), ${hrefEntries.length} href CTA(s) in ${Date.now() - started}ms`);
     }
     return interactionsScriptHtml(items);
   } catch (err) {
     logger.debug(`  [INTERACTIONS WARN] ${err.message}`);
-    await teardownRecorder(page, keep);
+    await teardownRecorder(page, keep).catch(() => {
+    });
     return "";
   } finally {
     try {
@@ -2690,6 +2900,26 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       assetsSkipped++;
       await route.continue();
       return;
+    }
+    try {
+      const assetUrl = new URL(url);
+      if (assetUrl.pathname.startsWith("/_assets/")) {
+        const name = basename(decodeURIComponent(assetUrl.pathname));
+        if (name && name !== "_assets" && !name.includes("..")) {
+          const localPath = join3(assetsDir, name);
+          if (existsSync2(localPath)) {
+            const ext = extname2(name).toLowerCase();
+            const contentType2 = mime.lookup(ext) || (ext === ".png" ? "image/png" : ext === ".svg" ? "image/svg+xml" : "application/octet-stream");
+            await route.fulfill({
+              status: 200,
+              contentType: contentType2,
+              body: readFileSync(localPath)
+            });
+            return;
+          }
+        }
+      }
+    } catch {
     }
     if (resourceType === "script" && SCRIPT_STUB_PATTERNS.some((p) => p.test(url))) {
       logger.debug(`  [SCRIPT STUB] ${url}`);
@@ -3854,18 +4084,29 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     let finalHtml = html;
     try {
       const isAppError = await page.evaluate(() => {
+        if (document.documentElement?.id === "__next_error__") return true;
+        if (document.getElementById("__next_error__")) return true;
         const text = (document.body?.innerText || "").replace(/\s+/g, " ");
+        if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
         return /Application Error/i.test(text) && /page could not be displayed|Something has gone wrong/i.test(text);
       });
       if (isAppError) {
-        logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; waiting and re-snapshotting`);
-        await page.waitForTimeout(IS_FAST ? 800 : 2e3);
-        await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 6e3 }).catch(() => {
+        logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; reloading and re-snapshotting`);
+        await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: IS_FAST ? 2e4 : 45e3 }).catch(() => {
         });
+        await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 4e3 : 12e3 }).catch(() => {
+        });
+        await page.waitForTimeout(IS_FAST ? 800 : 2e3);
         const retryHtml = await page.content();
-        const stillError = /Application Error/i.test(retryHtml) && /page could not be displayed|Something has gone wrong/i.test(retryHtml);
+        const stillError = await page.evaluate(() => {
+          if (document.documentElement?.id === "__next_error__") return true;
+          if (document.getElementById("__next_error__")) return true;
+          const text = (document.body?.innerText || "").replace(/\s+/g, " ");
+          if (/This page could not/i.test(text) && text.length < 400) return true;
+          return /Application Error/i.test(text) && /page could not be displayed|Something has gone wrong/i.test(text);
+        }).catch(() => true);
         if (!stillError) finalHtml = retryHtml;
-        else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
+        else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
       }
     } catch {
     }
@@ -4504,7 +4745,8 @@ function startLocalePrefix(startUrl) {
   }
   return null;
 }
-function shouldSkipLocaleVariant(url, startUrl) {
+function shouldSkipLocaleVariant(url, startUrl, fullSite = false) {
+  if (fullSite) return false;
   let path;
   try {
     path = new URL(url).pathname || "/";
@@ -4657,13 +4899,13 @@ function isProbablyHtmlDocument(text, contentType) {
   const trimmed = text.trimStart().slice(0, 512).toLowerCase();
   return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html") || trimmed.includes("<head") && trimmed.includes("<body");
 }
-function prioritizeSitemapUrls(urls, startUrl, cap = SITEMAP_SEED_CAP) {
+function prioritizeSitemapUrls(urls, startUrl, cap = SITEMAP_SEED_CAP, fullSite = false) {
   const startNorm = normalizePageUrl(startUrl);
   const scored = /* @__PURE__ */ new Map();
   for (const raw of urls) {
     const clean = normalizePageUrl(raw, startUrl);
     if (!clean) continue;
-    if (shouldSkipLocaleVariant(clean, startUrl)) continue;
+    if (shouldSkipLocaleVariant(clean, startUrl, fullSite)) continue;
     let score = 0;
     try {
       const path = new URL(clean).pathname || "/";
@@ -4671,7 +4913,7 @@ function prioritizeSitemapUrls(urls, startUrl, cap = SITEMAP_SEED_CAP) {
       score -= depth * 10;
       if (startNorm && clean === startNorm) score += 1e3;
       if (LOW_PRIORITY_PATH_RE.test(path)) score -= 500;
-      if (isLocaleOnlyPath(path) || isLocalePrefixedPath(path)) score -= 800;
+      if (!fullSite && (isLocaleOnlyPath(path) || isLocalePrefixedPath(path))) score -= 800;
       if (/\.(html?|php|aspx?)$/i.test(path)) score -= 5;
     } catch {
     }
@@ -4782,14 +5024,14 @@ function linkEnqueuePriority(url, fromNav = false) {
   }
   return score;
 }
-function shouldSkipPageUrl(url, startUrl) {
+function shouldSkipPageUrl(url, startUrl, fullSite = false) {
   try {
     const parsed = new URL(url);
     const pathname = parsed.pathname;
     const ext = extname3(pathname).toLowerCase();
     if (ext && NON_PAGE_EXTS2.has(ext)) return true;
     if (/^\/cdn-cgi\//i.test(pathname)) return true;
-    if (startUrl && shouldSkipLocaleVariant(url, startUrl)) return true;
+    if (startUrl && shouldSkipLocaleVariant(url, startUrl, fullSite)) return true;
     return false;
   } catch {
     return true;
@@ -5036,7 +5278,7 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
     } catch {
       return;
     }
-    if (shouldSkipPageUrl(clean, opts.url)) return;
+    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
@@ -5049,7 +5291,8 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
   const sitemapUrls = prioritizeSitemapUrls(
     await fetchSitemap(origin),
     opts.url,
-    sitemapSeedCap(!!opts.fullSite, remaining)
+    sitemapSeedCap(!!opts.fullSite, remaining),
+    !!opts.fullSite
   );
   for (const url of sitemapUrls.slice(0, remaining)) enqueueStatic(url, 1);
   for (let index = 0; index < staticQueue.length && records.length < opts.maxPages; index++) {
@@ -5139,7 +5382,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
       return;
     }
     const seedCap = sitemapSeedCap(!!opts.fullSite, remaining);
-    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, seedCap);
+    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, seedCap, !!opts.fullSite);
     if (prioritized.length > 0) {
       logger.info(
         `  Seeding ${prioritized.length} sitemap URL(s) into remaining budget (${remaining}${opts.fullSite ? ", full-site" : ""})`
@@ -5155,7 +5398,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
     } catch {
       return;
     }
-    if (shouldSkipPageUrl(clean, opts.url)) return;
+    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
@@ -13831,7 +14074,7 @@ function tryParseJson(raw, contentType = "") {
 }
 
 // src/generator.ts
-import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4, rmSync, existsSync as existsSync4, readFileSync } from "fs";
+import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4, rmSync, existsSync as existsSync4, readFileSync as readFileSync2 } from "fs";
 import { join as join5, dirname as dirname2, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createHash as createHash4 } from "crypto";
@@ -13853,7 +14096,7 @@ async function loadPreviewRuntime() {
   return _previewRuntime;
 }
 function tpl(name, data) {
-  const src = readFileSync(join5(TEMPLATES_DIR, name), "utf8");
+  const src = readFileSync2(join5(TEMPLATES_DIR, name), "utf8");
   return Handlebars.compile(src)(data);
 }
 function write(path, content) {
@@ -13892,7 +14135,7 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
   mkdirSync5(pagesDataDir, { recursive: true });
   const existingRouteMap = existsSync4(join5(outDir, "route-map.json")) ? (() => {
     try {
-      return JSON.parse(readFileSync(join5(outDir, "route-map.json"), "utf8"));
+      return JSON.parse(readFileSync2(join5(outDir, "route-map.json"), "utf8"));
     } catch {
       return {};
     }
@@ -14071,7 +14314,7 @@ CLONYFY v0.1`);
         const filename = pageFilename(page.route);
         const pagePath = join6(capturedPagesDir, filename);
         if (existsSync5(pagePath)) {
-          const existing = readFileSync2(pagePath, "utf8");
+          const existing = readFileSync3(pagePath, "utf8");
           if (!shouldReplaceCapturedHtml(existing, page.html)) {
             logger.info(`  [KEEP] ${page.route} \u2014 keeping richer capture (skipped thinner overwrite)`);
             routeMap[page.route] = filename;
@@ -14233,14 +14476,14 @@ async function regenerateCloneProject(outDir) {
   if (!existsSync5(manifestPath)) {
     throw new Error("manifest.json not found \u2014 cannot regenerate export project");
   }
-  const manifest = JSON.parse(readFileSync2(manifestPath, "utf8"));
+  const manifest = JSON.parse(readFileSync3(manifestPath, "utf8"));
   const routeMapPath = join6(outDir, "route-map.json");
-  const routeMap = existsSync5(routeMapPath) ? JSON.parse(readFileSync2(routeMapPath, "utf8")) : {};
+  const routeMap = existsSync5(routeMapPath) ? JSON.parse(readFileSync3(routeMapPath, "utf8")) : {};
   const capturedPagesDir = join6(outDir, "captured-pages");
   const readPageHtml = (route) => {
     const filename = routeMap[route] || `${safeName(route)}.html`;
     const htmlPath = join6(capturedPagesDir, filename);
-    return existsSync5(htmlPath) ? readFileSync2(htmlPath, "utf8") : "";
+    return existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "";
   };
   let pages = (manifest.pages || []).map((page) => ({
     ...page,
@@ -14252,7 +14495,7 @@ async function regenerateCloneProject(outDir) {
       return {
         url: `${manifest.targetOrigin}${route}`,
         route,
-        html: existsSync5(htmlPath) ? readFileSync2(htmlPath, "utf8") : "",
+        html: existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "",
         assets: [],
         network: [],
         failedAssets: []
@@ -14270,4 +14513,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-HBVT3DQ6.js.map
+//# sourceMappingURL=chunk-IK5PGAT6.js.map
