@@ -179,7 +179,7 @@ export function CaptureDetails({
       toast.error(
         err instanceof ApiError
           ? err.message
-          : "Could not open preview. The Backend may still be waking or files were not persisted.",
+          : "Could not open the preview. The clone may still be finishing; try again in a moment.",
       );
     } finally {
       setBusy("");
@@ -336,7 +336,11 @@ export function CaptureDetails({
                       try {
                         const doc = event.currentTarget.contentDocument;
                         const text = doc?.body?.innerText || "";
-                        if (/no clone loaded|not authenticated|not found|internal server error|missing from disk/i.test(text)) {
+                        if (
+                          /no clone loaded|not authenticated|not found|internal server error|missing from disk/i.test(
+                            text,
+                          )
+                        ) {
                           setIframeError(true);
                         }
                       } catch {
@@ -393,15 +397,15 @@ export function CaptureDetails({
                 disabled={!job.outDir || busy === "zip"}
               >
                 <Download size={16} />
-                {busy === "zip"
-                  ? `ZIP ${zipProgress?.pct ?? 0}%`
-                  : "Download ZIP"}
+                {busy === "zip" ? `ZIP ${zipProgress?.pct ?? 0}%` : "Download ZIP"}
               </button>
               {busy === "zip" && zipProgress && (
                 <div className="zip-export-progress w-full basis-full" aria-live="polite">
                   <div className="zip-export-progress__meta">
                     <span className="zip-export-progress__stage">{zipProgress.stage}</span>
-                    <span className="zip-export-progress__pct tabular-nums">{zipProgress.pct}%</span>
+                    <span className="zip-export-progress__pct tabular-nums">
+                      {zipProgress.pct}%
+                    </span>
                   </div>
                   <div
                     className="zip-export-progress__track"
@@ -457,7 +461,11 @@ export function CaptureDetails({
               >
                 Visit source <ExternalLink size={16} />
               </a>
-              <button type="button" className="dashboard-button" onClick={() => downloadCaptureReport([job])}>
+              <button
+                type="button"
+                className="dashboard-button"
+                onClick={() => downloadCaptureReport([job])}
+              >
                 <Download size={16} />
                 Download summary
               </button>

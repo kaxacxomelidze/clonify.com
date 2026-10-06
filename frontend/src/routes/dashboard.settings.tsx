@@ -88,7 +88,7 @@ function SettingsPage() {
       <section className="surface rounded-3xl p-5 md:p-8">
         <h1 className="font-display text-2xl">Account settings</h1>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          Update your profile on this account. Name and password sync to the Backend.
+          Update your profile on this account. Changes apply to your account on every device.
         </p>
         <form
           className="mt-8 space-y-6"
@@ -179,8 +179,7 @@ function SettingsPage() {
               <span>
                 <span className="block text-sm">Capture completion updates</span>
                 <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">
-                  Preference is stored for this browser. Transactional emails still follow your
-                  Backend SMTP configuration.
+                  Saved for this browser only.
                 </span>
               </span>
             </label>

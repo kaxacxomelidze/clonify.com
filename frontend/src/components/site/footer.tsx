@@ -1,4 +1,5 @@
 import { useSiteLanguage } from "@/hooks/use-site-language";
+import { useSignedIn } from "@/hooks/use-auth";
 import { Link } from "@tanstack/react-router";
 import { Instagram } from "lucide-react";
 import { Reveal } from "@/components/anim";
@@ -17,6 +18,7 @@ const COLS = [
   {
     title: "Company",
     links: [
+      { label: "Affiliates", href: "/affiliates" },
       { label: "Support", href: "mailto:support@clonyfy.com" },
       { label: "Privacy", href: "/privacy" },
       { label: "Terms", href: "/terms" },
@@ -26,6 +28,7 @@ const COLS = [
 
 export function Footer() {
   const { t: tr, language } = useSiteLanguage();
+  const signedIn = useSignedIn();
   return (
     <footer className="studio-footer relative overflow-hidden border-t border-border">
       <div className="footer-inner site-width pt-16">
@@ -74,22 +77,35 @@ export function Footer() {
             <div>
               <p className="eyebrow">{tr("Account")}</p>
               <ul className="mt-5 space-y-3 text-sm">
-                <li>
-                  <Link
-                    to={language === "fr" ? "/fr/login" : "/login"}
-                    className="text-foreground/65 transition-colors hover:text-foreground"
-                  >
-                    {tr("Log in")}
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    to={language === "fr" ? "/fr/register" : "/register"}
-                    className="text-foreground/65 transition-colors hover:text-foreground"
-                  >
-                    {tr("Create account")}
-                  </Link>
-                </li>
+                {signedIn ? (
+                  <li>
+                    <Link
+                      to="/dashboard"
+                      className="text-foreground/65 transition-colors hover:text-foreground"
+                    >
+                      {tr("Dashboard")}
+                    </Link>
+                  </li>
+                ) : (
+                  <>
+                    <li>
+                      <Link
+                        to={language === "fr" ? "/fr/login" : "/login"}
+                        className="text-foreground/65 transition-colors hover:text-foreground"
+                      >
+                        {tr("Log in")}
+                      </Link>
+                    </li>
+                    <li>
+                      <Link
+                        to={language === "fr" ? "/fr/register" : "/register"}
+                        className="text-foreground/65 transition-colors hover:text-foreground"
+                      >
+                        {tr("Create account")}
+                      </Link>
+                    </li>
+                  </>
+                )}
               </ul>
             </div>
           </Reveal>
