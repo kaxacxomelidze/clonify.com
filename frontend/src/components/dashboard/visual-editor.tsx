@@ -29,13 +29,19 @@ import {
 import { toast } from "sonner";
 import {
   ApiError,
+  type ThemeEngine,
+  type ThemeModel,
   consumeUsage,
   ensureApiAwake,
   fetchClonePages,
+  fetchCloneTheme,
   fetchPageHtml,
   importAsset,
+  loadThemeEngine,
   savePage,
+  setCloneTheme,
 } from "@/lib/api";
+import { SiteStylePanel } from "@/components/dashboard/theme-models-panel";
 import {
   ATTR_EDITING,
   ATTR_HOVER,
@@ -73,7 +79,7 @@ const DEVICES: Array<{ id: Device; label: string; width: string; Icon: typeof Mo
 
 const MAX_HISTORY = 40;
 const MAX_HISTORY_CHARS = 60_000_000;
-const EDITOR_ATTR_RE = /\sdata-clonyfy-editor-(?:hover|selected|editing)(?:="[^"]*")?/g;
+const EDITOR_ATTR_RE = /\s(?:data-clonyfy-editor-(?:hover|selected|editing)|data-cth(?![-\w]))(?:="[^"]*")?/g;
 
 const TOOL =
   "inline-flex items-center justify-center gap-1.5 rounded-xl border border-border px-2.5 py-2 text-xs transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
@@ -126,6 +132,76 @@ export function VisualEditor({
   const [hrefDraft, setHrefDraft] = useState("");
   const [altDraft, setAltDraft] = useState("");
   const [fontSizeDraft, setFontSizeDraft] = useState("");
+
+  const themeEngineRef = useRef<ThemeEngine | null>(null);
+  const themeIdRef = useRef<string | null>(null);
+  const [themeModels, setThemeModels] = useState<ThemeModel[]>([]);
+  const [themeId, setThemeId] = useState<string | null>(null);
+  const [themePending, setThemePending] = useState<string | null | undefined>(undefined);
+  const [themeError, setThemeError] = useState("");
+
+  const applyThemeToDoc = () => {
+    const doc = docRef.current;
+    const engine = themeEngineRef.current;
+    if (!doc?.documentElement || !engine) return;
+    try {
+      engine.apply(doc, themeIdRef.current);
+    } catch (err) {
+      console.warn("[theme] apply failed", err);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setThemeError("");
+    (async () => {
+      try {
+        const [engine, current] = await Promise.all([
+          loadThemeEngine(),
+          fetchCloneTheme(outDir).catch(() => ({ themeId: null })),
+        ]);
+        if (cancelled) return;
+        themeEngineRef.current = engine;
+        themeIdRef.current = current.themeId;
+        setThemeModels(engine.models);
+        setThemeId(current.themeId);
+        applyThemeToDoc();
+      } catch (err) {
+        if (!cancelled) setThemeError(err instanceof Error ? err.message : "Could not load style models.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outDir]);
+
+  const onApplyTheme = async (nextId: string | null) => {
+    commitEditing();
+    const prevId = themeIdRef.current;
+    if (nextId === prevId) return;
+    themeIdRef.current = nextId;
+    setThemeId(nextId);
+    setThemePending(nextId);
+    applyThemeToDoc();
+    try {
+      await ensureApiAwake({ attempts: 3, timeoutMs: 10_000 }).catch(() => {});
+      const result = await setCloneTheme(outDir, nextId);
+      const name = themeModels.find((m) => m.id === nextId)?.name;
+      toast.success(
+        name
+          ? `${name} style applied to ${result.pages} page${result.pages === 1 ? "" : "s"}.`
+          : `Original style restored on ${result.pages} page${result.pages === 1 ? "" : "s"}.`,
+      );
+    } catch (err) {
+      themeIdRef.current = prevId;
+      setThemeId(prevId);
+      applyThemeToDoc();
+      toast.error(err instanceof ApiError ? err.message : "Could not apply the style.");
+    } finally {
+      setThemePending(undefined);
+    }
+  };
 
   const syncRouteInUrl = useCallback(
     (nextRoute: string) => {
@@ -212,6 +288,7 @@ export function VisualEditor({
     setEditingText(false);
     doc.body.innerHTML = bodyHtml;
     clearEditorAttrs(doc.body);
+    applyThemeToDoc();
     selectedRef.current = null;
     hoverRef.current = null;
     setSel(null);
@@ -547,6 +624,7 @@ export function VisualEditor({
     if (!doc?.body) return;
     docRef.current = doc;
     installEditorChrome(doc);
+    applyThemeToDoc();
     selectedRef.current = null;
     hoverRef.current = null;
     editingRef.current = null;
@@ -810,6 +888,15 @@ export function VisualEditor({
           onChange={(e) => void onUpload(e.target.files?.[0] || null)}
         />
       </div>
+
+      <SiteStylePanel
+        models={themeModels}
+        activeId={themeId}
+        pendingId={themePending}
+        disabled={loading || !html}
+        loadError={themeError}
+        onApply={(id) => void onApplyTheme(id)}
+      />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="overflow-auto rounded-2xl border border-border bg-muted/30">

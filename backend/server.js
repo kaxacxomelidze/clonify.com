@@ -35,6 +35,7 @@ import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFile
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
 import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript, buildLiveBridgeScript } from './lib/clonePreviewRuntime.js';
+import { getThemeModel, buildThemeEngineModule, stripThemeArtifacts, applyThemeScriptToHtml } from './lib/themeModels.js';
 
 const _cjsRequire = createRequire(import.meta.url);
 let bcrypt = null, nodemailer = null, StripeLib = null;
@@ -1683,7 +1684,7 @@ async function readCloneFile(outDir, relPath) {
   for (const storagePath of cloneStoragePathCandidates(outDir, normalized)) {
     const stored = await downloadCloneFile(storagePath);
     if (stored) return stored;
-    if (normalized === 'route-map.json' || normalized === 'manifest.json' || normalized.startsWith('captured-pages/')) {
+    if (normalized === 'route-map.json' || normalized === 'manifest.json' || normalized === 'theme.json' || normalized.startsWith('captured-pages/')) {
       const text = await getCloneTextFile(storagePath);
       if (text != null) return Buffer.from(text, 'utf8');
     }
@@ -1691,7 +1692,7 @@ async function readCloneFile(outDir, relPath) {
   return null;
 }
 
-async function writeCloneFile(outDir, relPath, bytes, contentType = contentTypeForPath(relPath)) {
+async function writeCloneFile(outDir, relPath, bytes, contentType = contentTypeForPath(relPath), { skipFileList = false } = {}) {
   const normalized = normalizeCloneRelPath(relPath);
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes ?? ''), 'utf8');
   const localPath = join(outDir, normalized);
@@ -1713,10 +1714,24 @@ async function writeCloneFile(outDir, relPath, bytes, contentType = contentTypeF
       throw new Error('Could not persist clone file');
     }
   }
+  const entry = { rel: normalized, size: buffer.length, contentType };
+  if (skipFileList) return entry;
+  await updateCloneFileList(outDir, [entry]);
+  return entry;
+}
+
+async function updateCloneFileList(outDir, entries) {
+  if (!entries.length) return;
+  const changed = new Set(entries.map((e) => e.rel));
   const files = await readPersistedCloneFileList(outDir);
-  const next = files.filter(f => f.rel !== normalized);
-  next.push({ rel: normalized, size: buffer.length, contentType });
+  const next = files.filter((f) => !changed.has(f.rel)).concat(entries);
   await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(next));
+}
+
+async function readCloneThemeId(outDir) {
+  const data = await readCloneFile(outDir, 'theme.json').catch(() => null);
+  const parsed = data ? safeJsonParse(data.toString('utf8'), null) : null;
+  return getThemeModel(parsed?.themeId) ? parsed.themeId : null;
 }
 
 function jobStoragePath(id) {
@@ -2485,6 +2500,7 @@ function restoreNeutralizedScripts(html) {
 function sanitizeStoredCloneHtml(html) {
   let out = revertPreviewAssetUrls(html);
   out = stripPreviewNavigationPatch(out);
+  out = stripThemeArtifacts(out);
   // Strip preview/editor-only Clonyfy injections so saves do not bake them in forever.
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-replay\b[^>]*>[\s\S]*?<\/script>/gi, '');
   out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
@@ -4640,13 +4656,69 @@ async function handleRequest(req, res) {
       if (!map) return json(res, { error: 'No clone loaded' }, 404);
       const resolved = resolveSharedRoute(map, route || '/', '/');
       if (!resolved.filename) return json(res, { error: 'Route not found: ' + route }, 404);
-      await writeCloneFile(outDir, join('captured-pages', resolved.filename), sanitizeStoredCloneHtml(String(html ?? '')), 'text/html; charset=utf-8');
+      const themeModel = getThemeModel(await readCloneThemeId(outDir));
+      const stored = applyThemeScriptToHtml(sanitizeStoredCloneHtml(String(html ?? '')), themeModel);
+      await writeCloneFile(outDir, join('captured-pages', resolved.filename), stored, 'text/html; charset=utf-8');
       const recorded = await consumeUsageQuota(saveUser, 'save', { outDir });
       json(res, { ok: true, route: resolved.route, usage: { kind: 'save', used: recorded.used, limit: recorded.limit } });
     }).catch(err => {
       if (res.headersSent) return;
       if (err?.message === 'request too large') return json(res, { error: 'Page HTML too large to save (limit 50MB)' }, 413);
       return json(res, { error: err?.message || 'Save failed' }, 500);
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/theme-engine.js') {
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'public, max-age=300',
+    });
+    res.end(buildThemeEngineModule());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/clone-theme') {
+    const themeUser = await getSessionUser(req);
+    if (!themeUser) return json(res, { error: 'Not authenticated' }, 401);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir'));
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
+    if (!await canReadOutDir(themeUser, outDir) && !await canReadCloneRecord(themeUser, outDir)) {
+      return json(res, { error: 'Not found' }, 404);
+    }
+    return json(res, { themeId: await readCloneThemeId(outDir) });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/clone-theme') {
+    const themeUser = await getSessionUser(req);
+    if (!themeUser) return json(res, { error: 'Not authenticated' }, 401);
+    readJsonBody(req).then(async ({ outDir: rawOutDir, themeId }) => {
+      const outDir = resolveCloneOutDir(rawOutDir);
+      if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
+      if (!await canUseCloneOutput(themeUser, outDir)) return json(res, { error: 'Not found' }, 404);
+      const model = themeId ? getThemeModel(String(themeId)) : null;
+      if (themeId && !model) return json(res, { error: 'Unknown theme model' }, 400);
+      const map = await loadRouteMapWithRematerialize(outDir);
+      if (!map) return json(res, { error: 'No clone loaded' }, 404);
+      const filenames = [...new Set(Object.values(map).filter((f) => typeof f === 'string' && f))];
+      const entries = [];
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < filenames.length) {
+          const rel = join('captured-pages', filenames[cursor++]);
+          const data = await readCloneFile(outDir, rel).catch(() => null);
+          if (!data) continue;
+          const html = applyThemeScriptToHtml(data.toString('utf8'), model);
+          entries.push(await writeCloneFile(outDir, rel, html, 'text/html; charset=utf-8', { skipFileList: true }));
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(4, filenames.length) }, worker));
+      entries.push(await writeCloneFile(outDir, 'theme.json', JSON.stringify({ themeId: model?.id || null, updatedAt: Date.now() }), 'application/json', { skipFileList: true }));
+      await updateCloneFileList(outDir, entries);
+      json(res, { ok: true, themeId: model?.id || null, pages: entries.length - 1 });
+    }).catch((err) => {
+      if (res.headersSent) return;
+      json(res, { error: err instanceof Error ? err.message : 'Theme update failed' }, 500);
     });
     return;
   }
