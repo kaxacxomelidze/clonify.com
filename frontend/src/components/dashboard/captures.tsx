@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   Download,
@@ -26,7 +26,7 @@ import {
   deleteOutput,
   downloadZipBlob,
   getApiBaseUrl,
-  pagePreviewUrl,
+  pageLivePreviewUrl,
   previewClone,
   stopClone,
   triggerBrowserDownload,
@@ -138,7 +138,11 @@ export function CaptureDetails({
   const [figmaOpen, setFigmaOpen] = useState(false);
   const [view, setView] = useState<CaptureDetailsView>("desktop");
   const canPreview = !!job?.outDir && job.status === "done";
-  const previewSrc = canPreview && job?.outDir ? pagePreviewUrl(job.outDir) : "";
+  const previewSrc = canPreview && job?.outDir ? pageLivePreviewUrl(job.outDir) : "";
+
+  useEffect(() => {
+    setIframeError(false);
+  }, [job?.outDir, job?.id]);
 
   const paidGateMessage = (err: unknown, feature: string) => {
     if (err instanceof ApiError && err.status === 403) {
@@ -169,7 +173,7 @@ export function CaptureDetails({
     setBusy("preview");
     try {
       const data = await previewClone(job.outDir);
-      const url = data.url?.startsWith("http") ? data.url : pagePreviewUrl(job.outDir);
+      const url = data.url?.startsWith("http") ? data.url : pageLivePreviewUrl(job.outDir);
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (err) {
       toast.error(
@@ -287,6 +291,9 @@ export function CaptureDetails({
               Inspect the capture, open a live preview, or export the project ZIP.
             </DialogDescription>
             <CaptureStatus status={job.status} />
+            <p className="mt-3 text-xs text-muted-foreground">
+              Preview embeds the live website. Use Edit pages for your offline clone.
+            </p>
             <dl className="capture-detail-grid">
               {[
                 ["Pages", job.pages],
@@ -323,7 +330,7 @@ export function CaptureDetails({
                     title={`Preview ${job.domain}`}
                     src={previewSrc}
                     className="capture-preview-frame w-full bg-background"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
                     onError={() => setIframeError(true)}
                     onLoad={(event) => {
                       try {

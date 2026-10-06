@@ -500,6 +500,17 @@ export function pagePreviewUrl(outDir: string, route = "/", mode?: "editor") {
   return `${getApiBaseUrl()}/api/page?${params.toString()}`;
 }
 
+/** Live JS preview — auth-gated redirect to the clone's real targetOrigin (embedded as-is). */
+export function pageLivePreviewUrl(outDir: string, route = "/") {
+  const token = getAuthToken();
+  const params = new URLSearchParams({
+    outDir,
+    route,
+  });
+  if (token) params.set("access_token", token);
+  return `${getApiBaseUrl()}/api/live-page?${params.toString()}`;
+}
+
 export async function fetchClonePages(outDir: string) {
   return apiFetch<string[]>(`/api/pages?outDir=${encodeURIComponent(outDir)}`);
 }

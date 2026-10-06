@@ -174,6 +174,7 @@ export function prioritizeSitemapUrls(
   urls: string[],
   startUrl: string,
   cap = SITEMAP_SEED_CAP,
+  fullSite = false,
 ): string[] {
   const startNorm = normalizePageUrl(startUrl);
   const scored = new Map<string, number>();
@@ -182,7 +183,8 @@ export function prioritizeSitemapUrls(
     const clean = normalizePageUrl(raw, startUrl);
     if (!clean) continue;
     // Never seed locale market roots / translated trees for a default-language clone.
-    if (shouldSkipLocaleVariant(clean, startUrl)) continue;
+    // Max / full-site keeps every locale listed in the sitemap.
+    if (shouldSkipLocaleVariant(clean, startUrl, fullSite)) continue;
 
     let score = 0;
     try {
@@ -191,7 +193,7 @@ export function prioritizeSitemapUrls(
       score -= depth * 10;
       if (startNorm && clean === startNorm) score += 1_000;
       if (LOW_PRIORITY_PATH_RE.test(path)) score -= 500;
-      if (isLocaleOnlyPath(path) || isLocalePrefixedPath(path)) score -= 800;
+      if (!fullSite && (isLocaleOnlyPath(path) || isLocalePrefixedPath(path))) score -= 800;
       if (/\.(html?|php|aspx?)$/i.test(path)) score -= 5;
     } catch {
       // Keep neutral score for malformed URLs that still normalized.
@@ -327,14 +329,14 @@ function linkEnqueuePriority(url: string, fromNav = false): number {
   return score;
 }
 
-function shouldSkipPageUrl(url: string, startUrl?: string): boolean {
+function shouldSkipPageUrl(url: string, startUrl?: string, fullSite = false): boolean {
   try {
     const parsed = new URL(url);
     const pathname = parsed.pathname;
     const ext = extname(pathname).toLowerCase();
     if (ext && NON_PAGE_EXTS.has(ext)) return true;
     if (/^\/cdn-cgi\//i.test(pathname)) return true;
-    if (startUrl && shouldSkipLocaleVariant(url, startUrl)) return true;
+    if (startUrl && shouldSkipLocaleVariant(url, startUrl, fullSite)) return true;
     return false;
   } catch {
     return true;
@@ -646,7 +648,7 @@ async function crawlStatic(
     const clean = normalizePageUrl(url);
     if (!clean) return;
     try { if (new URL(clean).origin !== origin) return; } catch { return; }
-    if (shouldSkipPageUrl(clean, opts.url)) return;
+    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
@@ -661,6 +663,7 @@ async function crawlStatic(
     await fetchSitemap(origin),
     opts.url,
     sitemapSeedCap(!!opts.fullSite, remaining),
+    !!opts.fullSite,
   );
   for (const url of sitemapUrls.slice(0, remaining)) enqueueStatic(url, 1);
 
@@ -772,7 +775,7 @@ export async function crawl(
       return;
     }
     const seedCap = sitemapSeedCap(!!opts.fullSite, remaining);
-    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, seedCap);
+    const prioritized = prioritizeSitemapUrls(sitemapUrls, opts.url, seedCap, !!opts.fullSite);
     if (prioritized.length > 0) {
       logger.info(
         `  Seeding ${prioritized.length} sitemap URL(s) into remaining budget (${remaining}`
@@ -786,7 +789,7 @@ export async function crawl(
     const clean = normalizePageUrl(url);
     if (!clean) return;
     try { if (new URL(clean).origin !== origin) return; } catch { return; }
-    if (shouldSkipPageUrl(clean, opts.url)) return;
+    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;

@@ -419,8 +419,8 @@ function ClonePage() {
         </fieldset>
         {useMax && (
           <p id="clone-max-hint" className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Max mode clones the full site (all discoverable pages, maximum depth). Page and depth
-            limits above are ignored.
+            Max mode clones all discoverable same-origin pages (including locales
+            from the sitemap). External apps and original site JS are not cloned.
           </p>
         )}
         {error && (
@@ -572,11 +572,14 @@ function ClonePage() {
               Open library ↗
             </Link>
           </div>
+          <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+            Preview embeds the live website. Use the visual editor for your offline clone.
+          </p>
           <iframe
             title="Clone preview"
-            src={pagePreviewUrl(run.outDir)}
+            src={pageLivePreviewUrl(run.outDir)}
             className="mb-6 h-[420px] w-full rounded-2xl border border-border bg-background"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
           />
           <div className="flex flex-wrap gap-2">
             <Link

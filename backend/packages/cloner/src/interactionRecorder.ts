@@ -8,8 +8,9 @@ import { IS_FAST_CLONE } from './serverlessBudget.js';
  * clone can replay it without the original site JS.
  *
  * Prefers header/nav menus, then page-level toggles (accordions, tabs, modals,
- * carousels, aria-controls). Original framework JS is neutralized in preview —
- * these recordings are what make on-page buttons work again.
+ * carousels, aria-controls). Also captures click→navigate destinations (e.g.
+ * Login / Sign up buttons that JS-route to another origin) and bakes them as
+ * `data-href` so the preview navigation runtime can handle them.
  *
  * Output: `<script type="application/json" id="__clonyfy_interactions__">` with
  * items keyed by `data-clonyfy-ix` (trigger) and ops referencing
@@ -39,24 +40,35 @@ const MAX_TOTAL_JSON = 1_200_000;
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const CACHE_MAX = 200;
-const recordedNavCache = new Map<string, { at: number; items: RawItem[] }>();
+type CachedRecording = {
+  at: number;
+  items: RawItem[];
+  hrefs: Array<[number, string]>;
+  hrefLabels: Array<[number, string]>;
+};
+const recordedNavCache = new Map<string, CachedRecording>();
 
-function cacheGet(key: string): RawItem[] | null {
+function cacheGet(key: string): { items: RawItem[]; hrefs: Array<[number, string]>; hrefLabels: Array<[number, string]> } | null {
   const hit = recordedNavCache.get(key);
   if (!hit) return null;
   if (Date.now() - hit.at > CACHE_TTL_MS) {
     recordedNavCache.delete(key);
     return null;
   }
-  return hit.items;
+  return { items: hit.items, hrefs: hit.hrefs || [], hrefLabels: hit.hrefLabels || [] };
 }
 
-function cacheSet(key: string, items: RawItem[]): void {
+function cacheSet(
+  key: string,
+  items: RawItem[],
+  hrefs: Array<[number, string]> = [],
+  hrefLabels: Array<[number, string]> = [],
+): void {
   if (recordedNavCache.size >= CACHE_MAX) {
     const oldest = recordedNavCache.keys().next().value;
     if (oldest !== undefined) recordedNavCache.delete(oldest);
   }
-  recordedNavCache.set(key, { at: Date.now(), items });
+  recordedNavCache.set(key, { at: Date.now(), items, hrefs, hrefLabels });
 }
 
 export function interactionsScriptHtml(items: FinalItem[]): string {
@@ -371,18 +383,54 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
       return out;
     };
 
-    // Never let a recorded click navigate away or open popups.
+    // Remember intended URLs and cancel navigations in-page when possible.
+    // Cross-origin CTAs are also aborted at the Playwright route layer so the
+    // capture tab never leaves (leaving often crashes Chromium mid-clone).
+    st.pendingNav = null;
+    const rememberNav = (raw) => {
+      if (raw == null || raw === '') return;
+      try {
+        const href = new URL(String(raw), document.baseURI).href;
+        if (/^https?:/i.test(href)) st.pendingNav = href;
+      } catch { /* ignore */ }
+    };
     const nav = w.navigation;
     if (nav && typeof nav.addEventListener === 'function') {
-      w.__clonyfyIxNav = (e: any) => {
-        if (st.guard && !e.hashChange && e.cancelable) e.preventDefault();
+      w.__clonyfyIxNav = (e) => {
+        if (!st.guard) return;
+        try {
+          if (e && e.destination && e.destination.url) rememberNav(e.destination.url);
+        } catch { /* ignore */ }
+        if (!e.hashChange && e.cancelable) e.preventDefault();
       };
       nav.addEventListener('navigate', w.__clonyfyIxNav);
     }
     w.__clonyfyIxOpen = window.open;
-    window.open = () => null;
-    w.__clonyfyIxSubmit = (e: Event) => e.preventDefault();
+    window.open = (url) => {
+      if (st.guard && url != null && url !== '') rememberNav(url);
+      return null;
+    };
+    w.__clonyfyIxPush = history.pushState.bind(history);
+    w.__clonyfyIxReplace = history.replaceState.bind(history);
+    history.pushState = function (state, title, url) {
+      if (st.guard && url != null && url !== '') rememberNav(url);
+      // Do not change the address bar during recording — soft SPA routes are
+      // stored as data-href instead.
+      if (st.guard && url != null && url !== '') return;
+      return w.__clonyfyIxPush(state, title, url);
+    };
+    history.replaceState = function (state, title, url) {
+      if (st.guard && url != null && url !== '') rememberNav(url);
+      if (st.guard && url != null && url !== '') return;
+      return w.__clonyfyIxReplace(state, title, url);
+    };
+    w.__clonyfyIxSubmit = (e) => e.preventDefault();
     document.addEventListener('submit', w.__clonyfyIxSubmit, true);
+    st.takePendingNav = () => {
+      const v = st.pendingNav;
+      st.pendingNav = null;
+      return v;
+    };
 
     return { count: list.length, signature: signature.join('|'), clickable };
   }, { maxTriggers, maxAddHtml });
@@ -398,10 +446,14 @@ async function teardownRecorder(page: Page, keep: number[]): Promise<void> {
     }
     if (w.__clonyfyIxNav && w.navigation) w.navigation.removeEventListener('navigate', w.__clonyfyIxNav);
     if (w.__clonyfyIxOpen) window.open = w.__clonyfyIxOpen;
+    if (w.__clonyfyIxPush) history.pushState = w.__clonyfyIxPush;
+    if (w.__clonyfyIxReplace) history.replaceState = w.__clonyfyIxReplace;
     if (w.__clonyfyIxSubmit) document.removeEventListener('submit', w.__clonyfyIxSubmit, true);
     delete w.__clonyfyIx;
     delete w.__clonyfyIxNav;
     delete w.__clonyfyIxOpen;
+    delete w.__clonyfyIxPush;
+    delete w.__clonyfyIxReplace;
     delete w.__clonyfyIxSubmit;
     document.querySelectorAll('[data-clonyfy-ix-root]').forEach((el) => el.removeAttribute('data-clonyfy-ix-root'));
     const keepSet = new Set(keep.map(String));
@@ -496,74 +548,244 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
     let origin = '';
     try { origin = new URL(pageUrl).origin; } catch { /* ignore */ }
     const cacheKey = `${origin}|${createHash('sha1').update(setup.signature).digest('hex')}`;
-    let raw = cacheGet(cacheKey);
+    const cached = cacheGet(cacheKey);
+    let raw: RawItem[] = cached?.items ? [...cached.items] : [];
+    let hrefEntries: Array<[number, string]> = cached?.hrefs ? [...cached.hrefs] : [];
+    let hrefLabels: Array<[number, string]> = cached?.hrefLabels ? [...cached.hrefLabels] : [];
 
-    if (!raw) {
+    if (!cached) {
       raw = [];
+      const hrefByIndex = new Map<number, string>();
+      const hrefTextByIndex = new Map<number, string>();
       const viewport = page.viewportSize() || { width: 1440, height: 900 };
       const restX = Math.round(viewport.width / 2);
       const restY = Math.max(1, viewport.height - 4);
+      let blockedNavUrl: string | null = null;
+      const startPath = (() => {
+        try {
+          const u = new URL(startUrl);
+          return u.origin + u.pathname.replace(/\/$/, '') + (u.search || '');
+        } catch { return startUrl; }
+      })();
+      const sameCapturePage = (href: string) => {
+        try {
+          const u = new URL(href);
+          const p = u.origin + u.pathname.replace(/\/$/, '') + (u.search || '');
+          return p === startPath;
+        } catch { return href === startUrl; }
+      };
+      // Abort main-frame navigations away from this page so Login/Sign-up CTAs
+      // cannot yank Chromium onto app.* (that was crashing mid-clone).
+      const blockNavRoute = async (route: import('playwright').Route) => {
+        const req = route.request();
+        if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+          const dest = req.url();
+          if (dest && !sameCapturePage(dest) && !dest.startsWith('about:')) {
+            blockedNavUrl = dest;
+            await route.abort('aborted');
+            return;
+          }
+        }
+        await route.continue();
+      };
+      await page.route('**/*', blockNavRoute);
 
-      await page.keyboard.press('Escape').catch(() => {});
-      await page.mouse.move(restX, restY).catch(() => {});
-      await page.evaluate(() => (window as any).__clonyfyIx.start());
-      await page.waitForTimeout(400);
-      await page.evaluate(() => (window as any).__clonyfyIx.baseline());
+      const CTA_LABELS = [
+        'Login', 'Log in', 'Sign in', 'Sign up', 'Register', 'Get started',
+        'Se connecter', "S'inscrire", 'Essayer', 'Try', 'Commencer',
+      ];
 
-      for (let i = 0; i < setup.count; i++) {
-        if (Date.now() - started > TIME_BUDGET_MS) break;
-        const loc = page.locator(`[data-clonyfy-ix="${i}"]`).first();
-        if (!(await loc.isVisible().catch(() => false))) continue;
+      const healCapturePage = async () => {
+        await teardownRecorder(page, []).catch(() => {});
+        await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+        await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        const again = await setupRecorder(page, MAX_TRIGGERS, MAX_ADD_HTML);
+        if (!again || !again.count) return false;
+        setup.clickable = again.clickable;
+        setup.count = again.count;
+        return true;
+      };
 
-        let ev: 'hover' | 'click' = 'hover';
-        await page.evaluate(() => (window as any).__clonyfyIx.start());
-        const hovered = await loc.hover({ timeout: 900 }).then(() => true).catch(() => false);
-        if (hovered) await page.waitForTimeout(HOVER_WAIT_MS);
-        let ops: any[] = await page.evaluate(() => (window as any).__clonyfyIx.stop());
-
-        if (!ops.length && setup.clickable[i]) {
-          ev = 'click';
-          await page.evaluate(() => (window as any).__clonyfyIx.start());
+      const probeNavCtas = async () => {
+        for (const name of CTA_LABELS) {
+          if (Date.now() - started > TIME_BUDGET_MS) break;
+          const loc = page.getByRole('button', { name, exact: true }).first();
+          if (!(await loc.count().catch(() => 0))) continue;
+          if (!(await loc.isVisible().catch(() => false))) continue;
+          blockedNavUrl = null;
+          await page.evaluate(() => {
+            const st = (window as any).__clonyfyIx;
+            if (st) st.pendingNav = null;
+          }).catch(() => {});
           const clicked = await loc.click({ timeout: 900, force: true, noWaitAfter: true }).then(() => true).catch(() => false);
-          if (clicked) await page.waitForTimeout(CLICK_WAIT_MS);
-          ops = await page.evaluate(() => (window as any).__clonyfyIx.stop());
+          if (!clicked) continue;
+          await page.waitForTimeout(CLICK_WAIT_MS + 400);
+          let pendingNav: string | null = await page.evaluate(() => {
+            const st = (window as any).__clonyfyIx;
+            return st?.takePendingNav ? st.takePendingNav() : null;
+          }).catch(() => null);
+          if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
+          if (!pendingNav && page.url() !== startUrl) pendingNav = page.url();
+          if (!pendingNav) continue;
+          const key = -1 - hrefTextByIndex.size;
+          hrefByIndex.set(key, pendingNav);
+          hrefTextByIndex.set(key, name);
+          logger.debug(`  [INTERACTIONS] CTA "${name}" -> ${pendingNav}`);
+          if (blockedNavUrl || page.url() !== startUrl) {
+            if (!(await healCapturePage())) return;
+          }
         }
+      };
 
-        await page.mouse.move(restX, restY).catch(() => {});
-        await page.keyboard.press('Escape').catch(() => {});
-        await page.waitForTimeout(SETTLE_MS);
-
-        if (page.url() !== startUrl) {
-          logger.warn(`  [INTERACTIONS] ${pageUrl} navigated during recording; restoring and skipping remaining triggers`);
-          raw = [];
-          try {
-            await page.goto(startUrl, { waitUntil: 'load', timeout: 15_000 });
-            await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
-          } catch { /* best-effort restore */ }
-          break;
-        }
-
-        const finalized: RawOp[] = await page.evaluate(({ ops, i }: { ops: any[]; i: number }) => {
-          const st = (window as any).__clonyfyIx;
-          st.revert(ops);
-          return st.finalize(ops, i);
-        }, { ops, i });
-        if (finalized.length) raw.push({ i, ev, ops: finalized });
+      // Snapshot labels up front — after a blocked Login navigation the SPA can
+      // tear down the header, so end-of-pass bake must match by text.
+      const indexLabels: string[] = [];
+      for (let i = 0; i < setup.count; i++) {
+        const t = await page.locator(`[data-clonyfy-ix="${i}"]`).first().innerText().catch(() => '');
+        indexLabels[i] = String(t || '').replace(/\s+/g, ' ').trim().slice(0, 80);
       }
-      if (raw.length) cacheSet(cacheKey, raw);
+
+      try {
+        // Probe known nav CTAs first (Login / Get started) while the page is healthy.
+        await probeNavCtas();
+
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.mouse.move(restX, restY).catch(() => {});
+        await page.evaluate(() => (window as any).__clonyfyIx?.start?.());
+        await page.waitForTimeout(400);
+        await page.evaluate(() => (window as any).__clonyfyIx?.baseline?.());
+
+        for (let i = 0; i < setup.count; i++) {
+          if (Date.now() - started > TIME_BUDGET_MS) break;
+          const loc = page.locator(`[data-clonyfy-ix="${i}"]`).first();
+          if (!(await loc.isVisible().catch(() => false))) continue;
+          // Skip labels already captured as nav CTAs.
+          const already = (indexLabels[i] || '').trim().toLowerCase();
+          if (already && [...hrefTextByIndex.values()].some((t) => t.toLowerCase() === already)) continue;
+
+          let ev: 'hover' | 'click' = 'hover';
+          blockedNavUrl = null;
+          await page.evaluate(() => {
+            const st = (window as any).__clonyfyIx;
+            if (st) st.pendingNav = null;
+            st?.start();
+          });
+          const hovered = await loc.hover({ timeout: 900 }).then(() => true).catch(() => false);
+          if (hovered) await page.waitForTimeout(HOVER_WAIT_MS);
+          let ops: any[] = await page.evaluate(() => (window as any).__clonyfyIx.stop()).catch(() => []);
+          let pendingNav: string | null = await page.evaluate(() => {
+            const st = (window as any).__clonyfyIx;
+            return st?.takePendingNav ? st.takePendingNav() : null;
+          }).catch(() => null);
+          if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
+
+          if (!ops.length && !pendingNav && setup.clickable[i]) {
+            ev = 'click';
+            blockedNavUrl = null;
+            await page.evaluate(() => {
+              const st = (window as any).__clonyfyIx;
+              if (st) st.pendingNav = null;
+              st?.start();
+            });
+            const clicked = await loc.click({ timeout: 900, force: true, noWaitAfter: true }).then(() => true).catch(() => false);
+            if (clicked) await page.waitForTimeout(CLICK_WAIT_MS + 200);
+            ops = await page.evaluate(() => (window as any).__clonyfyIx.stop()).catch(() => []);
+            pendingNav = await page.evaluate(() => {
+              const st = (window as any).__clonyfyIx;
+              return st?.takePendingNav ? st.takePendingNav() : null;
+            }).catch(() => null);
+            if (!pendingNav && blockedNavUrl) pendingNav = blockedNavUrl;
+          }
+
+          const leftPage = page.url() !== startUrl;
+          if (leftPage && !pendingNav) pendingNav = page.url();
+
+          if (pendingNav) {
+            hrefByIndex.set(i, pendingNav);
+            const label = indexLabels[i] || '';
+            if (label) hrefTextByIndex.set(i, label);
+          }
+
+          if (pendingNav && (blockedNavUrl || leftPage)) {
+            if (!(await healCapturePage())) break;
+            await page.evaluate(() => (window as any).__clonyfyIx?.start?.());
+            await page.waitForTimeout(200);
+            await page.evaluate(() => (window as any).__clonyfyIx?.baseline?.());
+            await page.mouse.move(restX, restY).catch(() => {});
+            continue;
+          }
+
+          await page.mouse.move(restX, restY).catch(() => {});
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(SETTLE_MS);
+
+          const finalized: RawOp[] = ops.length ? await page.evaluate(({ ops, i }: { ops: any[]; i: number }) => {
+            const st = (window as any).__clonyfyIx;
+            if (!st) return [];
+            st.revert(ops);
+            return st.finalize(ops, i);
+          }, { ops, i }).catch(() => []) : [];
+          if (finalized.length) raw.push({ i, ev, ops: finalized });
+        }
+      } finally {
+        await page.unroute('**/*', blockNavRoute).catch(() => {});
+      }
+
+      hrefEntries = [...hrefByIndex.entries()];
+      hrefLabels = [...hrefTextByIndex.entries()];
+      // Heal once more so bake runs on a clean DOM with header CTAs present.
+      if (hrefEntries.length) {
+        await teardownRecorder(page, []).catch(() => {});
+        try {
+          await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+          await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+          await page.waitForTimeout(500);
+        } catch { /* best effort */ }
+        await setupRecorder(page, MAX_TRIGGERS, MAX_ADD_HTML).catch(() => null);
+      }
+      if (raw.length || hrefEntries.length) cacheSet(cacheKey, raw, hrefEntries, hrefLabels);
     }
 
-    let items = raw.length ? await resolveItems(page, raw) : [];
-    while (items.length && JSON.stringify(items).length > MAX_TOTAL_JSON) items = items.slice(0, -1);
-    keep = items.map((it) => it.i);
-    await teardownRecorder(page, keep);
-    if (items.length) {
-      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s) recorded in ${Date.now() - started}ms`);
+    // Bake click→navigate destinations onto triggers for the preview nav runtime.
+    if (hrefEntries.length) {
+      await page.evaluate(({ entries, labels }: { entries: Array<[number, string]>; labels: Array<[number, string]> }) => {
+        const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+        const byLabel = new Map(labels.map(([i, t]) => [i, norm(t)]));
+        for (const [idx, href] of entries) {
+          let el: Element | null = document.querySelector(`[data-clonyfy-ix="${idx}"]`);
+          if (!el) {
+            const want = byLabel.get(idx) || '';
+            if (want) {
+              el = [...document.querySelectorAll('button, [role="button"], a')].find((node) => (
+                norm(node.textContent || '') === want
+              )) || null;
+            }
+          }
+          if (el) el.setAttribute('data-href', href);
+        }
+      }, { entries: hrefEntries, labels: hrefLabels }).catch(() => {});
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${hrefEntries.length} navigation CTA(s) tagged with data-href`);
+    }
+
+    let items: FinalItem[] = [];
+    try {
+      items = raw.length ? await resolveItems(page, raw) : [];
+      while (items.length && JSON.stringify(items).length > MAX_TOTAL_JSON) items = items.slice(0, -1);
+      keep = items.map((it) => it.i);
+      await teardownRecorder(page, keep);
+    } catch (err) {
+      // data-href bake above must survive even if menu replay resolve fails.
+      logger.debug(`  [INTERACTIONS WARN] resolve/teardown: ${(err as Error).message}`);
+      await teardownRecorder(page, keep).catch(() => {});
+    }
+    if (items.length || hrefEntries.length) {
+      logger.debug(`  [INTERACTIONS] ${pageUrl}: ${items.length} trigger(s), ${hrefEntries.length} href CTA(s) in ${Date.now() - started}ms`);
     }
     return interactionsScriptHtml(items);
   } catch (err) {
     logger.debug(`  [INTERACTIONS WARN] ${(err as Error).message}`);
-    await teardownRecorder(page, keep);
+    await teardownRecorder(page, keep).catch(() => {});
     return '';
   } finally {
     // Always leave the browser on the page we were asked to capture.

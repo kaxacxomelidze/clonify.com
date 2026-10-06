@@ -125,8 +125,10 @@ export function startLocalePrefix(startUrl: string): string | null {
  * Skip locale market variants that are not part of the site we're cloning.
  * - Cloning `https://stripe.com/` → skip `/es-us`, `/ae`, `/fr/payments`
  * - Cloning `https://stripe.com/es-us` → keep `/es-us…`, skip other locales
+ * - Max / full-site clones keep every locale (sitemap often lists them all).
  */
-export function shouldSkipLocaleVariant(url: string, startUrl: string): boolean {
+export function shouldSkipLocaleVariant(url: string, startUrl: string, fullSite = false): boolean {
+  if (fullSite) return false;
   let path: string;
   try {
     path = new URL(url).pathname || '/';

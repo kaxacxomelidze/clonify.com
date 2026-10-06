@@ -2353,6 +2353,244 @@ function previewNavigationPatch(outDir, targetOrigin = '', routes = []) {
   return buildPreviewNavigationScript({ mode: 'preview', outDir, targetOrigin, routes });
 }
 
+async function loadCloneTargetOrigin(outDir) {
+  const manifestData = await readCloneFile(outDir, 'manifest.json').catch(() => null);
+  const manifest = manifestData ? safeJsonParse(manifestData.toString('utf8'), null) : null;
+  const fromManifest = String(manifest?.targetOrigin || '').replace(/\/$/, '');
+  if (fromManifest) return fromManifest;
+  // Fallback: first page URL in manifest
+  const pageUrl = String(manifest?.pages?.[0]?.url || manifest?.startUrl || '');
+  try { return pageUrl ? new URL(pageUrl).origin : ''; } catch { return ''; }
+}
+
+function isPrivateOrLocalHostname(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return true;
+  if (host === '::1' || host === '[::1]') return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const a = +ipv4[1], b = +ipv4[2];
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+  }
+  return false;
+}
+
+function isAllowedLiveOriginUrl(rawUrl, targetOrigin) {
+  try {
+    const target = new URL(targetOrigin);
+    const u = new URL(String(rawUrl || ''), target);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (u.origin !== target.origin) return false;
+    if (isPrivateOrLocalHostname(u.hostname) && !isPrivateOrLocalHostname(target.hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function liveSitePrefix(outDir) {
+  const token = cloneAssetToken(outDir);
+  const base = outDirBasename(outDir);
+  return `/api/live-site/${token}/${encodeURIComponent(base)}`;
+}
+
+function parseLiveSitePath(pathname) {
+  const m = String(pathname || '').match(/^\/api\/live-site\/([^/]+)\/([^/]+)(\/.*)?$/);
+  if (!m) return null;
+  let basename;
+  try { basename = decodeURIComponent(m[2]); } catch { basename = m[2]; }
+  if (!basename || basename.includes('..') || !/^[A-Za-z0-9._-]+$/.test(basename)) return null;
+  const rest = m[3] && m[3] !== '/' ? m[3] : '/';
+  return { token: m[1], basename, restPath: rest.startsWith('/') ? rest : `/${rest}` };
+}
+
+/** Rewrite live HTML so same-origin URLs pass through /api/live-site/... */
+function rewriteLiveHtml(html, { prefix, targetOrigin, outDir, route }) {
+  let out = String(html || '');
+  const origin = String(targetOrigin || '').replace(/\/$/, '');
+  const livePrefix = String(prefix || '').replace(/\/$/, '');
+  if (!origin || !livePrefix) return out;
+
+  const mapUrl = (raw) => {
+    const value = String(raw || '').trim();
+    if (!value || /^(mailto|tel|sms|javascript|data|blob|#)/i.test(value)) return value;
+    try {
+      const u = new URL(value, origin + '/');
+      if (u.origin !== new URL(origin).origin) return value;
+      return livePrefix + (u.pathname || '/') + u.search + u.hash;
+    } catch {
+      return value;
+    }
+  };
+
+  out = out.replace(
+    /\b(href|src|action|poster|data-src|data-href|formaction)\s*=\s*(["'])([^"']*)\2/gi,
+    (_full, attr, quote, val) => `${attr}=${quote}${mapUrl(val)}${quote}`,
+  );
+  out = out.replace(/\bsrcset\s*=\s*(["'])([^"']*)\1/gi, (_m, quote, list) => {
+    const next = list.split(',').map((part) => {
+      const seg = part.trim();
+      if (!seg) return seg;
+      const sp = seg.search(/\s/);
+      const url = sp === -1 ? seg : seg.slice(0, sp);
+      const desc = sp === -1 ? '' : seg.slice(sp);
+      return `${mapUrl(url)}${desc}`;
+    }).join(', ');
+    return `srcset=${quote}${next}${quote}`;
+  });
+  out = out.replace(/url\(\s*(['"]?)([^"')]+)\1\s*\)/gi, (full, q, val) => {
+    const trimmed = val.trim();
+    if (/^(data:|blob:|#)/i.test(trimmed)) return full;
+    const mapped = mapUrl(trimmed);
+    if (mapped === trimmed) return full;
+    return `url(${q || ''}${mapped}${q || ''})`;
+  });
+  const escapedOrigin = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  out = out.replace(
+    new RegExp(`(["'])${escapedOrigin}(/[^"']*)\\1`, 'g'),
+    (_m, quote, pathPart) => `${quote}${livePrefix}${pathPart}${quote}`,
+  );
+
+  out = out.replace(/<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*>/gi, '');
+  out = out.replace(/<meta[^>]+http-equiv=["']X-Frame-Options["'][^>]*>/gi, '');
+
+  const bridge = buildLiveBridgeScript({
+    prefix: livePrefix,
+    targetOrigin: origin,
+    outDir,
+    route: route || '/',
+  });
+  if (out.includes('</head>')) out = out.replace('</head>', `${bridge}</head>`);
+  else if (out.includes('<head>')) out = out.replace('<head>', `<head>${bridge}`);
+  else out = bridge + out;
+  return out;
+}
+
+function rewriteLiveCss(css, { prefix, targetOrigin }) {
+  const origin = String(targetOrigin || '').replace(/\/$/, '');
+  const livePrefix = String(prefix || '').replace(/\/$/, '');
+  if (!origin || !livePrefix) return css;
+  return String(css || '').replace(/url\(\s*(['"]?)([^"')]+)\1\s*\)/gi, (full, q, val) => {
+    const trimmed = val.trim();
+    if (!trimmed || /^(data:|blob:|#)/i.test(trimmed)) return full;
+    try {
+      const u = new URL(trimmed, origin + '/');
+      if (u.origin !== new URL(origin).origin) return full;
+      return `url(${q || ''}${livePrefix}${u.pathname}${u.search}${q || ''})`;
+    } catch {
+      return full;
+    }
+  });
+}
+
+async function proxyLiveOriginRequest(req, res, { targetUrl, prefix, targetOrigin, outDir, routePath }) {
+  const headers = {};
+  const forward = [
+    'accept', 'accept-language', 'content-type', 'range',
+    'if-none-match', 'if-modified-since',
+    'rsc', 'next-router-state-tree', 'next-router-prefetch', 'next-url', 'next-action',
+  ];
+  for (const h of forward) {
+    if (req.headers[h]) headers[h] = req.headers[h];
+  }
+  headers['user-agent'] = req.headers['user-agent'] || 'Mozilla/5.0 (compatible; ClonyfyLivePreview/1.0)';
+  headers.accept = headers.accept || '*/*';
+  // Do not forward cookies to origin (avoid leaking preview-user cookies; origin sets its own via Set-Cookie stripped).
+
+  let body;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    body = await new Promise((resolve, reject) => {
+      const chunks = [];
+      let size = 0;
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > 15_000_000) {
+          reject(Object.assign(new Error('request too large'), { statusCode: 413 }));
+          req.destroy();
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+      req.on('error', reject);
+    });
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 45_000);
+  let upstream;
+  try {
+    upstream = await fetch(targetUrl, {
+      method: req.method,
+      headers,
+      body: body && body.length ? body : undefined,
+      redirect: 'manual',
+      signal: ac.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err?.name === 'AbortError') {
+      res.writeHead(504, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Live origin timed out');
+      return;
+    }
+    res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Live origin unreachable');
+    return;
+  }
+  clearTimeout(timer);
+
+  // Follow one hop of same-origin redirects by rewriting Location into live-site
+  if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+    const loc = upstream.headers.get('location');
+    if (loc) {
+      try {
+        const abs = new URL(loc, targetUrl);
+        if (abs.origin === new URL(targetOrigin).origin) {
+          const dest = prefix + (abs.pathname || '/') + abs.search + abs.hash;
+          res.writeHead(upstream.status, { Location: dest, 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      } catch { /* fall through */ }
+    }
+  }
+
+  const rawType = String(upstream.headers.get('content-type') || 'application/octet-stream');
+  const buf = Buffer.from(await upstream.arrayBuffer());
+  const outHeaders = {
+    'Cache-Control': rawType.includes('text/html') ? 'no-store' : 'private, max-age=60',
+    'Content-Type': rawType,
+  };
+  // Never allow origin CSP / frame killers into the iframe
+  // (intentionally omit content-security-policy, x-frame-options, set-cookie)
+
+  if (/text\/html/i.test(rawType)) {
+    const html = rewriteLiveHtml(buf.toString('utf8'), {
+      prefix,
+      targetOrigin,
+      outDir,
+      route: routePath || '/',
+    });
+    outHeaders['Content-Type'] = 'text/html; charset=utf-8';
+    res.writeHead(upstream.status, outHeaders);
+    res.end(html);
+    return;
+  }
+  if (/text\/css/i.test(rawType)) {
+    const css = rewriteLiveCss(buf.toString('utf8'), { prefix, targetOrigin });
+    res.writeHead(upstream.status, outHeaders);
+    res.end(css);
+    return;
+  }
+  res.writeHead(upstream.status, outHeaders);
+  res.end(buf);
+}
+
 async function previewOutDirFromReferer(req) {
   const raw = String(req.headers.referer || '');
   if (!raw) return '';
@@ -2715,9 +2953,20 @@ async function prepareHtmlForSharePreview(html, outDir, shareId, { routes = [], 
   return out;
 }
 
-function shareWrapperHtml(shareId, route = '/') {
+function shareWrapperHtml(shareId, route = '/', targetOrigin = '') {
   const cleanRoute = String(route || '/');
-  const iframeSrc = `/api/share-page?shareId=${encodeURIComponent(shareId)}&route=${encodeURIComponent(cleanRoute)}`;
+  let iframeSrc = '';
+  const origin = String(targetOrigin || '').replace(/\/$/, '');
+  if (origin) {
+    try {
+      iframeSrc = new URL(cleanRoute.startsWith('/') ? cleanRoute : `/${cleanRoute}`, `${origin}/`).href;
+    } catch {
+      iframeSrc = `${origin}${cleanRoute.startsWith('/') ? cleanRoute : `/${cleanRoute}`}`;
+    }
+  } else {
+    // Legacy fallback: static clone snapshot when manifest has no targetOrigin.
+    iframeSrc = `/api/share-page?shareId=${encodeURIComponent(shareId)}&route=${encodeURIComponent(cleanRoute)}`;
+  }
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -2725,8 +2974,14 @@ function shareWrapperHtml(shareId, route = '/') {
 <title>Shared preview</title>
 <style>html,body{margin:0;height:100%;overflow:hidden;background:#0a0a0a}iframe{border:0;width:100%;height:100%;display:block}</style>
 </head><body>
-<iframe src="${htmlEsc(iframeSrc)}" title="Shared site preview" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-downloads"></iframe>
+<iframe src="${htmlEsc(iframeSrc)}" title="Shared site preview" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads" referrerpolicy="no-referrer-when-downgrade"></iframe>
 </body></html>`;
+}
+
+async function shareWrapperHtmlForShare(share, shareId, route = '/') {
+  const outDir = resolveCloneOutDir(share.out_dir) || share.out_dir;
+  const targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
+  return shareWrapperHtml(shareId, route, targetOrigin);
 }
 
 async function loadSharedPreviewHtml(share, shareId, requestedRoute) {
@@ -3819,7 +4074,7 @@ function isAllowedOrigin(origin) {
 }
 
 function contentSecurityPolicyForPath(pathname) {
-  const isPreviewSurface = pathname === '/api/page' || pathname === '/api/share-page' || pathname.startsWith('/share/') || pathname === '/api/asset' || pathname.startsWith('/_assets/');
+  const isPreviewSurface = pathname === '/api/page' || pathname === '/api/share-page' || pathname === '/api/live-page' || pathname === '/api/live-proxy' || pathname.startsWith('/api/live-site/') || pathname.startsWith('/share/') || pathname === '/api/asset' || pathname.startsWith('/_assets/');
   const frameAncestors = (() => {
     const allowed = new Set(["'self'"]);
     for (const raw of [process.env.FRONTEND_URL, process.env.PUBLIC_APP_URL, process.env.CORS_ORIGINS]) {
@@ -3844,9 +4099,10 @@ function contentSecurityPolicyForPath(pathname) {
       "worker-src 'self' blob:",
       "object-src 'none'",
       "base-uri 'self'",
-      "form-action 'self'",
+      "form-action 'self' https:",
       // Cloned site JS runs inside /api/page or /api/share-page (iframe), same as
       // the authenticated preview — not on the bare /share/ wrapper shell.
+      // Live JS preview proxies the origin through /api/live-site.
     ].join('; ');
   }
   return [
@@ -3917,6 +4173,9 @@ async function handleRequest(req, res) {
   const isEmbeddablePreview =
     url.pathname === '/api/page' ||
     url.pathname === '/api/share-page' ||
+    url.pathname === '/api/live-page' ||
+    url.pathname === '/api/live-proxy' ||
+    url.pathname.startsWith('/api/live-site/') ||
     url.pathname === '/api/asset' ||
     url.pathname.startsWith('/share/') ||
     url.pathname.startsWith('/_assets/');
@@ -4402,6 +4661,125 @@ async function handleRequest(req, res) {
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(html);
+    return;
+  }
+
+  // Live JS preview entry — redirect into path-mirrored /api/live-site so ES module
+  // relative imports resolve correctly under the proxy prefix.
+  if (req.method === 'GET' && url.pathname === '/api/live-page') {
+    const liveUser = await getSessionUser(req);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir'));
+    if (!outDir) { res.writeHead(404); res.end('No clone specified'); return; }
+    if (!await canReadOutDir(liveUser, outDir) && !await canReadCloneRecord(liveUser, outDir)) {
+      if (!liveUser) return json(res, { error: 'Not authenticated' }, 401);
+      res.writeHead(404); res.end('Not found'); return;
+    }
+    const targetOrigin = await loadCloneTargetOrigin(outDir);
+    if (!targetOrigin) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Clone has no targetOrigin — re-run the clone.');
+      return;
+    }
+    let route = url.searchParams.get('route') || '/';
+    try {
+      const u = new URL(route, 'https://example.invalid');
+      route = u.pathname + u.search + u.hash;
+    } catch {
+      route = '/';
+    }
+    if (!route.startsWith('/')) route = `/${route}`;
+    // Direct origin embed — real site JS/routing/cookies. Path-prefix proxy breaks
+    // Next.js apps (wrong pathname); keep /api/live-site for advanced use only.
+    let location;
+    try {
+      location = new URL(route, targetOrigin.endsWith('/') ? targetOrigin : `${targetOrigin}/`).href;
+    } catch {
+      location = `${targetOrigin}${route}`;
+    }
+    res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+
+  // Absolute-URL live proxy (fetch bridge / explicit). Origin-allowlisted only.
+  if (url.pathname === '/api/live-proxy') {
+    const liveUser = await getSessionUser(req);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
+    const assetToken = String(url.searchParams.get('assetToken') || '');
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
+    let readable = await canReadOutDir(liveUser, outDir) || cloneAssetTokenMatches(outDir, assetToken);
+    if (!readable) readable = await canReadCloneRecord(liveUser, outDir);
+    if (!readable) return json(res, { error: liveUser ? 'Not found' : 'Not authenticated' }, liveUser ? 404 : 401);
+    const targetOrigin = await loadCloneTargetOrigin(outDir);
+    if (!targetOrigin) return json(res, { error: 'No targetOrigin' }, 404);
+    const rawTarget = String(url.searchParams.get('url') || '');
+    if (!isAllowedLiveOriginUrl(rawTarget, targetOrigin)) {
+      return json(res, { error: 'URL not allowed for this clone origin' }, 403);
+    }
+    const targetUrl = new URL(rawTarget, targetOrigin).href;
+    const prefix = liveSitePrefix(outDir);
+    try {
+      await proxyLiveOriginRequest(req, res, {
+        targetUrl,
+        prefix,
+        targetOrigin,
+        outDir,
+        routePath: new URL(targetUrl).pathname,
+      });
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err?.statusCode === 413) return json(res, { error: 'Request too large' }, 413);
+      return json(res, { error: err?.message || 'Proxy failed' }, 502);
+    }
+    return;
+  }
+
+  // Path-mirrored live site: /api/live-site/<token>/<basename>/...
+  if (url.pathname.startsWith('/api/live-site/')) {
+    const parsed = parseLiveSitePath(url.pathname);
+    if (!parsed) { res.writeHead(404); res.end('Not found'); return; }
+    const outDir = resolveCloneOutDir(parsed.basename);
+    if (!outDir) { res.writeHead(404); res.end('Not found'); return; }
+    const liveUser = await getSessionUser(req);
+    const readable = cloneAssetTokenMatches(outDir, parsed.token)
+      || await canReadOutDir(liveUser, outDir)
+      || await canReadCloneRecord(liveUser, outDir);
+    if (!readable) {
+      if (!liveUser) return json(res, { error: 'Not authenticated' }, 401);
+      res.writeHead(404); res.end('Not found'); return;
+    }
+    const targetOrigin = await loadCloneTargetOrigin(outDir);
+    if (!targetOrigin) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Clone has no targetOrigin');
+      return;
+    }
+    const targetUrl = targetOrigin + parsed.restPath + (url.search || '');
+    // Strip our auth query before forwarding to origin
+    let forwardUrl = targetUrl;
+    try {
+      const tu = new URL(targetUrl);
+      tu.searchParams.delete('access_token');
+      tu.searchParams.delete('authToken');
+      forwardUrl = tu.href;
+    } catch { /* keep */ }
+    if (!isAllowedLiveOriginUrl(forwardUrl, targetOrigin)) {
+      return json(res, { error: 'URL not allowed for this clone origin' }, 403);
+    }
+    const prefix = liveSitePrefix(outDir);
+    try {
+      await proxyLiveOriginRequest(req, res, {
+        targetUrl: forwardUrl,
+        prefix,
+        targetOrigin,
+        outDir,
+        routePath: parsed.restPath,
+      });
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err?.statusCode === 413) return json(res, { error: 'Request too large' }, 413);
+      return json(res, { error: err?.message || 'Proxy failed' }, 502);
+    }
     return;
   }
 
@@ -5130,39 +5508,21 @@ async function handleRequest(req, res) {
       }, 409);
     }
 
-    if (IS_HOSTED) {
-      let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
-      if (!map) {
-        try {
-          const materialized = await materializeCloneOutput(outDir);
-          map = loadRouteMap(materialized.dir) || await inferRouteMapFromCapturedPages(materialized.dir);
-          try { materialized.cleanup(); } catch {}
-        } catch (err) {
-          console.warn('[api/preview] rematerialize failed:', err?.message || err);
-        }
-      }
-      if (!map) {
-        return json(res, {
-          error: 'Preview pages not found. Files may not have been saved to storage — re-run the clone after redeploying the Backend.',
-        }, 404);
-      }
-      const token = previewUser._sessionToken || '';
-      const qs = new URLSearchParams({ outDir, route: '/' });
-      if (token) qs.set('access_token', token);
+    const targetOrigin = await loadCloneTargetOrigin(outDir);
+    if (!targetOrigin) {
       return json(res, {
-        ok: true,
-        url: `${apiPublicUrl(req)}/api/page?${qs.toString()}`,
-        hosted: true,
-      });
+        error: 'Preview needs the clone target URL. Re-run the clone if this folder has no manifest.',
+      }, 404);
     }
-    if (!existsSync(outDir)) return json(res, { error: 'Output folder not found' }, 404);
-    try {
-      const needsInstall = !existsSync(join(outDir, 'node_modules'));
-      const cmd = needsInstall ? 'npm install && npm run dev' : 'npm run dev';
-      const proc = spawn(cmd, [], { cwd: outDir, shell: true, detached: true, stdio: 'ignore' });
-      proc.unref();
-      return json(res, { ok: true, url: 'http://localhost:3000' });
-    } catch(err) { return json(res, { error: err.message }, 500); }
+    const token = previewUser._sessionToken || '';
+    const qs = new URLSearchParams({ outDir, route: '/' });
+    if (token) qs.set('access_token', token);
+    return json(res, {
+      ok: true,
+      url: `${apiPublicUrl(req)}/api/live-page?${qs.toString()}`,
+      live: true,
+      hosted: !!IS_HOSTED,
+    });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/export-zip') {
@@ -5983,7 +6343,7 @@ async function handleRequest(req, res) {
         'Content-Type': 'text/html; charset=utf-8',
         'Set-Cookie': shareAccessSetCookie(share),
       });
-      res.end(shareWrapperHtml(shareId, requestedRoute));
+      res.end(await shareWrapperHtmlForShare(share, shareId, requestedRoute));
       return;
     }
     let requestedRoute = shareRouteFromPath(url.pathname, shareId, url.search) + (url.hash || '');
@@ -5994,7 +6354,7 @@ async function handleRequest(req, res) {
       return;
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(shareWrapperHtml(shareId, requestedRoute));
+    res.end(await shareWrapperHtmlForShare(share, shareId, requestedRoute));
     return;
   }
 
