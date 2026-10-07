@@ -34,7 +34,8 @@ import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
-import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript } from './lib/clonePreviewRuntime.js';
+import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript, buildLiveBridgeScript } from './lib/clonePreviewRuntime.js';
+import { getThemeModel, buildThemeEngineModule, stripThemeArtifacts, applyThemeScriptToHtml } from './lib/themeModels.js';
 import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
