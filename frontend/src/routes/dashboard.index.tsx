@@ -7,7 +7,7 @@ import { ExportFigmaDialog } from "@/components/dashboard/export-figma-dialog";
 import { GitHubPushDialog } from "@/components/dashboard/github-push-dialog";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import type { CloneJob } from "@/components/dashboard/data";
-import { ApiError, downloadZipBlob, pagePreviewUrl, triggerBrowserDownload } from "@/lib/api";
+import { ApiError, downloadZipBlob, pageLivePreviewUrl, triggerBrowserDownload } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 
 export const Route = createFileRoute("/dashboard/")({
