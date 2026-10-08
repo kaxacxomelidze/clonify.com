@@ -525,18 +525,6 @@ function cssAttrValue(value: string): string {
  * Selectors for elements that are empty in the server HTML and referenced (by id or
  * data-* attribute name) from an inline script — i.e. filled in client-side.
  */
-/** True when server-rendered HTML carries real page text (not an empty shell or an error page). */
-export function serverHtmlHasContent(serverHtml: string): boolean {
-  if (!serverHtml || /client-side exception has occurred|id="__next_error__"/i.test(serverHtml)) return false;
-  const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(serverHtml)?.[1] || '';
-  const text = body
-    .replace(/<(script|style|noscript|template)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return text.length >= 200;
-}
-
 export function findScriptBuiltContainers(serverHtml: string): string[] {
   if (!serverHtml) return [];
   let scripts = '';
@@ -2219,8 +2207,6 @@ export async function capturePage(
       if (document.getElementById('__next_error__')) return true;
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
       if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
-      // Next.js default: "Application error: a client-side exception has occurred".
-      if (/client-side exception has occurred/i.test(text) && text.length < 600) return true;
       return /Application Error/i.test(text)
         && /page could not be displayed|Something has gone wrong/i.test(text);
     });
@@ -2235,18 +2221,11 @@ export async function capturePage(
         if (document.getElementById('__next_error__')) return true;
         const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
         if (/This page could not/i.test(text) && text.length < 400) return true;
-        // Next.js default: "Application error: a client-side exception has occurred".
-        if (/client-side exception has occurred/i.test(text) && text.length < 600) return true;
         return /Application Error/i.test(text)
           && /page could not be displayed|Something has gone wrong/i.test(text);
       }).catch(() => true);
       if (!stillError) finalHtml = retryHtml;
-      else if (serverHtmlHasContent(serverHtml)) {
-        // The app crashes while hydrating in the capture browser; the server-rendered
-        // HTML still holds the real page, so keep that instead of the error screen.
-        logger.warn(`  [APP ERROR] ${pageUrl} still crashing after reload; using the server-rendered HTML`);
-        finalHtml = serverHtml;
-      } else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
+      else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
     }
   } catch { /* best-effort */ }
 
