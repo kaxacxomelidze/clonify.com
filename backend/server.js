@@ -1267,6 +1267,41 @@ async function countClonePagesBestEffort(outDir) {
 }
 
 const _fileCache = new Map();
+
+// origin → { ok, exp }: whether a live site lets other sites embed it in an iframe.
+const _frameableCache = new Map();
+
+/** True when `pageUrl` can be shown in an iframe on `embedderOrigin` (checked once per hour per origin). */
+async function liveOriginFrameable(pageUrl, embedderOrigin) {
+  let origin;
+  try { origin = new URL(pageUrl).origin; } catch { return false; }
+  // An http:// site inside the https dashboard is blocked as mixed content.
+  if (!origin.startsWith('https://')) return false;
+  const hit = _frameableCache.get(origin);
+  if (hit && hit.exp > Date.now()) return hit.ok;
+  let ok = false;
+  try {
+    const res = await fetch(pageUrl, {
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ClonyfyPreview/1.0)', Accept: 'text/html' },
+      signal: AbortSignal.timeout(6000),
+    });
+    res.body?.cancel().catch(() => {});
+    const xfo = String(res.headers.get('x-frame-options') || '').trim();
+    const ancestors = /(?:^|;)\s*frame-ancestors\s+([^;]*)/i.exec(String(res.headers.get('content-security-policy') || ''))?.[1];
+    let embedderHost = '';
+    try { embedderHost = new URL(embedderOrigin).host; } catch {}
+    const ancestorsAllow = ancestors === undefined
+      || /(^|\s)\*(\s|$)/.test(ancestors)
+      || (!!embedderHost && ancestors.split(/\s+/).some((src) => src.replace(/^https?:\/\//, '').replace(/\/$/, '') === embedderHost));
+    ok = res.ok && !xfo && ancestorsAllow && new URL(res.url).protocol === 'https:';
+  } catch {
+    ok = false;
+  }
+  _frameableCache.set(origin, { ok, exp: Date.now() + 60 * 60 * 1000 });
+  if (_frameableCache.size > 500) _frameableCache.delete(_frameableCache.keys().next().value);
+  return ok;
+}
 /** Inject public frontend config (e.g. Community plugin URL after Figma publish). */
 function injectPublicRuntimeConfig(html) {
   if (!html) return html;
@@ -2996,7 +3031,14 @@ function shareWrapperHtml(shareId, route = '/', targetOrigin = '') {
 
 async function shareWrapperHtmlForShare(share, shareId, route = '/') {
   const outDir = resolveCloneOutDir(share.out_dir) || share.out_dir;
-  const targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
+  let targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
+  // Sites that forbid framing would show "refused to connect" to whoever opens the
+  // link; show them the saved clone instead.
+  if (targetOrigin) {
+    let liveUrl = '';
+    try { liveUrl = new URL(route || '/', `${targetOrigin.replace(/\/$/, '')}/`).href; } catch {}
+    if (!liveUrl || !await liveOriginFrameable(liveUrl, frontendPublicUrl())) targetOrigin = '';
+  }
   return shareWrapperHtml(shareId, route, targetOrigin);
 }
 
@@ -4711,6 +4753,14 @@ async function handleRequest(req, res) {
       location = new URL(route, targetOrigin.endsWith('/') ? targetOrigin : `${targetOrigin}/`).href;
     } catch {
       location = `${targetOrigin}${route}`;
+    }
+    // Most real sites forbid being framed (X-Frame-Options / frame-ancestors), and the
+    // browser then shows "<site> refused to connect". Inside the dashboard iframe, show
+    // the saved clone instead; a new tab (top-level) can still open the live site.
+    if (req.headers['sec-fetch-dest'] === 'iframe' && !await liveOriginFrameable(location, frontendPublicUrl(req))) {
+      res.writeHead(302, { Location: `/api/page${url.search}`, 'Cache-Control': 'no-store' });
+      res.end();
+      return;
     }
     res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
     res.end();
