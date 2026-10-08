@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isFrameworkErrorHtml,
   isThinSpaShell,
   normalizePathname,
   pathnameOfUrl,
@@ -22,6 +23,19 @@ describe('normalizePathname / pathnamesMatch', () => {
   it('reads pathnames from full URLs', () => {
     expect(pathnameOfUrl('https://stripe.com/apps?x=1')).toBe('/apps');
     expect(normalizePathname('/Payments/')).toBe('/payments');
+  });
+});
+
+describe('isFrameworkErrorHtml', () => {
+  it('flags the Next.js client-side crash page (griffin.com)', () => {
+    const html = '<html><body><div id="__next"><div><h2>Application error: a client-side exception has occurred (see the browser console for more information).</h2></div></div><script src="/_assets/a.js"></script></body></html>';
+    expect(isFrameworkErrorHtml(html)).toBe(true);
+    expect(isThinSpaShell(html)).toBe(true);
+  });
+
+  it('does not flag real pages that mention errors in long copy', () => {
+    const copy = 'Banking for businesses. '.repeat(60) + 'Application error handling is built in.';
+    expect(isFrameworkErrorHtml(`<html><body><main>${copy}</main></body></html>`)).toBe(false);
   });
 });
 

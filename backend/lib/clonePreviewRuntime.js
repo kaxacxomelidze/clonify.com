@@ -1606,12 +1606,248 @@ function animationRuntime() {
     }
   }
 
+  /**
+   * Replay scroll-linked animation recorded at capture time (pinned stories, parallax,
+   * progress CSS variables, reveal-on-scroll classes). Keyframes are keyed by each
+   * anchor's progress through the viewport, so they survive a different iframe size.
+   */
+  function installScrollTimeline() {
+    if (window.__clonyfyScrollTimeline) return;
+    var node = document.getElementById('__clonyfy_scroll_timeline__');
+    if (!node) return;
+    var data;
+    try { data = JSON.parse(node.textContent || ''); } catch (e) { return; }
+    if (!data || ((!data.tracks || !data.tracks.length) && (!data.regions || !data.regions.length))) return;
+    data.tracks = data.tracks || [];
+    window.__clonyfyScrollTimeline = true;
+
+    // Undo the capture-time "force visible" pass inside timeline sections — there the
+    // hidden state is the animation's starting point. Skip page-wide roots (html/body
+    // or huge wrappers) so normal content keeps its baked visibility.
+    var total = document.getElementsByTagName('*').length || 1;
+    var roots = document.querySelectorAll('[data-clonyfy-st],[data-clonyfy-sr]');
+    function restore(el) {
+      if (el.hasAttribute('data-clonyfy-prev-style')) {
+        var s = el.getAttribute('data-clonyfy-prev-style');
+        if (s) el.setAttribute('style', s); else el.removeAttribute('style');
+        el.removeAttribute('data-clonyfy-prev-style');
+      }
+      if (el.hasAttribute('data-clonyfy-prev-class')) {
+        var c = el.getAttribute('data-clonyfy-prev-class');
+        if (c) el.setAttribute('class', c); else el.removeAttribute('class');
+        el.removeAttribute('data-clonyfy-prev-class');
+      }
+    }
+    for (var r = 0; r < roots.length; r++) {
+      var root = roots[r];
+      if (root === document.documentElement || root === document.body) continue;
+      if (root.getElementsByTagName('*').length > total * 0.25) continue;
+      restore(root);
+      var inner = root.querySelectorAll('[data-clonyfy-prev-style],[data-clonyfy-prev-class]');
+      for (var q = 0; q < inner.length; q++) restore(inner[q]);
+    }
+
+    var anchors = [];
+    for (var a = 0; a < data.anchors.length; a++) {
+      var spec = data.anchors[a];
+      anchors.push({
+        mode: spec.mode,
+        el: spec.mode === 'el' ? document.querySelector('[data-clonyfy-sa="' + spec.id + '"]') : null,
+      });
+    }
+    var tracks = [];
+    for (var t = 0; t < data.tracks.length; t++) {
+      var tr = data.tracks[t];
+      var inRegion = typeof tr.r === 'number' && tr.p;
+      var el = inRegion ? null : document.querySelector('[data-clonyfy-st="' + tr.id + '"]');
+      if ((!el && !inRegion) || !tr.k || tr.k.length < 2 || !anchors[tr.a]) continue;
+      tracks.push({
+        el: el,
+        r: inRegion ? tr.r : -1,
+        p: inRegion ? tr.p : null,
+        a: tr.a,
+        n: tr.n,
+        k: tr.k,
+        once: !!tr.once,
+        latched: false,
+        // Numbers in transforms / styles / SVG geometry morph smoothly; classes and
+        // data-/aria- states switch at the recorded point.
+        lerp: tr.n !== 'class' && !/^(data-|aria-)/.test(tr.n),
+      });
+    }
+    // Structural regions: swap the container's HTML to the snapshot for this progress.
+    // Indexed by the timeline's region number so path tracks can find their root.
+    var regions = [];
+    var regionByIndex = [];
+    var pool = data.html || [];
+    for (var g = 0; g < (data.regions || []).length; g++) {
+      var rg = data.regions[g];
+      var host = document.querySelector('[data-clonyfy-sr="' + rg.id + '"]');
+      if (!host || !rg.k || !rg.k.length || !anchors[rg.a]) { regionByIndex.push(null); continue; }
+      var region = { el: host, a: rg.a, k: rg.k, shown: -1 };
+      regions.push(region);
+      regionByIndex.push(region);
+    }
+    function resolvePath(root, p) {
+      var x = root;
+      for (var i = 0; i < p.length && x; i++) x = x.children[p[i]];
+      return x || null;
+    }
+    if (!tracks.length && !regions.length) return;
+    function snapshotAt(k, p) {
+      if (p <= k[0][0]) return k[0][1];
+      var idx = k[0][1];
+      for (var s = 0; s < k.length && k[s][0] <= p; s++) idx = k[s][1];
+      return idx;
+    }
+    function swapRegion(region, idx) {
+      if (region.shown === idx || typeof pool[idx] !== 'string') return;
+      region.shown = idx;
+      region.el.innerHTML = pool[idx];
+      // Re-set URL attributes so the preview's asset localizer (setAttribute hook)
+      // maps original-site media to the clone's captured copies.
+      var media = region.el.querySelectorAll('[src],[srcset],[poster]');
+      for (var m = 0; m < media.length; m++) {
+        var names = ['src', 'srcset', 'poster'];
+        for (var n = 0; n < names.length; n++) {
+          var val = media[m].getAttribute(names[n]);
+          if (val) media[m].setAttribute(names[n], val);
+        }
+      }
+    }
+
+    var NUM =/-?\d*\.?\d+(?:e[-+]?\d+)?/gi;
+    function mix(a, b, f) {
+      if (a === null || b === null || a === b) return a;
+      var na = a.match(NUM), nb = b.match(NUM);
+      if (!na || !nb || na.length !== nb.length) return a;
+      var sa = a.split(NUM), sb = b.split(NUM);
+      if (sa.join('\u0000') !== sb.join('\u0000')) return a;
+      var out = sa[0];
+      for (var i = 0; i < na.length; i++) {
+        var x = parseFloat(na[i]), y = parseFloat(nb[i]);
+        out += String(Math.round((x + (y - x) * f) * 10000) / 10000) + sa[i + 1];
+      }
+      return out;
+    }
+    function valueAt(track, p) {
+      var k = track.k;
+      if (p <= k[0][0]) return k[0][1];
+      var last = k.length - 1;
+      if (p >= k[last][0]) return k[last][1];
+      var lo = 0, hi = last;
+      while (hi - lo > 1) {
+        var mid = (lo + hi) >> 1;
+        if (k[mid][0] <= p) lo = mid; else hi = mid;
+      }
+      if (!track.lerp) return k[lo][1];
+      var span = k[hi][0] - k[lo][0];
+      return mix(k[lo][1], k[hi][1], span > 0 ? (p - k[lo][0]) / span : 0);
+    }
+    function progress(anchor, vh, docH) {
+      if (anchor.mode === 'doc' || !anchor.el) {
+        return Math.max(0, Math.min(1, window.scrollY / Math.max(1, docH - vh)));
+      }
+      var rect = anchor.el.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (vh - rect.top) / Math.max(1, vh + rect.height)));
+    }
+
+    var queued = false;
+    function apply() {
+      queued = false;
+      var vh = window.innerHeight;
+      var docH = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
+      var prog = [];
+      for (var i = 0; i < anchors.length; i++) prog.push(progress(anchors[i], vh, docH));
+      for (var rr = 0; rr < regions.length; rr++) {
+        try { swapRegion(regions[rr], snapshotAt(regions[rr].k, prog[regions[rr].a])); } catch (e) { /* ignore */ }
+      }
+      for (var j = 0; j < tracks.length; j++) {
+        var track = tracks[j];
+        var p = prog[track.a];
+        var v;
+        if (track.once) {
+          var end = track.k[track.k.length - 1];
+          if (!track.latched && p >= end[0]) track.latched = true;
+          v = track.latched ? end[1] : track.k[0][1];
+        } else {
+          v = valueAt(track, p);
+        }
+        var target = track.el;
+        if (track.r >= 0) {
+          var owner = regionByIndex[track.r];
+          target = owner ? resolvePath(owner.el, track.p) : null;
+        }
+        if (!target || target.getAttribute(track.n) === v) continue;
+        try {
+          if (v === null) target.removeAttribute(track.n);
+          else target.setAttribute(track.n, v);
+        } catch (e) { /* ignore */ }
+      }
+    }
+    function schedule() {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(apply);
+    }
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    apply();
+  }
+
+  /** Loop canvas frames recorded at capture time (site JS that drew them is off). */
+  function playCanvasFrames() {
+    var reduce = false;
+    try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* ignore */ }
+    var imgs = document.querySelectorAll('img[data-clonyfy-canvas-frames]');
+    for (var i = 0; i < imgs.length; i++) {
+      (function (img) {
+        if (img.getAttribute('data-clonyfy-frames-playing') === '1') return;
+        var frames;
+        try { frames = JSON.parse(img.getAttribute('data-clonyfy-canvas-frames') || '[]'); } catch (e) { return; }
+        if (!frames || frames.length < 2 || reduce) return;
+        img.setAttribute('data-clonyfy-frames-playing', '1');
+        var ms = parseInt(img.getAttribute('data-clonyfy-frame-ms') || '100', 10) || 100;
+        // Preload so swaps don't flash; resolve against the img's own resolved base.
+        var urls = [];
+        for (var f = 0; f < frames.length; f++) {
+          var pre = new Image();
+          pre.src = frames[f];
+          urls.push(pre.src);
+        }
+        var idx = 0;
+        var visible = true;
+        var timer = null;
+        function tick() {
+          if (!visible) return;
+          idx = (idx + 1) % urls.length;
+          img.src = urls[idx];
+        }
+        function start() { if (!timer) timer = setInterval(tick, ms); }
+        function stop() { if (timer) { clearInterval(timer); timer = null; } }
+        if (typeof IntersectionObserver === 'function') {
+          new IntersectionObserver(function (entries) {
+            visible = entries[0] && entries[0].isIntersecting;
+            if (visible) start(); else stop();
+          }).observe(img);
+        } else {
+          start();
+        }
+        document.addEventListener('visibilitychange', function () {
+          if (document.hidden) stop(); else if (visible) start();
+        });
+      })(imgs[i]);
+    }
+  }
+
   function run() {
     try {
       injectCss();
       installLogoMarquees();
       reviveCssAnimations();
       observe();
+      playCanvasFrames();
+      installScrollTimeline();
     } catch (e) { /* ignore */ }
   }
 

@@ -334,7 +334,19 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
           } catch { /* ignore */ }
         } else if (op.k === 'add') {
           const n: Element | undefined = st.els[op.el];
-          if (n && n.isConnected) { try { n.remove(); } catch { /* ignore */ } }
+          if (n && n.isConnected) {
+            // Never remove framework-owned nodes live: React/Vue remove them on their
+            // own close and crash ("removeChild … not a child") if they're already gone.
+            // Hide now; the snapshot drops them via the deferred-edit pass.
+            try {
+              const deferId = `clonyfy-ix-${op.el}-${Date.now()}`;
+              const w = window as any;
+              w.__clonyfyDeferred = w.__clonyfyDeferred || {};
+              w.__clonyfyDeferred[deferId] = { mode: 'replace', html: '' };
+              n.setAttribute('data-clonyfy-defer', deferId);
+              (n as HTMLElement).style?.setProperty('display', 'none', 'important');
+            } catch { /* ignore */ }
+          }
         }
       }
     };

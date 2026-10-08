@@ -1,31 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  ArrowDown,
-  ArrowUp,
-  Bold,
-  Copy,
-  CornerLeftUp,
-  Eraser,
-  ImagePlus,
-  Italic,
-  Link2,
-  Monitor,
-  MousePointerClick,
-  PaintBucket,
-  Redo2,
-  RotateCcw,
-  Save,
-  Smartphone,
-  Tablet,
-  TextAlignCenter,
-  TextAlignEnd,
-  TextAlignStart,
-  Trash2,
-  Type,
-  Undo2,
-  Unlink,
-} from "lucide-react";
+import { Monitor, Redo2, Save, Smartphone, Tablet, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ApiError,
@@ -43,10 +18,22 @@ import {
 } from "@/lib/api";
 import { SiteStylePanel } from "@/components/dashboard/theme-models-panel";
 import {
+  EditorInspector,
+  type InspectorActions,
+  type SectionAction,
+} from "@/components/dashboard/editor-inspector";
+import {
   ATTR_EDITING,
+  ATTR_HIDDEN,
   ATTR_HOVER,
   ATTR_SELECTED,
+  type PageSection,
   type SelectionInfo,
+  collectPalette,
+  ensureFontLoaded,
+  fontStack,
+  listSections,
+  similarElements,
   canEditText,
   clearEditorAttrs,
   describeElement,
@@ -79,11 +66,14 @@ const DEVICES: Array<{ id: Device; label: string; width: string; Icon: typeof Mo
 
 const MAX_HISTORY = 40;
 const MAX_HISTORY_CHARS = 60_000_000;
-const EDITOR_ATTR_RE = /\s(?:data-clonyfy-editor-(?:hover|selected|editing)|data-cth(?![-\w]))(?:="[^"]*")?/g;
+const EDITOR_ATTR_RE =
+  /\s(?:data-clonyfy-editor-(?:hover|selected|editing)|data-cth(?![-\w]))(?:="[^"]*")?/g;
 
-const TOOL =
-  "inline-flex items-center justify-center gap-1.5 rounded-xl border border-border px-2.5 py-2 text-xs transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
 const TOOL_ACTIVE = "bg-primary text-primary-foreground hover:bg-primary";
+/** Text-bearing tags that a page-wide font change should restyle. */
+const PAGE_FONT_TARGETS =
+  "h1,h2,h3,h4,h5,h6,p,a,span,li,button,label,blockquote,figcaption,small,strong,em,b,td,th,dt,dd,input,textarea,select";
+const ICON_FONT_RE = /icon|awesome|material|symbol|glyph|dashicons/i;
 
 function isTypingTarget(el: Element | null) {
   if (!el) return false;
@@ -129,9 +119,9 @@ export function VisualEditor({
   const [sel, setSel] = useState<SelectionInfo | null>(null);
   const [editingText, setEditingText] = useState(false);
   const [history, setHistory] = useState({ undo: 0, redo: 0 });
-  const [hrefDraft, setHrefDraft] = useState("");
-  const [altDraft, setAltDraft] = useState("");
-  const [fontSizeDraft, setFontSizeDraft] = useState("");
+  const [selKey, setSelKey] = useState(0);
+  const [palette, setPalette] = useState<string[]>([]);
+  const [sections, setSections] = useState<PageSection[]>([]);
 
   const themeEngineRef = useRef<ThemeEngine | null>(null);
   const themeIdRef = useRef<string | null>(null);
@@ -167,7 +157,8 @@ export function VisualEditor({
         setThemeId(current.themeId);
         applyThemeToDoc();
       } catch (err) {
-        if (!cancelled) setThemeError(err instanceof Error ? err.message : "Could not load style models.");
+        if (!cancelled)
+          setThemeError(err instanceof Error ? err.message : "Could not load style models.");
       }
     })();
     return () => {
@@ -184,6 +175,7 @@ export function VisualEditor({
     setThemeId(nextId);
     setThemePending(nextId);
     applyThemeToDoc();
+    if (docRef.current) setPalette(collectPalette(docRef.current));
     try {
       await ensureApiAwake({ attempts: 3, timeoutMs: 10_000 }).catch(() => {});
       const result = await setCloneTheme(outDir, nextId);
@@ -268,17 +260,20 @@ export function VisualEditor({
     if (selectedRef.current) {
       selectedRef.current.removeAttribute(ATTR_HOVER);
       selectedRef.current.setAttribute(ATTR_SELECTED, "");
-      const info = describeElement(
-        selectedRef.current,
-        origStyleRef.current.has(selectedRef.current),
-      );
-      setSel(info);
-      setHrefDraft(info.href ?? "");
-      setAltDraft(info.alt);
-      setFontSizeDraft(String(info.fontSize));
+      setSel(describeElement(selectedRef.current, origStyleRef.current.has(selectedRef.current)));
     } else {
       setSel(null);
     }
+    setSelKey((k) => k + 1);
+  };
+
+  /** Re-read the page's section list (after structural edits or layout settles). */
+  const refreshLayers = () => {
+    const doc = docRef.current;
+    if (!doc?.body) return;
+    requestAnimationFrame(() => {
+      if (docRef.current === doc) setSections(listSections(doc));
+    });
   };
 
   const restore = (bodyHtml: string) => {
@@ -294,6 +289,7 @@ export function VisualEditor({
     setSel(null);
     lastChangeRef.current = null;
     setDirty(true);
+    refreshLayers();
   };
 
   /* ------------------------------------------------------- text editing */
@@ -374,6 +370,7 @@ export function VisualEditor({
     select(null);
     removeWithEmptyAncestors(el);
     setDirty(true);
+    refreshLayers();
   };
 
   const duplicateSelected = () => {
@@ -388,6 +385,7 @@ export function VisualEditor({
     el.after(copy);
     select(copy);
     setDirty(true);
+    refreshLayers();
   };
 
   const moveSelected = (dir: "up" | "down") => {
@@ -402,13 +400,36 @@ export function VisualEditor({
     el.scrollIntoView({ block: "nearest" });
     refreshSel();
     setDirty(true);
+    refreshLayers();
   };
 
-  const selectParent = () => {
+  const selectAncestor = (levelsUp: number) => {
     commitEditing();
-    const parent = selectedRef.current?.parentElement;
-    if (!parent || parent.tagName === "BODY" || parent.tagName === "HTML") return;
-    select(parent);
+    let el: HTMLElement | null = selectedRef.current;
+    for (let i = 0; i < levelsUp && el; i++) el = el.parentElement;
+    if (!el || el.tagName === "BODY" || el.tagName === "HTML") return;
+    select(el);
+    el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+
+  /** Hide keeps the element (and its prior inline display) so Show restores it exactly. */
+  const toggleHidden = (target?: HTMLElement) => {
+    commitEditing();
+    const el = target ?? selectedRef.current;
+    if (!el?.isConnected) return;
+    pushUndo();
+    if (el.hasAttribute(ATTR_HIDDEN)) {
+      const prev = el.getAttribute(ATTR_HIDDEN) || "";
+      el.removeAttribute(ATTR_HIDDEN);
+      if (prev) el.style.setProperty("display", prev);
+      else el.style.removeProperty("display");
+    } else {
+      el.setAttribute(ATTR_HIDDEN, el.style.getPropertyValue("display") || "");
+      el.style.setProperty("display", "none", "important");
+    }
+    setDirty(true);
+    if (el === selectedRef.current) refreshSel();
+    refreshLayers();
   };
 
   const rememberStyle = (el: Element) => {
@@ -456,38 +477,112 @@ export function VisualEditor({
     setDirty(true);
   };
 
-  const applyFontSize = () => {
-    const size = Number(fontSizeDraft);
-    if (!Number.isFinite(size) || size < 6 || size > 400) {
-      if (sel) setFontSizeDraft(String(sel.fontSize));
-      return;
+  /** Copy the selected element's text style onto every element that looks the same. */
+  const matchSimilar = () => {
+    commitEditing();
+    const el = selectedRef.current;
+    const view = docRef.current?.defaultView;
+    if (!el?.isConnected || !view) return;
+    const others = similarElements(el).filter((x) => x !== el) as HTMLElement[];
+    if (!others.length) return;
+    pushUndo();
+    const cs = view.getComputedStyle(el);
+    const props = [
+      "font-family",
+      "font-size",
+      "font-weight",
+      "font-style",
+      "line-height",
+      "letter-spacing",
+      "text-transform",
+      "text-decoration-line",
+      "text-align",
+      "color",
+    ];
+    for (const other of others) {
+      rememberStyle(other);
+      for (const p of props) other.style.setProperty(p, cs.getPropertyValue(p), "important");
     }
-    if (sel && size === sel.fontSize) return;
-    applyStyle({ "font-size": `${size}px` }, "font-size");
+    setDirty(true);
+    refreshSel();
+    toast.success(
+      `Text style applied to ${others.length} similar element${others.length === 1 ? "" : "s"}.`,
+    );
   };
 
-  const applyHref = () => {
+  const setFont = (family: string | null, scope: "element" | "page") => {
+    const doc = docRef.current;
+    if (!doc?.body) return;
+    if (family) ensureFontLoaded(doc, family);
+    if (scope === "page" && family) {
+      commitEditing();
+      pushUndo();
+      const view = doc.defaultView;
+      const stack = fontStack(family);
+      for (const node of [
+        doc.body,
+        ...Array.from(doc.body.querySelectorAll<HTMLElement>(PAGE_FONT_TARGETS)),
+      ]) {
+        // Leave icon fonts alone — swapping them turns glyphs into letters.
+        if (view && ICON_FONT_RE.test(view.getComputedStyle(node).fontFamily)) continue;
+        rememberStyle(node);
+        node.style.setProperty("font-family", stack, "important");
+      }
+      setDirty(true);
+      refreshSel();
+      toast.success(`${family} now used across this page.`);
+      return;
+    }
+    const el = selectedRef.current;
+    if (!el?.isConnected) return;
+    if (family) {
+      applyStyle({ "font-family": fontStack(family) }, "font-family");
+    } else {
+      recordChange("font-family");
+      rememberStyle(el);
+      el.style.removeProperty("font-family");
+      refreshSel();
+    }
+  };
+
+  /** Plain-text elements only (no child elements), so markup is never lost. */
+  const setText = (text: string) => {
+    const el = selectedRef.current;
+    if (!el?.isConnected || el.children.length) return;
+    commitEditing();
+    pushUndo();
+    el.textContent = text;
+    setDirty(true);
+    refreshSel();
+    refreshLayers();
+  };
+
+  const setLink = (rawHref: string, newTab: boolean) => {
     const el = selectedRef.current;
     const doc = docRef.current;
+    const href = rawHref.trim();
     if (!el?.isConnected || !doc) return;
-    const href = hrefDraft.trim();
-    const link = el.closest("a");
-    if (link) {
-      if (!href) return;
-      recordChange("href");
-      link.setAttribute("href", href);
-    } else {
-      if (!href) {
-        toast.error("Enter a link address first.");
-        return;
-      }
-      pushUndo();
-      const a = doc.createElement("a");
-      a.setAttribute("href", href);
-      el.replaceWith(a);
-      a.appendChild(el);
-      setDirty(true);
+    if (!href) {
+      toast.error("Enter a link address first.");
+      return;
     }
+    commitEditing();
+    pushUndo();
+    let link = el.closest("a");
+    if (!link) {
+      link = doc.createElement("a");
+      el.replaceWith(link);
+      link.appendChild(el);
+    }
+    link.setAttribute("href", href);
+    if (newTab) {
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+    } else {
+      link.removeAttribute("target");
+      if (link.getAttribute("rel") === "noopener noreferrer") link.removeAttribute("rel");
+    }
+    setDirty(true);
     refreshSel();
     toast.success("Link updated.");
   };
@@ -496,19 +591,33 @@ export function VisualEditor({
     const el = selectedRef.current;
     const link = el?.closest("a");
     if (!el || !link) return;
+    commitEditing();
     pushUndo();
     link.replaceWith(...Array.from(link.childNodes));
-    setHrefDraft("");
     refreshSel();
     setDirty(true);
   };
 
-  const applyAlt = () => {
+  const setAlt = (alt: string) => {
     const el = selectedRef.current;
-    if (!el || el.tagName !== "IMG") return;
+    if (!el || el.tagName !== "IMG" || el.getAttribute("alt") === alt) return;
     recordChange("alt");
-    el.setAttribute("alt", altDraft);
+    el.setAttribute("alt", alt);
     refreshSel();
+  };
+
+  const sectionAction = (el: HTMLElement, action: SectionAction) => {
+    if (!el.isConnected) return;
+    if (action === "toggle") {
+      toggleHidden(el);
+      return;
+    }
+    commitEditing();
+    select(el);
+    if (action === "select") el.scrollIntoView({ block: "start", behavior: "smooth" });
+    else if (action === "up" || action === "down") moveSelected(action);
+    else if (action === "duplicate") duplicateSelected();
+    else if (action === "delete") deleteSelected();
   };
 
   const openUpload = (target: "img" | "bg") => {
@@ -635,6 +744,14 @@ export function VisualEditor({
     setSel(null);
     setEditingText(false);
     updateHistory();
+    setSections(listSections(doc));
+    setPalette(collectPalette(doc));
+    // Fonts and images change layout after load — re-read sections once it settles.
+    setTimeout(() => {
+      if (docRef.current !== doc) return;
+      setSections(listSections(doc));
+      setPalette(collectPalette(doc));
+    }, 800);
 
     doc.addEventListener(
       "mouseover",
@@ -814,6 +931,32 @@ export function VisualEditor({
 
   const frameWidth = DEVICES.find((d) => d.id === device)?.width ?? "100%";
 
+  const inspectorActions: InspectorActions = {
+    editText: () => selectedRef.current && startEditing(selectedRef.current),
+    selectAncestor,
+    duplicate: duplicateSelected,
+    move: moveSelected,
+    toggleHidden: () => toggleHidden(),
+    remove: deleteSelected,
+    deselect: () => {
+      commitEditing();
+      select(null);
+    },
+    style: applyStyle,
+    matchSimilar,
+    setFont,
+    removeShadows: removeShadow,
+    resetStyles,
+    setText,
+    setLink,
+    removeLink,
+    setAlt,
+    replaceImage: () => openUpload("img"),
+    replaceBackground: () => openUpload("bg"),
+    removeBackground: () => applyStyle({ "background-image": "none" }, "bg-image"),
+    section: sectionAction,
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
@@ -898,10 +1041,10 @@ export function VisualEditor({
         onApply={(id) => void onApplyTheme(id)}
       />
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_352px]">
         <div className="overflow-auto rounded-2xl border border-border bg-muted/30">
           {loading ? (
-            <div className="grid h-[72vh] place-items-center text-sm text-muted-foreground">
+            <div className="grid h-[78vh] min-h-[520px] place-items-center text-sm text-muted-foreground">
               Loading editor…
             </div>
           ) : html ? (
@@ -914,300 +1057,28 @@ export function VisualEditor({
                 title={`Edit ${route}`}
                 srcDoc={html}
                 onLoad={onFrameLoad}
-                className="block h-[72vh] w-full bg-background"
+                className="block h-[78vh] min-h-[520px] w-full bg-background"
                 sandbox="allow-same-origin"
               />
             </div>
           ) : (
-            <div className="grid h-[72vh] place-items-center text-sm text-muted-foreground">
+            <div className="grid h-[78vh] min-h-[520px] place-items-center text-sm text-muted-foreground">
               No page HTML available.
             </div>
           )}
         </div>
 
-        <aside
-          className="space-y-4 rounded-2xl border border-border p-4 text-sm"
-          aria-label="Element inspector"
-        >
-          {!sel ? (
-            <div className="space-y-3 text-muted-foreground">
-              <p className="flex items-center gap-2 font-medium text-foreground">
-                <MousePointerClick size={16} />
-                Select an element
-              </p>
-              <ul className="list-disc space-y-1.5 pl-5 text-xs leading-relaxed">
-                <li>Click any element to select it.</li>
-                <li>
-                  Double-click text (or press Enter) to edit it. Enter finishes, Shift+Enter adds a
-                  line.
-                </li>
-                <li>Delete removes the element with its shadow, background and empty wrappers.</li>
-                <li>Ctrl+Z / Ctrl+Shift+Z undo and redo. Ctrl+D duplicates.</li>
-              </ul>
-              {dirty && <p className="text-xs text-foreground">You have unsaved changes.</p>}
-            </div>
-          ) : (
-            <>
-              <div>
-                <p className="eyebrow">{editingText ? "Editing text" : "Selected"}</p>
-                <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
-                  {sel.path.join(" › ")}
-                </p>
-                {sel.label && <p className="mt-1 line-clamp-2 text-xs">“{sel.label}”</p>}
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  className={TOOL}
-                  onClick={() => selectedRef.current && startEditing(selectedRef.current)}
-                  disabled={!sel.canEditText || editingText}
-                  title="Edit text (Enter)"
-                >
-                  <Type size={14} /> Text
-                </button>
-                <button
-                  type="button"
-                  className={TOOL}
-                  onClick={selectParent}
-                  disabled={!sel.hasParent}
-                  title="Select parent"
-                >
-                  <CornerLeftUp size={14} /> Parent
-                </button>
-                <button
-                  type="button"
-                  className={TOOL}
-                  onClick={duplicateSelected}
-                  title="Duplicate (Ctrl+D)"
-                >
-                  <Copy size={14} /> Copy
-                </button>
-                <button
-                  type="button"
-                  className={TOOL}
-                  onClick={() => moveSelected("up")}
-                  disabled={!sel.canMoveUp}
-                  title="Move up"
-                >
-                  <ArrowUp size={14} /> Up
-                </button>
-                <button
-                  type="button"
-                  className={TOOL}
-                  onClick={() => moveSelected("down")}
-                  disabled={!sel.canMoveDown}
-                  title="Move down"
-                >
-                  <ArrowDown size={14} /> Down
-                </button>
-                <button
-                  type="button"
-                  className={`${TOOL} text-red-500`}
-                  onClick={deleteSelected}
-                  title="Delete (Del)"
-                >
-                  <Trash2 size={14} /> Delete
-                </button>
-              </div>
-
-              <section className="space-y-2">
-                <p className="text-xs font-medium">Style</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="flex items-center justify-between gap-2 rounded-xl border border-border px-2.5 py-1.5 text-xs">
-                    Text
-                    <input
-                      type="color"
-                      value={sel.color}
-                      onChange={(e) => applyStyle({ color: e.target.value }, "color")}
-                      className="h-6 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
-                      aria-label="Text color"
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-2 rounded-xl border border-border px-2.5 py-1.5 text-xs">
-                    Fill
-                    <input
-                      type="color"
-                      value={sel.backgroundTransparent ? "#ffffff" : sel.backgroundColor}
-                      onChange={(e) =>
-                        applyStyle({ "background-color": e.target.value }, "background")
-                      }
-                      className="h-6 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
-                      aria-label="Background color"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="flex flex-1 items-center gap-2 rounded-xl border border-border px-2.5 py-1.5 text-xs">
-                    Size
-                    <input
-                      type="number"
-                      min={6}
-                      max={400}
-                      value={fontSizeDraft}
-                      onChange={(e) => setFontSizeDraft(e.target.value)}
-                      onBlur={applyFontSize}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") applyFontSize();
-                      }}
-                      className="w-full bg-transparent tabular-nums outline-none"
-                      aria-label="Font size in pixels"
-                    />
-                    px
-                  </label>
-                  <button
-                    type="button"
-                    className={`${TOOL} ${sel.bold ? TOOL_ACTIVE : ""}`}
-                    onClick={() => applyStyle({ "font-weight": sel.bold ? "400" : "700" }, "bold")}
-                    aria-pressed={sel.bold}
-                    title="Bold"
-                  >
-                    <Bold size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className={`${TOOL} ${sel.italic ? TOOL_ACTIVE : ""}`}
-                    onClick={() =>
-                      applyStyle({ "font-style": sel.italic ? "normal" : "italic" }, "italic")
-                    }
-                    aria-pressed={sel.italic}
-                    title="Italic"
-                  >
-                    <Italic size={14} />
-                  </button>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {(
-                    [
-                      ["left", TextAlignStart],
-                      ["center", TextAlignCenter],
-                      ["right", TextAlignEnd],
-                    ] as const
-                  ).map(([align, Icon]) => {
-                    const active =
-                      sel.textAlign === align ||
-                      (align === "left" && sel.textAlign === "start") ||
-                      (align === "right" && sel.textAlign === "end");
-                    return (
-                      <button
-                        key={align}
-                        type="button"
-                        className={`${TOOL} ${active ? TOOL_ACTIVE : ""}`}
-                        onClick={() => applyStyle({ "text-align": align }, "align")}
-                        aria-pressed={active}
-                        title={`Align ${align}`}
-                      >
-                        <Icon size={14} />
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    className={TOOL}
-                    onClick={removeShadow}
-                    disabled={!sel.hasShadow}
-                    title="Remove text and box shadows"
-                  >
-                    <Eraser size={14} /> Shadow
-                  </button>
-                  <button
-                    type="button"
-                    className={TOOL}
-                    onClick={() =>
-                      applyStyle(
-                        { "background-color": "transparent", "background-image": "none" },
-                        "clear-bg",
-                      )
-                    }
-                    disabled={sel.backgroundTransparent && !sel.hasBackgroundImage}
-                    title="Clear background"
-                  >
-                    <PaintBucket size={14} /> Clear
-                  </button>
-                  <button
-                    type="button"
-                    className={TOOL}
-                    onClick={resetStyles}
-                    disabled={!sel.hasInlineEdits}
-                    title="Undo all style edits on this element"
-                  >
-                    <RotateCcw size={14} /> Reset
-                  </button>
-                </div>
-              </section>
-
-              <section className="space-y-2">
-                <p className="text-xs font-medium">Link</p>
-                <input
-                  type="text"
-                  value={hrefDraft}
-                  onChange={(e) => setHrefDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") applyHref();
-                  }}
-                  placeholder="/pricing or https://…"
-                  className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs"
-                  aria-label="Link address"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <button type="button" className={TOOL} onClick={applyHref}>
-                    <Link2 size={14} /> {sel.href !== null ? "Update" : "Add link"}
-                  </button>
-                  <button
-                    type="button"
-                    className={TOOL}
-                    onClick={removeLink}
-                    disabled={sel.href === null}
-                  >
-                    <Unlink size={14} /> Remove
-                  </button>
-                </div>
-              </section>
-
-              {(sel.isImage || sel.hasBackgroundImage || !sel.canEditText) && (
-                <section className="space-y-2">
-                  <p className="text-xs font-medium">Image</p>
-                  {sel.isImage && (
-                    <>
-                      <button
-                        type="button"
-                        className={`${TOOL} w-full`}
-                        onClick={() => openUpload("img")}
-                        disabled={busy === "asset"}
-                      >
-                        <ImagePlus size={14} /> {busy === "asset" ? "Uploading…" : "Replace image"}
-                      </button>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={altDraft}
-                          onChange={(e) => setAltDraft(e.target.value)}
-                          onBlur={applyAlt}
-                          placeholder="Alt text"
-                          className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs"
-                          aria-label="Image alt text"
-                        />
-                      </div>
-                    </>
-                  )}
-                  {!sel.isImage && !sel.isSvg && (
-                    <button
-                      type="button"
-                      className={`${TOOL} w-full`}
-                      onClick={() => openUpload("bg")}
-                      disabled={busy === "asset"}
-                    >
-                      <ImagePlus size={14} />{" "}
-                      {sel.hasBackgroundImage ? "Replace background" : "Set background image"}
-                    </button>
-                  )}
-                </section>
-              )}
-            </>
-          )}
-        </aside>
+        <EditorInspector
+          sel={sel}
+          selKey={selKey}
+          selectedEl={selectedRef.current}
+          editingText={editingText}
+          dirty={dirty}
+          uploading={busy === "asset"}
+          palette={palette}
+          sections={sections}
+          actions={inspectorActions}
+        />
       </div>
     </div>
   );

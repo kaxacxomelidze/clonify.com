@@ -57,15 +57,45 @@ export function isThinSpaShell(html: string): boolean {
   if (text.length < 40 && raw.length < 12_000) return true;
 
   // Soft framework error pages sometimes sneak into captures.
-  if (
-    /Application Error/i.test(text)
-    && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(text)
-    && text.length < 800
-  ) {
-    return true;
-  }
+  if (isFrameworkErrorText(text)) return true;
 
   return false;
+}
+
+/**
+ * Next.js / Remix / Shopify error boundaries that replace the page when client JS
+ * crashes, e.g. Next's "Application error: a client-side exception has occurred".
+ */
+export function isFrameworkErrorText(text: string): boolean {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (t.length >= 800) return false;
+  if (/Application error: a (client|server)-side exception has occurred/i.test(t)) return true;
+  return /Application Error/i.test(t)
+    && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(t);
+}
+
+export function isFrameworkErrorHtml(html: string): boolean {
+  const raw = String(html || '');
+  if (/<html[^>]*\bid=["']__next_error__["']/i.test(raw)) return true;
+  const text = raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  return isFrameworkErrorText(text);
+}
+
+/**
+ * Same check inside the browser via `page.evaluate(fn)` — must stay self-contained.
+ */
+export function isFrameworkErrorPageInDocument(): boolean {
+  if (document.documentElement?.id === '__next_error__') return true;
+  if (document.getElementById('__next_error__')) return true;
+  const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+  if (text.length >= 800) return false;
+  if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
+  if (/Application error: a (client|server)-side exception has occurred/i.test(text)) return true;
+  return /Application Error/i.test(text)
+    && /page could not be displayed|Something has gone wrong/i.test(text);
 }
 
 /**
