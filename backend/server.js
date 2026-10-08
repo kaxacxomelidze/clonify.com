@@ -3031,7 +3031,14 @@ function shareWrapperHtml(shareId, route = '/', targetOrigin = '') {
 
 async function shareWrapperHtmlForShare(share, shareId, route = '/') {
   const outDir = resolveCloneOutDir(share.out_dir) || share.out_dir;
-  const targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
+  let targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
+  // Sites that forbid framing would show "refused to connect" to whoever opens the
+  // link; show them the saved clone instead.
+  if (targetOrigin) {
+    let liveUrl = '';
+    try { liveUrl = new URL(route || '/', `${targetOrigin.replace(/\/$/, '')}/`).href; } catch {}
+    if (!liveUrl || !await liveOriginFrameable(liveUrl, frontendPublicUrl())) targetOrigin = '';
+  }
   return shareWrapperHtml(shareId, route, targetOrigin);
 }
 
