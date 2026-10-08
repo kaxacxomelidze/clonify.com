@@ -537,18 +537,6 @@ export function serverHtmlHasContent(serverHtml: string): boolean {
   return text.length >= 200;
 }
 
-/**
- * Drop the Next.js runtime from server-rendered HTML whose app crashes on hydration:
- * left in, the clone preview re-runs it and swaps the page for the same error screen.
- */
-export function stripNextRuntimeScripts(html: string): string {
-  return html
-    .replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*\/_next\/[^"']*["'][^>]*>\s*<\/script>/gi, '')
-    .replace(/<script\b[^>]*\bid\s*=\s*["']__NEXT_DATA__["'][^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<script\b(?![^>]*\bsrc\s*=)[^>]*>(?:(?!<\/script>)[\s\S])*?(?:self\.__next_f|__next_s|__NEXT_)(?:(?!<\/script>)[\s\S])*<\/script>/gi, '')
-    .replace(/<link\b(?=[^>]*\brel\s*=\s*["'](?:preload|modulepreload)["'])(?=[^>]*\/_next\/[^"']*\.js)[^>]*>/gi, '');
-}
-
 export function findScriptBuiltContainers(serverHtml: string): string[] {
   if (!serverHtml) return [];
   let scripts = '';
@@ -2257,7 +2245,7 @@ export async function capturePage(
         // The app crashes while hydrating in the capture browser; the server-rendered
         // HTML still holds the real page, so keep that instead of the error screen.
         logger.warn(`  [APP ERROR] ${pageUrl} still crashing after reload; using the server-rendered HTML`);
-        finalHtml = stripNextRuntimeScripts(serverHtml);
+        finalHtml = serverHtml;
       } else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
     }
   } catch { /* best-effort */ }
