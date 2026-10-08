@@ -419,8 +419,8 @@ function ClonePage() {
         </fieldset>
         {useMax && (
           <p id="clone-max-hint" className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Max mode clones all discoverable same-origin pages (including locales
-            from the sitemap). External apps and original site JS are not cloned.
+            Max mode clones all discoverable same-origin pages (including locales from the sitemap).
+            External apps and original site JS are not cloned.
           </p>
         )}
         {error && (
@@ -573,8 +573,8 @@ function ClonePage() {
             </Link>
           </div>
           <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-            Preview embeds the live website when it allows embedding; otherwise it shows your
-            offline clone. Use the visual editor to edit the clone.
+            Preview shows the live website when it allows embedding, otherwise your saved clone. Use
+            the visual editor to change the clone.
           </p>
           <iframe
             title="Clone preview"

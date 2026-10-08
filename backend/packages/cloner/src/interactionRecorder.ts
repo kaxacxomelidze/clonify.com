@@ -399,7 +399,7 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
     // Cross-origin CTAs are also aborted at the Playwright route layer so the
     // capture tab never leaves (leaving often crashes Chromium mid-clone).
     st.pendingNav = null;
-    const rememberNav = (raw) => {
+    const rememberNav = (raw: unknown) => {
       if (raw == null || raw === '') return;
       try {
         const href = new URL(String(raw), document.baseURI).href;
@@ -408,7 +408,7 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
     };
     const nav = w.navigation;
     if (nav && typeof nav.addEventListener === 'function') {
-      w.__clonyfyIxNav = (e) => {
+      w.__clonyfyIxNav = (e: any) => {
         if (!st.guard) return;
         try {
           if (e && e.destination && e.destination.url) rememberNav(e.destination.url);
@@ -436,7 +436,7 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
       if (st.guard && url != null && url !== '') return;
       return w.__clonyfyIxReplace(state, title, url);
     };
-    w.__clonyfyIxSubmit = (e) => e.preventDefault();
+    w.__clonyfyIxSubmit = (e: any) => e.preventDefault();
     document.addEventListener('submit', w.__clonyfyIxSubmit, true);
     st.takePendingNav = () => {
       const v = st.pendingNav;
@@ -588,7 +588,7 @@ export async function recordNavInteractions(page: Page, pageUrl: string): Promis
       };
       // Abort main-frame navigations away from this page so Login/Sign-up CTAs
       // cannot yank Chromium onto app.* (that was crashing mid-clone).
-      const blockNavRoute = async (route: import('playwright').Route) => {
+      const blockNavRoute = async (route: import('playwright-core').Route) => {
         const req = route.request();
         if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
           const dest = req.url();
