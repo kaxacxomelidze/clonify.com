@@ -292,7 +292,8 @@ export function CaptureDetails({
             </DialogDescription>
             <CaptureStatus status={job.status} />
             <p className="mt-3 text-xs text-muted-foreground">
-              Preview embeds the live website. Use Edit pages for your offline clone.
+              Preview shows the live website when it allows embedding, otherwise your saved clone.
+              Use Edit pages to change the clone.
             </p>
             <dl className="capture-detail-grid">
               {[
