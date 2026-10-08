@@ -21,6 +21,7 @@ import {
 } from './serverlessBudget.js';
 import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, PageRecord } from './types.js';
 import { isThinSpaShell } from './captureQuality.js';
+import { BotProtectionError, noteBotProtection } from './botProtection.js';
 
 export { isLocaleOnlyPath, isLocalePrefixedPath, shouldSkipLocaleVariant } from './localePaths.js';
 export { isFastCloneProfile, isServerlessRuntime } from './serverlessBudget.js';
@@ -913,7 +914,11 @@ export async function crawl(
         // Start URL must not silently vanish — always try a static HTML salvage.
         // Full-site / Max mode salvages every failed page so coverage stays high.
         const isStartUrl = !!startNorm && clean === startNorm;
-        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
+        // Bot-protection blocks every automated client: a static fetch or another
+        // browser attempt is refused the same way, so don't waste time retrying.
+        const blocked = err instanceof BotProtectionError;
+        if (blocked) noteBotProtection(clean, (err as BotProtectionError).vendor);
+        if (!blocked && shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import {
   logger,
-  runClone
-} from "./chunk-JSDKPY44.js";
+  runClone,
+  runImport
+} from "./chunk-RO7ENUHF.js";
 
 // src/cli.ts
 import { program } from "commander";
@@ -351,6 +352,14 @@ program.command("clone <url>").description("Clone a website").option("-o, --out 
     ignoreRobots: options.ignoreRobots,
     verbose: options.verbose,
     fullSite
+  });
+});
+program.command("import <file>").description('Build a clone from a page saved in a browser (.mhtml, .html, or .zip of "Webpage, Complete")').option("-u, --url <url>", "URL the page was saved from (read from the file when omitted)").option("-o, --out <dir>", "Output directory", "./output/site").option("-v, --verbose", "Print DEBUG lines to console", false).action(async (file, options) => {
+  await runImport({
+    file: resolve2(file),
+    out: resolve2(options.out),
+    verbose: options.verbose,
+    ...options.url ? { url: options.url } : {}
   });
 });
 program.command("serve").description("Start the web UI for cloning and editing sites").option("-p, --port <n>", "Port to listen on", "3333").option("-o, --out <dir>", "Base output directory for cloned sites", "./output").action(async (options) => {

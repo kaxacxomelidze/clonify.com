@@ -187,8 +187,8 @@ var require_eventemitter3 = __commonJS({
 });
 
 // src/runClone.ts
-import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync3, existsSync as existsSync5 } from "fs";
-import { resolve as resolve2, join as join6 } from "path";
+import { mkdirSync as mkdirSync7, writeFileSync as writeFileSync6, readFileSync as readFileSync4, existsSync as existsSync5 } from "fs";
+import { resolve as resolve3, join as join7 } from "path";
 
 // src/robots.ts
 import { createRequire } from "module";
@@ -333,7 +333,7 @@ function pTimeout(promise, options) {
   } = options;
   let timer;
   let abortHandler;
-  const wrappedPromise = new Promise((resolve3, reject) => {
+  const wrappedPromise = new Promise((resolve4, reject) => {
     if (typeof milliseconds !== "number" || Math.sign(milliseconds) !== 1) {
       throw new TypeError(`Expected \`milliseconds\` to be a positive number, got \`${milliseconds}\``);
     }
@@ -348,14 +348,14 @@ function pTimeout(promise, options) {
       signal.addEventListener("abort", abortHandler, { once: true });
     }
     if (milliseconds === Number.POSITIVE_INFINITY) {
-      promise.then(resolve3, reject);
+      promise.then(resolve4, reject);
       return;
     }
     const timeoutError = new TimeoutError();
     timer = customTimers.setTimeout.call(void 0, () => {
       if (fallback) {
         try {
-          resolve3(fallback());
+          resolve4(fallback());
         } catch (error) {
           reject(error);
         }
@@ -365,7 +365,7 @@ function pTimeout(promise, options) {
         promise.cancel();
       }
       if (message === false) {
-        resolve3();
+        resolve4();
       } else if (message instanceof Error) {
         reject(message);
       } else {
@@ -375,7 +375,7 @@ function pTimeout(promise, options) {
     }, milliseconds);
     (async () => {
       try {
-        resolve3(await promise);
+        resolve4(await promise);
       } catch (error) {
         reject(error);
       }
@@ -654,7 +654,7 @@ var PQueue = class extends import_index.default {
       throwOnTimeout: this.#throwOnTimeout,
       ...options
     };
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       this.#queue.enqueue(async () => {
         this.#pending++;
         try {
@@ -668,11 +668,11 @@ var PQueue = class extends import_index.default {
             operation = Promise.race([operation, this.#throwOnAbort(options.signal)]);
           }
           const result = await operation;
-          resolve3(result);
+          resolve4(result);
           this.emit("completed", result);
         } catch (error) {
           if (error instanceof TimeoutError && !options.throwOnTimeout) {
-            resolve3();
+            resolve4();
             return;
           }
           reject(error);
@@ -747,13 +747,13 @@ var PQueue = class extends import_index.default {
     await this.#onEvent("idle");
   }
   async #onEvent(event, filter) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const listener = () => {
         if (filter && !filter()) {
           return;
         }
         this.off(event, listener);
-        resolve3();
+        resolve4();
       };
       this.on(event, listener);
     });
@@ -2231,6 +2231,57 @@ async function captureCanvasFrames(page, id, opts) {
   const elapsed = Date.now() - started - 300;
   const frameMs = frames.length > 1 ? Math.max(40, Math.min(500, Math.round(elapsed / Math.max(1, frames.length)))) : 0;
   return { frames, frameMs };
+}
+
+// src/botProtection.ts
+var BotProtectionError = class extends Error {
+  vendor;
+  constructor(vendor, status) {
+    super(`Blocked by ${vendor} bot protection (HTTP ${status})`);
+    this.name = "BotProtectionError";
+    this.vendor = vendor;
+  }
+};
+var BLOCK_STATUSES = /* @__PURE__ */ new Set([401, 403, 429, 503]);
+function detectBotProtection(status, headers, body) {
+  const h = (name) => String(headers[name] ?? headers[name.toLowerCase()] ?? "").toLowerCase();
+  const html = String(body || "").slice(0, 6e4);
+  if (h("cf-mitigated") === "challenge") return "Cloudflare";
+  if (!BLOCK_STATUSES.has(status)) return null;
+  if (h("server").includes("cloudflare") && (/cdn-cgi\/challenge-platform|_cf_chl_opt|cf-browser-verification|Just a moment\.\.\./i.test(html) || h("cf-ray"))) {
+    return "Cloudflare";
+  }
+  if (/captcha-delivery\.com|datadome/i.test(html) || h("x-datadome") || h("server").includes("datadome")) return "DataDome";
+  if (/px-captcha|perimeterx|_pxhd/i.test(html)) return "PerimeterX (HUMAN)";
+  if (/_Incapsula_Resource|incapsula|imperva/i.test(html) || h("x-iinfo")) return "Imperva";
+  if (h("server").includes("akamaighost") && /Access Denied/i.test(html)) return "Akamai";
+  if (/<title>\s*(Attention Required|Access denied|Just a moment)/i.test(html)) return "bot protection";
+  return null;
+}
+var findings = /* @__PURE__ */ new Map();
+function noteBotProtection(url, vendor) {
+  try {
+    findings.set(new URL(url).origin, vendor);
+  } catch {
+  }
+}
+function takeBotProtection(url) {
+  try {
+    const origin = new URL(url).origin;
+    const vendor = findings.get(origin) ?? null;
+    findings.delete(origin);
+    return vendor;
+  } catch {
+    return null;
+  }
+}
+function botProtectionMessage(url, vendor) {
+  let host = url;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+  }
+  return `${host} is protected by ${vendor}, which blocks automated browsers \u2014 so it can't be cloned. This is the site owner's security setting, not a temporary error: retrying or changing the robots.txt option won't help. If you own this site, clone it from a staging or preview URL that isn't behind the bot check, or allow-list the cloning server in your protection settings.`;
 }
 
 // node_modules/parse5/dist/common/unicode.js
@@ -10391,7 +10442,7 @@ async function recordInPage(opts) {
     }
     return p;
   };
-  const resolve3 = (root, p) => {
+  const resolve4 = (root, p) => {
     let x = root;
     for (const i of p) {
       x = x?.children[i];
@@ -10416,7 +10467,7 @@ async function recordInPage(opts) {
   const regionMo = new MutationObserver(onRegionRecords);
   const samplePaths = (step) => {
     for (const t of pathTracks.values()) {
-      const el = resolve3(regions[t.r].el, t.path);
+      const el = resolve4(regions[t.r].el, t.path);
       if (!el) continue;
       const v = el.getAttribute(t.name);
       if (v === t.last) continue;
@@ -11500,6 +11551,10 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       } catch {
       }
       const status = mainResponse?.status();
+      if (status && mainResponse) {
+        const vendor = detectBotProtection(status, await mainResponse.allHeaders().catch(() => ({})), serverHtml);
+        if (vendor) throw new BotProtectionError(vendor, status);
+      }
       if (status && status >= 400) {
         throw new Error(`HTTP ${status}`);
       }
@@ -12017,7 +12072,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     try {
       scrollTimeline = await Promise.race([
         recordScrollTimeline(page, { fast: IS_FAST }),
-        new Promise((resolve3) => setTimeout(() => resolve3(null), IS_FAST ? 25e3 : 5e4))
+        new Promise((resolve4) => setTimeout(() => resolve4(null), IS_FAST ? 25e3 : 5e4))
       ]);
       if (scrollTimeline) {
         logger.debug(`  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s)`);
@@ -12286,15 +12341,15 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
                 video.setAttribute("playsinline", "");
                 try {
                   if (video.readyState < 2) {
-                    await new Promise((resolve3) => {
-                      const done = () => resolve3();
+                    await new Promise((resolve4) => {
+                      const done = () => resolve4();
                       video.addEventListener("loadeddata", done, { once: true });
                       setTimeout(done, 1200);
                     });
                   }
                   video.currentTime = Math.min(0.35, Number.isFinite(video.duration) ? video.duration * 0.08 : 0.35);
-                  await new Promise((resolve3) => {
-                    const done = () => resolve3();
+                  await new Promise((resolve4) => {
+                    const done = () => resolve4();
                     video.addEventListener("seeked", done, { once: true });
                     setTimeout(done, 800);
                   });
@@ -12660,7 +12715,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     });
     const interactionsScript = await Promise.race([
       recordNavInteractions(page, pageUrl),
-      new Promise((resolve3) => setTimeout(() => resolve3(""), IS_FAST ? 12e3 : 22e3))
+      new Promise((resolve4) => setTimeout(() => resolve4(""), IS_FAST ? 12e3 : 22e3))
     ]).catch(() => "");
     if (!await restoreRequestedUrl(page, pageUrl, "after nav interaction recording")) {
       throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
@@ -13842,7 +13897,7 @@ async function fetchStaticPage(url, origin, assetsDir, options = {}) {
     } catch (err) {
       lastErr = err;
       if (attempt < (IS_SERVERLESS ? 3 : 1)) {
-        await new Promise((resolve3) => setTimeout(resolve3, 350 * attempt));
+        await new Promise((resolve4) => setTimeout(resolve4, 350 * attempt));
       }
     }
   }
@@ -14094,7 +14149,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
           if (timedOut) {
             await Promise.race([
               capturePromise.catch(() => void 0),
-              new Promise((resolve3) => setTimeout(resolve3, 2e3))
+              new Promise((resolve4) => setTimeout(resolve4, 2e3))
             ]);
           }
         }
@@ -14119,7 +14174,9 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
         }
         logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
         const isStartUrl = !!startNorm && clean === startNorm;
-        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
+        const blocked = err instanceof BotProtectionError;
+        if (blocked) noteBotProtection(clean, err.vendor);
+        if (!blocked && shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -14894,6 +14951,263 @@ Next steps:`);
   console.log(`  npm run build && npm start`);
 }
 
+// src/importPage.ts
+import { createHash as createHash6 } from "crypto";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync5 } from "fs";
+import { extname as extname4, join as join6, posix, resolve as resolve2 } from "path";
+import { inflateRawSync } from "zlib";
+var MAX_ZIP_ENTRIES = 5e3;
+var MAX_UNPACKED_BYTES = 400 * 1024 * 1024;
+function decodeQuotedPrintable(body) {
+  const soft = body.replace(/=\r?\n/g, "");
+  const bytes = [];
+  for (let i = 0; i < soft.length; i++) {
+    const ch = soft[i];
+    if (ch === "=" && /^[0-9A-Fa-f]{2}$/.test(soft.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(soft.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(soft.charCodeAt(i) & 255);
+    }
+  }
+  return Buffer.from(bytes);
+}
+function parseHeaders(block) {
+  const headers = {};
+  for (const line of block.replace(/\r?\n[ \t]+/g, " ").split(/\r?\n/)) {
+    const idx = line.indexOf(":");
+    if (idx > 0) headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+  }
+  return headers;
+}
+function parseMhtml(raw) {
+  const text = raw.toString("latin1");
+  const headerEnd = text.search(/\r?\n\r?\n/);
+  const top = parseHeaders(text.slice(0, headerEnd));
+  const boundary = (top["content-type"] || "").match(/boundary="?([^";]+)"?/i)?.[1];
+  if (!boundary) throw new Error("This .mhtml file has no MIME boundary \u2014 it may be damaged. Save the page again.");
+  const resources = /* @__PURE__ */ new Map();
+  let html = "";
+  let sourceUrl = top["snapshot-content-location"] || null;
+  for (const part of text.split(`--${boundary}`).slice(1)) {
+    if (part.startsWith("--")) break;
+    const sep = part.search(/\r?\n\r?\n/);
+    if (sep < 0) continue;
+    const headers = parseHeaders(part.slice(0, sep).replace(/^\r?\n/, ""));
+    const body = part.slice(sep).replace(/^\r?\n\r?\n/, "").replace(/\r?\n$/, "");
+    const encoding = (headers["content-transfer-encoding"] || "").toLowerCase();
+    const data = encoding === "base64" ? Buffer.from(body.replace(/\s+/g, ""), "base64") : encoding === "quoted-printable" ? decodeQuotedPrintable(body) : Buffer.from(body, "latin1");
+    const contentType = (headers["content-type"] || "application/octet-stream").split(";")[0].trim().toLowerCase();
+    const location = headers["content-location"] || "";
+    const cid = (headers["content-id"] || "").replace(/^<|>$/g, "");
+    if (!html && contentType === "text/html") {
+      html = data.toString("utf8");
+      if (!sourceUrl && /^https?:/i.test(location)) sourceUrl = location;
+      continue;
+    }
+    if (location) resources.set(location, { data, contentType });
+    if (cid) resources.set(`cid:${cid}`, { data, contentType });
+  }
+  if (!html) throw new Error("No HTML page found inside this .mhtml file.");
+  return { html, sourceUrl, resources, format: "mhtml" };
+}
+function readZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 7e4); i--) {
+    if (buf.readUInt32LE(i) === 101010256) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error("This .zip file is damaged or not a ZIP archive.");
+  const count = buf.readUInt16LE(eocd + 10);
+  let offset = buf.readUInt32LE(eocd + 16);
+  if (count > MAX_ZIP_ENTRIES) throw new Error(`The ZIP has too many files (${count}).`);
+  const files = /* @__PURE__ */ new Map();
+  let unpacked = 0;
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(offset) !== 33639248) throw new Error("The ZIP central directory is damaged.");
+    const method = buf.readUInt16LE(offset + 10);
+    const compSize = buf.readUInt32LE(offset + 20);
+    const size = buf.readUInt32LE(offset + 24);
+    const nameLen = buf.readUInt16LE(offset + 28);
+    const extraLen = buf.readUInt16LE(offset + 30);
+    const commentLen = buf.readUInt16LE(offset + 32);
+    const localOffset = buf.readUInt32LE(offset + 42);
+    const name = buf.slice(offset + 46, offset + 46 + nameLen).toString("utf8").replace(/\\/g, "/");
+    offset += 46 + nameLen + extraLen + commentLen;
+    if (name.endsWith("/")) continue;
+    unpacked += size;
+    if (unpacked > MAX_UNPACKED_BYTES) throw new Error("The ZIP unpacks to more than 400 MB \u2014 save just the one page.");
+    const localNameLen = buf.readUInt16LE(localOffset + 26);
+    const localExtraLen = buf.readUInt16LE(localOffset + 28);
+    const start = localOffset + 30 + localNameLen + localExtraLen;
+    const raw = buf.slice(start, start + compSize);
+    let data;
+    if (method === 0) data = raw;
+    else if (method === 8) data = inflateRawSync(raw, { maxOutputLength: Math.max(size, 1) + 1024 });
+    else continue;
+    files.set(posix.normalize(name).replace(/^(\.\.\/)+/, ""), data);
+  }
+  return files;
+}
+var MIME_BY_EXT = {
+  ".css": "text/css",
+  ".js": "application/javascript",
+  ".mjs": "application/javascript",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".json": "application/json",
+  ".html": "text/html"
+};
+function parseZip(raw) {
+  const files = readZip(raw);
+  const htmlFiles = [...files.keys()].filter((p) => /\.html?$/i.test(p) && !/_files\//i.test(p));
+  if (!htmlFiles.length) throw new Error('No .html page found in the ZIP. Zip the saved .html together with its "_files" folder.');
+  htmlFiles.sort((a, b) => a.split("/").length - b.split("/").length || files.get(b).length - files.get(a).length);
+  const main = htmlFiles[0];
+  const htmlDir = posix.dirname(main) === "." ? "" : posix.dirname(main);
+  const resources = /* @__PURE__ */ new Map();
+  for (const [path, data] of files) {
+    if (path === main) continue;
+    const rel = htmlDir && path.startsWith(`${htmlDir}/`) ? path.slice(htmlDir.length + 1) : path;
+    resources.set(rel, { data, contentType: MIME_BY_EXT[extname4(path).toLowerCase()] || "application/octet-stream" });
+  }
+  const html = files.get(main).toString("utf8");
+  return { html, sourceUrl: savedFromUrl(html), resources, htmlDir, format: "zip" };
+}
+function savedFromUrl(html) {
+  const m = html.slice(0, 4e3).match(/saved from url=\(\d+\)(https?:\/\/[^\s>]+?)\s*-->/i);
+  if (m?.[1]) return m[1];
+  const canonical = html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["'](https?:\/\/[^"']+)["']/i)?.[1] ?? html.match(/<meta[^>]+property=["']og:url["'][^>]*content=["'](https?:\/\/[^"']+)["']/i)?.[1];
+  return canonical || null;
+}
+function parseSavedPage(raw, fileName) {
+  const ext = extname4(fileName).toLowerCase();
+  const head = raw.slice(0, 2048).toString("latin1");
+  if (raw.readUInt32LE(0) === 67324752 || ext === ".zip") return parseZip(raw);
+  if (ext === ".mhtml" || ext === ".mht" || /^(From:|MIME-Version:|Snapshot-Content-Location:)/im.test(head) && /multipart\/related/i.test(head)) {
+    return parseMhtml(raw);
+  }
+  const html = raw.toString("utf8");
+  if (!/<html|<body|<!doctype html/i.test(html.slice(0, 2e4))) {
+    throw new Error('That file is not a saved web page. Upload .mhtml, .html, or a .zip of a "Webpage, Complete" save.');
+  }
+  return { html, sourceUrl: savedFromUrl(html), resources: /* @__PURE__ */ new Map(), format: "html" };
+}
+function extFor(key, contentType) {
+  const fromPath = extname4(key.split(/[?#]/)[0] || "").toLowerCase();
+  if (fromPath && fromPath.length <= 6 && MIME_BY_EXT[fromPath]) return fromPath;
+  const hit = Object.entries(MIME_BY_EXT).find(([, mime3]) => mime3 === contentType);
+  return hit ? hit[0] : fromPath && fromPath.length <= 6 ? fromPath : ".bin";
+}
+function resourceUrl(key, pageUrl) {
+  if (/^(https?:|cid:)/i.test(key)) return key;
+  try {
+    return new URL(key, pageUrl).href;
+  } catch {
+    return null;
+  }
+}
+async function runImport(options) {
+  const out = resolve2(options.out);
+  initLogger(out, options.verbose);
+  try {
+    logger.info(`
+CLONYFY v0.1 \u2014 import saved page`);
+    logger.info(`File        : ${options.file}`);
+    const raw = readFileSync3(options.file);
+    const parsed = parseSavedPage(raw, options.file);
+    const pageUrl = options.url || parsed.sourceUrl;
+    if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) {
+      throw new Error("Could not tell which URL this page was saved from. Enter the page URL and import again.");
+    }
+    const target = new URL(pageUrl);
+    const targetOrigin = target.origin;
+    logger.info(`Source URL  : ${pageUrl}`);
+    logger.info(`Format      : ${parsed.format} (${parsed.resources.size} saved resource(s))`);
+    const assetsDir = join6(out, "public", "_assets");
+    const capturedPagesDir = join6(out, "captured-pages");
+    mkdirSync6(assetsDir, { recursive: true });
+    mkdirSync6(capturedPagesDir, { recursive: true });
+    const assets = [];
+    const localByUrl = /* @__PURE__ */ new Map();
+    const plan = [];
+    for (const [key, res] of parsed.resources) {
+      const url = resourceUrl(key, pageUrl);
+      if (!url || !res.data.length) continue;
+      const name = `${createHash6("sha1").update(res.data).digest("hex").slice(0, 16)}${extFor(key, res.contentType)}`;
+      const localPath = `/_assets/${name}`;
+      plan.push({ url, localPath, res });
+      for (const variant of /* @__PURE__ */ new Set([url, url.split(/[?#]/)[0], encodeURI(url), safeDecode(url)])) {
+        localByUrl.set(variant, localPath);
+        assets.push({ originalUrl: variant, localPath });
+      }
+    }
+    const written = /* @__PURE__ */ new Set();
+    for (const { url, localPath, res } of plan) {
+      if (written.has(localPath)) continue;
+      written.add(localPath);
+      let data = res.data;
+      if (res.contentType === "text/css" || localPath.endsWith(".css")) {
+        data = Buffer.from(rewriteCssUrls(res.data.toString("utf8"), localByUrl, url), "utf8");
+      }
+      writeFileSync5(join6(assetsDir, localPath.slice("/_assets/".length)), data);
+    }
+    logger.info(`Assets      : ${written.size}`);
+    const route = target.pathname || "/";
+    const html = stripSaveArtifacts(parsed.html);
+    const record = { url: pageUrl, route, html, assets, network: [] };
+    record.html = rewriteHtml(record, targetOrigin);
+    const filename = `${safeName(route)}.html`;
+    writeFileSync5(join6(capturedPagesDir, filename), record.html, "utf8");
+    writeFileSync5(join6(out, "route-map.json"), JSON.stringify({ [route]: filename }, null, 2), "utf8");
+    const manifest = {
+      targetOrigin,
+      capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      pages: [{ url: pageUrl, route, html: "", assets, network: [] }]
+    };
+    writeFileSync5(join6(out, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+    if (process.env.CLONYFY_SKIP_NEXT !== "1" && process.env.CLONYFY_SKIP_NEXT !== "true") {
+      logger.info("\nGenerating Next.js app...");
+      await generateNextApp(out, { ...manifest, pages: [record] }, []);
+    }
+    logger.info("\n=== DONE ===");
+    logger.info(`Output dir  : ${out}`);
+    logger.info(`Pages       : 1`);
+    logger.info(`Assets      : ${written.size}`);
+    logger.info(`API routes  : 0`);
+    return { outDir: out, pages: 1, assets: written.size, apiRoutes: 0 };
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : "Import failed", err);
+    throw err;
+  } finally {
+    logger.close();
+  }
+}
+function safeDecode(url) {
+  try {
+    return decodeURI(url);
+  } catch {
+    return url;
+  }
+}
+function stripSaveArtifacts(html) {
+  return html.replace(/<!--\s*saved from url=[^>]*-->/i, "").replace(/<base\b[^>]*>/gi, "");
+}
+
 // src/runClone.ts
 var IS_SERVERLESS2 = isServerlessRuntime();
 var IS_FAST_CLONE2 = isFastCloneProfile();
@@ -14901,7 +15215,7 @@ var SKIP_NEXT_GEN = IS_SERVERLESS2 || IS_FAST_CLONE2 || process.env.CLONYFY_SKIP
 async function runClone(options, events = {}) {
   const opts = {
     ...options,
-    out: resolve2(options.out)
+    out: resolve3(options.out)
   };
   setLogSink(events.onLog ? (line) => events.onLog?.(line) : null);
   initLogger(opts.out, opts.verbose);
@@ -14914,7 +15228,7 @@ CLONYFY v0.1`);
     if (opts.fullSite) {
       logger.info("Full-site mode: crawling all discoverable same-origin pages until the page budget is reached.");
     }
-    logger.info(`Log file    : ${join6(opts.out, "cloner.log")}`);
+    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
     logger.info(`Tip         : run with --verbose (or DEBUG=1) to see per-asset/rewrite detail on the console`);
     let targetOrigin;
     try {
@@ -14934,10 +15248,10 @@ CLONYFY v0.1`);
     } else {
       logger.info("robots.txt check skipped (--ignore-robots)");
     }
-    const assetsDir = join6(opts.out, "public", "_assets");
-    mkdirSync6(assetsDir, { recursive: true });
-    const capturedPagesDir = join6(opts.out, "captured-pages");
-    mkdirSync6(capturedPagesDir, { recursive: true });
+    const assetsDir = join7(opts.out, "public", "_assets");
+    mkdirSync7(assetsDir, { recursive: true });
+    const capturedPagesDir = join7(opts.out, "captured-pages");
+    mkdirSync7(capturedPagesDir, { recursive: true });
     const routeMap = {};
     const pageFilename = (route) => `${safeName(route)}.html`;
     async function notifyArtifact(event) {
@@ -14969,19 +15283,19 @@ CLONYFY v0.1`);
       logger.info(`  [${pagesCompleted}/${opts.maxPages}] \u2713 ${page.url}  (assets: ${page.assets.length}, network: ${page.network.length})`);
       try {
         const filename = pageFilename(page.route);
-        const pagePath = join6(capturedPagesDir, filename);
+        const pagePath = join7(capturedPagesDir, filename);
         if (existsSync5(pagePath)) {
-          const existing = readFileSync3(pagePath, "utf8");
+          const existing = readFileSync4(pagePath, "utf8");
           if (!shouldReplaceCapturedHtml(existing, page.html)) {
             logger.info(`  [KEEP] ${page.route} \u2014 keeping richer capture (skipped thinner overwrite)`);
             routeMap[page.route] = filename;
             return;
           }
         }
-        writeFileSync5(pagePath, page.html, "utf8");
+        writeFileSync6(pagePath, page.html, "utf8");
         routeMap[page.route] = filename;
-        const routeMapPath = join6(opts.out, "route-map.json");
-        writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
+        const routeMapPath = join7(opts.out, "route-map.json");
+        writeFileSync6(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
         await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
       } catch (writeErr) {
@@ -14992,6 +15306,10 @@ CLONYFY v0.1`);
     });
     logger.info(`
 Captured ${records.length} page(s).`);
+    const blockedBy = takeBotProtection(opts.url);
+    if (records.length === 0 && blockedBy) {
+      throw new Error(botProtectionMessage(opts.url, blockedBy));
+    }
     if (records.length === 0) {
       throw new Error(
         "Clone captured 0 pages. The site timed out, blocked the browser session, or returned no HTML. Try again \u2014 for stubborn sites, uncheck \u201CRespect robots.txt\u201D and retry once."
@@ -15026,8 +15344,8 @@ Captured ${records.length} page(s).`);
       record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
       try {
         const filename = pageFilename(record.route);
-        const pagePath = join6(capturedPagesDir, filename);
-        writeFileSync5(pagePath, record.html, "utf8");
+        const pagePath = join7(capturedPagesDir, filename);
+        writeFileSync6(pagePath, record.html, "utf8");
         routeMap[record.route] = filename;
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
       } catch (writeErr) {
@@ -15035,8 +15353,8 @@ Captured ${records.length} page(s).`);
       }
     }
     try {
-      const routeMapPath = join6(opts.out, "route-map.json");
-      writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
+      const routeMapPath = join7(opts.out, "route-map.json");
+      writeFileSync6(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
       await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
     } catch (writeErr) {
       logger.warn(`  [WRITE ERR] route-map.json: ${writeErr.message}`);
@@ -15091,9 +15409,9 @@ Total unique assets saved: ${uniqueAssets.size}`);
         failedAssetReasons: r.failedAssetReasons
       }))
     };
-    const manifestPath = join6(opts.out, "manifest.json");
+    const manifestPath = join7(opts.out, "manifest.json");
     const manifestJson = IS_SERVERLESS2 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
-    writeFileSync5(manifestPath, manifestJson, "utf8");
+    writeFileSync6(manifestPath, manifestJson, "utf8");
     await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
     if (!SKIP_NEXT_GEN) {
       logger.info("\nGenerating Next.js app...");
@@ -15107,7 +15425,7 @@ Total unique assets saved: ${uniqueAssets.size}`);
     logger.info(`Pages       : ${uniqueRecords.length}`);
     logger.info(`Assets      : ${uniqueAssets.size}`);
     logger.info(`API routes  : ${apiRoutes.length}`);
-    logger.info(`Log file    : ${join6(opts.out, "cloner.log")}`);
+    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
     logger.info(`
 Next steps:`);
     logger.info(`  cd "${opts.out}"`);
@@ -15118,7 +15436,7 @@ Next steps:`);
       pages: uniqueRecords.length,
       assets: uniqueAssets.size,
       apiRoutes: apiRoutes.length,
-      logFile: join6(opts.out, "cloner.log")
+      logFile: join7(opts.out, "cloner.log")
     };
   } catch (err) {
     logger.error(err instanceof Error ? err.message : "Clone failed", err);
@@ -15129,18 +15447,18 @@ Next steps:`);
   }
 }
 async function regenerateCloneProject(outDir) {
-  const manifestPath = join6(outDir, "manifest.json");
+  const manifestPath = join7(outDir, "manifest.json");
   if (!existsSync5(manifestPath)) {
     throw new Error("manifest.json not found \u2014 cannot regenerate export project");
   }
-  const manifest = JSON.parse(readFileSync3(manifestPath, "utf8"));
-  const routeMapPath = join6(outDir, "route-map.json");
-  const routeMap = existsSync5(routeMapPath) ? JSON.parse(readFileSync3(routeMapPath, "utf8")) : {};
-  const capturedPagesDir = join6(outDir, "captured-pages");
+  const manifest = JSON.parse(readFileSync4(manifestPath, "utf8"));
+  const routeMapPath = join7(outDir, "route-map.json");
+  const routeMap = existsSync5(routeMapPath) ? JSON.parse(readFileSync4(routeMapPath, "utf8")) : {};
+  const capturedPagesDir = join7(outDir, "captured-pages");
   const readPageHtml = (route) => {
     const filename = routeMap[route] || `${safeName(route)}.html`;
-    const htmlPath = join6(capturedPagesDir, filename);
-    return existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "";
+    const htmlPath = join7(capturedPagesDir, filename);
+    return existsSync5(htmlPath) ? readFileSync4(htmlPath, "utf8") : "";
   };
   let pages = (manifest.pages || []).map((page) => ({
     ...page,
@@ -15148,11 +15466,11 @@ async function regenerateCloneProject(outDir) {
   }));
   if (!pages.length && Object.keys(routeMap).length) {
     pages = Object.entries(routeMap).filter(([route]) => !route.endsWith(".html")).map(([route, filename]) => {
-      const htmlPath = join6(capturedPagesDir, filename);
+      const htmlPath = join7(capturedPagesDir, filename);
       return {
         url: `${manifest.targetOrigin}${route}`,
         route,
-        html: existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "",
+        html: existsSync5(htmlPath) ? readFileSync4(htmlPath, "utf8") : "",
         assets: [],
         network: [],
         failedAssets: []
@@ -15167,7 +15485,10 @@ async function regenerateCloneProject(outDir) {
 
 export {
   logger,
+  savedFromUrl,
+  parseSavedPage,
+  runImport,
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-JSDKPY44.js.map
+//# sourceMappingURL=chunk-RO7ENUHF.js.map
