@@ -5265,6 +5265,11 @@ async function handleRequest(req, res) {
         let exitCode = code;
         if (exitCode !== 0) {
           job.logs.push(`[ERROR] Clone process exited with code ${exitCode ?? 'null'}${signal ? ` signal ${signal}` : ''}`);
+          // The dashboard shows the last [ERROR] line: name the real cause when the site refused us.
+          const blockedStatus = job.logs.join('\n').match(/\[(?:SKIP|FALLBACK FAIL|RETRY FAIL)\][^\n]*HTTP (401|403|429|503)/)?.[1];
+          if (blockedStatus && !job.pages) {
+            job.logs.push(`[ERROR] ${job.hostname} blocked our servers (HTTP ${blockedStatus}) — the site uses bot protection that refuses automated browsers, so it can't be cloned right now.`);
+          }
           // Salvage partial captures instead of discarding a long crawl with zero result.
           try {
             const salvaged = await countClonePagesBestEffort(outDir);
