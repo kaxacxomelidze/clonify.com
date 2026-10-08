@@ -15,6 +15,11 @@ import { SiteNotFound } from "@/components/site/not-found";
 import { AuthProvider } from "@/hooks/use-auth";
 import { Toaster } from "@/components/ui/sonner";
 import { captureAffiliateCode } from "@/lib/affiliate";
+import {
+  installStaleBuildRecovery,
+  isStaleBuildError,
+  reloadForStaleBuild,
+} from "@/lib/stale-build";
 
 import appCss from "../styles.css?url";
 import { SmoothScroll } from "../components/smooth-scroll";
@@ -22,9 +27,12 @@ import { SmoothScroll } from "../components/smooth-scroll";
 function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   const { t: tr, localPath } = useSiteLanguage();
   const router = useRouter();
+  const staleBuild = isStaleBuildError(error);
   useEffect(() => {
+    // A new deploy removed the chunks this tab was built against: reload to get them.
+    if (staleBuild && reloadForStaleBuild()) return;
     console.error(error);
-  }, [error]);
+  }, [error, staleBuild]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -126,6 +134,7 @@ function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
   useEffect(() => {
+    installStaleBuildRecovery();
     captureAffiliateCode();
   }, []);
 
