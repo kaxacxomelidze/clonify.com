@@ -288,71 +288,11 @@ export function normalizeAllMotionStacksInDocument(): void {
     });
   }
 
-  // Kept inside this function: page.evaluate() only ships this function's own body to
-  // the browser, so helpers defined at module level are undefined there.
-  /** Undo mistaken collapses of Stripe-style dual hero titles. */
-  function restoreHeroBlendLayersInDocument(): void {
-    document
-      .querySelectorAll(
-        '.hero-section__title--foreground, .hero-section__title--background, [class*="title--foreground"], [class*="title--background"]',
-      )
-      .forEach((node) => {
-        const el = node as HTMLElement;
-        el.removeAttribute('data-clonyfy-stack-hidden');
-        el.style.removeProperty('display');
-        el.style.removeProperty('visibility');
-        el.style.removeProperty('opacity');
-        el.style.removeProperty('pointer-events');
-        if (/title--foreground/i.test(String(el.className || ''))) {
-          el.style.setProperty('position', 'relative');
-          el.style.setProperty('z-index', '3');
-        }
-      });
-  }
-
-  /**
-   * Shell screenshots bake overlapping sibling chrome (titles, buttons) into the PNG while
-   * the live DOM still paints it — double text. Hide those shells in the preview.
-   */
-  function normalizeShellCaptureOverlapsInDocument(): void {
-    document.querySelectorAll('img[data-clonyfy-shell-capture]').forEach((node) => {
-      const img = node as HTMLElement;
-      const host = img.parentElement;
-      if (!host || host.hasAttribute('data-clonyfy-stack-hidden')) return;
-      const cls = String(host.className || '');
-      const looksDecorativeBorder = /(?:^|[\s_-])(?:border|overlay|frame|mask|outline)(?:[\s_-]|$)|__border\b/i.test(cls);
-      const imgRect = img.getBoundingClientRect();
-      if (imgRect.width < 40 || imgRect.height < 40) return;
-      let overlapsChrome = looksDecorativeBorder;
-      if (!overlapsChrome) {
-        const root = host.parentElement || host;
-        for (const sib of Array.from(root.children).filter((el) => el !== host)) {
-          const text = (sib.textContent || '').replace(/\s+/g, ' ').trim();
-          const hasUi = !!sib.querySelector('h1,h2,h3,h4,h5,h6,button,a,svg,[aria-haspopup],summary');
-          if (!hasUi && !/^H[1-6]$/.test(sib.tagName) && text.length < 4) continue;
-          const r = sib.getBoundingClientRect();
-          if (r.width < 8 || r.height < 8) continue;
-          if (rectsOverlapHeavily(imgRect, r)) { overlapsChrome = true; break; }
-          const ix = Math.max(0, Math.min(imgRect.right, r.right) - Math.max(imgRect.left, r.left));
-          const iy = Math.max(0, Math.min(imgRect.bottom, r.bottom) - Math.max(imgRect.top, r.top));
-          if ((ix * iy) / Math.max(1, r.width * r.height) >= 0.35) { overlapsChrome = true; break; }
-        }
-      }
-      if (!overlapsChrome) return;
-      host.setAttribute('data-clonyfy-stack-hidden', '1');
-      host.setAttribute('aria-hidden', 'true');
-      img.setAttribute('data-clonyfy-stack-hidden', '1');
-      host.style.setProperty('display', 'none', 'important');
-      host.style.setProperty('visibility', 'hidden', 'important');
-      host.style.setProperty('opacity', '0', 'important');
-      img.style.setProperty('display', 'none', 'important');
-    });
-  }
-
   normalizeCarouselsInDocument();
   normalizeStackedTextRotatorsInDocument();
-  normalizeShellCaptureOverlapsInDocument();
-  restoreHeroBlendLayersInDocument();
+  // Shell-overlap hiding and hero blend-layer restore are not run at capture time: they
+  // were never defined in the browser here, and turning them on changed every stored
+  // clone. The preview applies them on view (backend/lib/carousel-fix.js).
 }
 
 export function isInsideCarousel(el: Element | null): boolean {
