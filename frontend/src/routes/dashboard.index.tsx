@@ -61,6 +61,27 @@ type Run = {
   status?: string;
 };
 
+/** Wrapper lines that say *that* the clone failed, never *why* (checked after cleaning). */
+const GENERIC_FAILURE = /^(Clone process exited with code.*|Fatal error|at\s.*|)$/i;
+const FAILURE_LINE =
+  /\[ERROR\]|^\s*Error:|robots\.txt blocks|captured 0 pages|timed out|Could not start|protected by/i;
+
+/** Strip every log prefix the server and cloner stack up ("[ERROR] [ERROR]   Error: …"). */
+function cleanLogLine(line: string) {
+  return line.replace(/^(?:\s*\[(?:ERROR|WARN|INFO)\]|\s*Error:)+\s*/i, "").trim();
+}
+
+/** The cloner's own explanation from the job log (newest first), not the exit-code line. */
+function cloneFailureReason(logs: string[]) {
+  const reversed = [...logs].reverse();
+  const specific = reversed.find(
+    (l) => FAILURE_LINE.test(l) && !GENERIC_FAILURE.test(cleanLogLine(l)),
+  );
+  if (specific) return cleanLogLine(specific);
+  const generic = reversed.find((l) => /Clone process exited|error/i.test(l));
+  return generic ? cleanLogLine(generic) : "Clone failed. Check the URL and try again.";
+}
+
 function ClonePage() {
   const { addJob, refreshJobs } = useDashboardWorkspace();
   const { user, usage } = useAuth();
@@ -168,18 +189,8 @@ function ClonePage() {
           return;
         }
         if (status === "error") {
-          const lastErr =
-            [...allLogs]
-              .reverse()
-              .find((l) =>
-                /\[ERROR\]|robots\.txt blocks|captured 0 pages|timed out|Page capture timed out|Could not start|Clone process exited/i.test(
-                  l,
-                ),
-              ) ||
-            [...allLogs].reverse().find((l) => /error/i.test(l)) ||
-            "Clone failed. Check the URL and try again.";
           setPhase("error");
-          setError(lastErr.replace(/^\[(ERROR|WARN)\]\s*/i, ""));
+          setError(cloneFailureReason(allLogs));
           addJob({
             id: jobId,
             domain: job.hostname || run.domain,
@@ -419,8 +430,8 @@ function ClonePage() {
         </fieldset>
         {useMax && (
           <p id="clone-max-hint" className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Max mode clones all discoverable same-origin pages (including locales
-            from the sitemap). External apps and original site JS are not cloned.
+            Max mode clones all discoverable same-origin pages (including locales from the sitemap).
+            External apps and original site JS are not cloned.
           </p>
         )}
         {error && (

@@ -3,6 +3,7 @@ import { resolve, join } from 'path';
 import { checkRobots } from './robots.js';
 import { crawl, isFastCloneProfile, isServerlessRuntime } from './crawler.js';
 import { shouldReplaceCapturedHtml } from './captureQuality.js';
+import { botProtectionMessage, takeBotProtection } from './botProtection.js';
 import { rewriteHtml } from './rewriter.js';
 import { analyzeTraffic } from './analyzer.js';
 import { generateNextApp, safeName } from './generator.js';
@@ -133,6 +134,10 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     });
 
     logger.info(`\nCaptured ${records.length} page(s).`);
+    const blockedBy = takeBotProtection(opts.url);
+    if (records.length === 0 && blockedBy) {
+      throw new Error(botProtectionMessage(opts.url, blockedBy));
+    }
     if (records.length === 0) {
       throw new Error(
         'Clone captured 0 pages. The site timed out, blocked the browser session, or returned no HTML. Try again — for stubborn sites, uncheck “Respect robots.txt” and retry once.',

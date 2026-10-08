@@ -23,6 +23,7 @@ import {
 } from './carouselFix.js';
 import { injectInteractionsScript, recordNavInteractions } from './interactionRecorder.js';
 import { captureCanvasFrames } from './canvasFrames.js';
+import { BotProtectionError, detectBotProtection } from './botProtection.js';
 import { applyDeferredDomEdits, type DeferredDomEdits } from './deferredDom.js';
 import { injectScrollTimeline, recordScrollTimeline, type ScrollTimelineData } from './scrollTimeline.js';
 import {
@@ -1015,6 +1016,10 @@ export async function capturePage(
     const mainResponse = await page.goto(pageUrl, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT });
     try { serverHtml = (await mainResponse?.text()) || ''; } catch { /* body unavailable */ }
     const status = mainResponse?.status();
+    if (status && mainResponse) {
+      const vendor = detectBotProtection(status, await mainResponse.allHeaders().catch(() => ({})), serverHtml);
+      if (vendor) throw new BotProtectionError(vendor, status);
+    }
     if (status && status >= 400) {
       throw new Error(`HTTP ${status}`);
     }
