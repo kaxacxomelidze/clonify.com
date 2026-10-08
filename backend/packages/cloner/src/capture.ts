@@ -22,7 +22,12 @@ import {
   normalizeAllMotionStacksInDocument,
 } from './carouselFix.js';
 import { injectInteractionsScript, recordNavInteractions } from './interactionRecorder.js';
+import { captureCanvasFrames } from './canvasFrames.js';
+import { applyDeferredDomEdits, type DeferredDomEdits } from './deferredDom.js';
+import { injectScrollTimeline, recordScrollTimeline, type ScrollTimelineData } from './scrollTimeline.js';
 import {
+  isFrameworkErrorHtml,
+  isFrameworkErrorPageInDocument,
   isThinSpaShell,
   pathnameOfUrl,
   pathnamesMatch,
@@ -1571,61 +1576,103 @@ export async function capturePage(
     }, undefined, { timeout: deepMedia ? (IS_FAST ? 8_000 : 12_000) : (IS_FAST ? 4_000 : 10_000) });
   } catch { /* partial load is still better than an empty snapshot */ }
 
-  // Rasterize large canvas/WebGL visuals into <img> so static HTML keeps them
-  // (Save As cannot run WebGL after JS is neutralized).
+  // Record scroll-linked animation (pinned stories, parallax, progress CSS vars,
+  // reveal-on-scroll classes) before anything below freezes the page's state.
+  let scrollTimeline: ScrollTimelineData | null = null;
+  try {
+    scrollTimeline = await Promise.race([
+      recordScrollTimeline(page, { fast: IS_FAST }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), IS_FAST ? 25_000 : 50_000)),
+    ]);
+    if (scrollTimeline) {
+      logger.debug(`  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s)`);
+    }
+  } catch (err) {
+    logger.debug(`  [SCROLL TIMELINE WARN] ${(err as Error).message}`);
+  }
+
+  // Rasterize canvas/WebGL visuals into image frames so the clone keeps them — and
+  // their motion — without site JS. The swap is deferred to the serialized HTML:
+  // replacing a framework-owned <canvas> live crashes React on its next update.
   {
     try {
-      const canvasPayloads = await page.evaluate((limit: number) => {
-        const out: Array<{ dataUrl: string; width: number; height: number; replaceId: string }> = [];
-        const canvases = Array.from(document.querySelectorAll('canvas'));
-        for (const canvas of canvases) {
-          if (out.length >= limit) break;
-          const el = canvas as HTMLCanvasElement;
+      const canvasIds = await page.evaluate((limit: number) => {
+        const ids: string[] = [];
+        for (const node of Array.from(document.querySelectorAll('canvas'))) {
+          if (ids.length >= limit) break;
+          const el = node as HTMLCanvasElement;
           const rect = el.getBoundingClientRect();
-          const w = el.width || Math.round(rect.width);
-          const h = el.height || Math.round(rect.height);
-          if (w < 80 || h < 80) continue;
-          try {
-            const dataUrl = el.toDataURL('image/png');
-            if (!dataUrl || dataUrl.length < 1000) continue;
-            const replaceId = `clonyfy-canvas-${out.length}-${Date.now()}`;
-            el.setAttribute('data-clonyfy-canvas-id', replaceId);
-            out.push({ dataUrl, width: w, height: h, replaceId });
-          } catch {
-            /* tainted canvas — skip */
-          }
+          if (rect.width < 80 || rect.height < 40 || !el.width || !el.height) continue;
+          const cs = window.getComputedStyle(el);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+          const id = `clonyfy-canvas-${ids.length}-${Date.now()}`;
+          el.setAttribute('data-clonyfy-canvas-id', id);
+          ids.push(id);
         }
-        return out;
+        return ids;
       }, IS_FAST ? 4 : 10);
 
-      for (const item of canvasPayloads) {
+      for (const canvasId of canvasIds) {
         try {
-          const base64 = item.dataUrl.replace(/^data:image\/png;base64,/, '');
-          const buf = Buffer.from(base64, 'base64');
-          if (buf.length > maxAssetBytes) continue;
-          const filename = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.png`;
-          const localPath = join(assetsDir, filename);
-          const webPath = `/_assets/${filename}`;
-          if (!existsSync(localPath)) {
-            if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
-            writeFileSync(localPath, buf);
-            assetsSaved++;
-            await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+          const { frames, frameMs } = await captureCanvasFrames(page, canvasId, {
+            maxFrames: IS_FAST ? 10 : 24,
+            intervalMs: 90,
+            maxBytes: Math.min(maxAssetBytes * 4, 6_000_000),
+          });
+          if (!frames.length) continue;
+          const webPaths: string[] = [];
+          for (const buf of frames) {
+            if (buf.length > maxAssetBytes) continue;
+            const filename = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.png`;
+            const localPath = join(assetsDir, filename);
+            const webPath = `/_assets/${filename}`;
+            if (!existsSync(localPath)) {
+              if (!reserveServerlessAssetBytes(buf.length, { priority: webPaths.length === 0 })) break;
+              writeFileSync(localPath, buf);
+              assetsSaved++;
+              await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+            }
+            assetMap.set(webPath, webPath);
+            webPaths.push(webPath);
           }
-          assetMap.set(webPath, webPath);
-          await page.evaluate(({ replaceId, webPath, width, height }) => {
-            const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${replaceId}"]`);
-            if (!canvas || !canvas.parentElement) return;
+          if (!webPaths.length) continue;
+          await page.evaluate(({ canvasId, webPaths, frameMs }) => {
+            const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`) as HTMLCanvasElement | null;
+            if (!canvas) return;
+            const cs = window.getComputedStyle(canvas);
             const img = document.createElement('img');
-            img.src = webPath;
-            img.width = width;
-            img.height = height;
+            img.src = webPaths[0];
+            img.width = canvas.width;
+            img.height = canvas.height;
             img.alt = '';
             img.setAttribute('data-clonyfy-canvas-capture', '1');
-            const style = window.getComputedStyle(canvas);
-            img.style.cssText = `display:block;width:${style.width || width + 'px'};height:${style.height || height + 'px'};max-width:100%;`;
-            canvas.replaceWith(img);
-          }, { replaceId: item.replaceId, webPath, width: item.width, height: item.height });
+            if (webPaths.length > 1) {
+              img.setAttribute('data-clonyfy-canvas-frames', JSON.stringify(webPaths));
+              img.setAttribute('data-clonyfy-frame-ms', String(frameMs));
+            }
+            // Keep the site's CSS hooks so `.x canvas`-style layout still lands the same.
+            if (canvas.className) img.className = canvas.className;
+            const layered = cs.position === 'absolute' || cs.position === 'fixed';
+            // Fills its parent → stay fluid; overflows it (full-bleed bands) → keep exact size.
+            const parentWidth = canvas.parentElement?.getBoundingClientRect().width || 0;
+            const ownWidth = canvas.getBoundingClientRect().width;
+            const fillsParent = parentWidth > 0 && Math.abs(ownWidth - parentWidth) <= 2;
+            img.style.cssText = [
+              (canvas.getAttribute('style') || '').replace(/;?\s*$/, ''),
+              'display:block',
+              fillsParent ? 'width:100%' : `width:${cs.width}`,
+              `height:${cs.height}`,
+              fillsParent ? 'max-width:100%' : 'max-width:none',
+              'object-fit:fill',
+              layered ? `position:${cs.position};top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : '',
+              layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
+            ].filter(Boolean).join(';');
+            const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
+            w.__clonyfyDeferred = w.__clonyfyDeferred || {};
+            w.__clonyfyDeferred[canvasId] = { mode: 'replace', html: img.outerHTML };
+            canvas.setAttribute('data-clonyfy-defer', canvasId);
+          }, { canvasId, webPaths, frameMs });
+          logger.debug(`  [CANVAS CAPTURE] ${canvasId}: ${webPaths.length} frame(s)${frameMs ? ` @ ${frameMs}ms` : ''}`);
         } catch (err) {
           logger.debug(`  [CANVAS CAPTURE WARN] ${(err as Error).message}`);
         }
@@ -1807,7 +1854,12 @@ export async function capturePage(
           cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
         ].filter(Boolean).join(';');
         img.setAttribute('data-clonyfy-video-poster', '1');
-        video.replaceWith(img);
+        // Deferred to the snapshot — a live swap crashes framework-owned trees.
+        const deferId = `clonyfy-video-${index}-${Date.now()}`;
+        const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
+        w.__clonyfyDeferred = w.__clonyfyDeferred || {};
+        w.__clonyfyDeferred[deferId] = { mode: 'replace', html: img.outerHTML };
+        video.setAttribute('data-clonyfy-defer', deferId);
       });
     }, posterEntries).catch((err) => {
       logger.debug(`  [SHOPIFY VIDEO POSTER WARN] ${(err as Error).message}`);
@@ -1881,7 +1933,11 @@ export async function capturePage(
               layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
               cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
             ].filter(Boolean).join(';');
-            video.replaceWith(img);
+            const deferId = `clonyfy-video-frame-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
+            w.__clonyfyDeferred = w.__clonyfyDeferred || {};
+            w.__clonyfyDeferred[deferId] = { mode: 'replace', html: img.outerHTML };
+            video.setAttribute('data-clonyfy-defer', deferId);
           }, webPath);
         } catch (err) {
           logger.debug(`  [SHOPIFY VIDEO FRAME WARN] ${(err as Error).message}`);
@@ -1930,11 +1986,64 @@ export async function capturePage(
 
     // Save As level: only skip layers carousel normalize already marked inactive.
     // Do NOT guess "stacked rotator" from short opacity-0 text — that hid real headlines.
+    // Elements the site's CSS reveals only on :hover/:focus (card overlays, tooltips,
+    // "Read story" labels) are hidden on purpose — forcing them visible stacks them on
+    // top of the content. Collect those rules' selectors with the pseudo-class removed.
+    const interactionRevealSelectors: string[] = [];
+    {
+      const PSEUDO = /:(?:hover|focus-within|focus-visible|focus|active)\b/;
+      const collect = (rules: CSSRuleList | undefined, depth: number) => {
+        if (!rules || depth > 4) return;
+        for (const rule of Array.from(rules)) {
+          if (interactionRevealSelectors.length > 2000) return;
+          const nested = (rule as CSSGroupingRule).cssRules;
+          if (nested && !(rule instanceof CSSStyleRule)) { collect(nested, depth + 1); continue; }
+          if (!(rule instanceof CSSStyleRule)) continue;
+          if (!PSEUDO.test(rule.selectorText)) continue;
+          const s = rule.style;
+          if (!s.opacity && !s.visibility && !s.transform && !s.display && !s.clipPath && !s.maxHeight) continue;
+          for (const part of rule.selectorText.split(',')) {
+            // Only "hover A reveals B" (`.card:hover .label`); a self-hover rule like
+            // `a:hover{opacity:.8}` would otherwise mark every link as hover-only.
+            if (!/:(?:hover|focus-within|focus-visible|focus|active)\b[^\s>+~]*[\s>+~]+\S/.test(part)) continue;
+            const base = part.replace(/:(?:hover|focus-within|focus-visible|focus|active)\b/g, '').trim();
+            if (base) interactionRevealSelectors.push(base);
+          }
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets)) {
+        try { collect(sheet.cssRules, 0); } catch { /* cross-origin sheet */ }
+      }
+    }
+    // Validate once, then match against a few combined selector lists (fast per element).
+    const revealGroups: string[] = [];
+    {
+      const valid = Array.from(new Set(interactionRevealSelectors)).filter((sel) => {
+        try { document.createDocumentFragment().querySelector(sel); return true; } catch { return false; }
+      });
+      for (let i = 0; i < valid.length; i += 150) revealGroups.push(valid.slice(i, i + 150).join(','));
+    }
+    const isInteractionReveal = (el: Element): boolean => {
+      for (const group of revealGroups) {
+        try { if (el.matches(group)) return true; } catch { /* ignore */ }
+      }
+      return false;
+    };
+
     const isInactiveLayer = (el: HTMLElement): boolean => {
       if (el.getAttribute('aria-hidden') === 'true') return true;
       if (el.closest('[aria-hidden="true"]')) return true;
+      if (isInteractionReveal(el)) return true;
       return false;
     };
+
+    // Inside scroll-timeline sections the hidden state is the animation's start, not a
+    // capture glitch. Remember the original style/class so the preview runtime can undo
+    // this freeze there and let the recorded timeline drive visibility again.
+    const timelineState = new Map<Element, [string | null, string | null]>();
+    document.querySelectorAll('[data-clonyfy-st], [data-clonyfy-st] *, [data-clonyfy-sr], [data-clonyfy-sr] *').forEach((el) => {
+      timelineState.set(el, [el.getAttribute('style'), el.getAttribute('class')]);
+    });
 
     // All sites: strip reveal-animation utilities so static HTML keeps text/images.
     document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"],.invisible').forEach((node) => {
@@ -2019,6 +2128,12 @@ export async function capturePage(
         el.classList.add('aos-animate');
       }
     });
+
+    for (const [el, [style, cls]] of timelineState) {
+      if (el.getAttribute('style') === style && el.getAttribute('class') === cls) continue;
+      el.setAttribute('data-clonyfy-prev-style', style ?? '');
+      el.setAttribute('data-clonyfy-prev-class', cls ?? '');
+    }
   }, { fast: fastScroll, carouselSkip: CAROUSEL_SKIP_SELECTOR }).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
@@ -2139,7 +2254,10 @@ export async function capturePage(
           img.setAttribute('data-clonyfy-shell-capture', '1');
           img.style.cssText = `display:block;width:100%;height:auto;max-width:100%;object-fit:cover;`;
           if (rect.height > 0) img.style.minHeight = `${Math.round(rect.height)}px`;
-          el.replaceChildren(img);
+          const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
+          w.__clonyfyDeferred = w.__clonyfyDeferred || {};
+          w.__clonyfyDeferred[shellId] = { mode: 'children', html: img.outerHTML };
+          el.setAttribute('data-clonyfy-defer', shellId);
         }, { shellId, webPath });
         logger.debug(`  [SHELL CAPTURE] ${shellId} -> ${webPath} (${(buf.length / 1024).toFixed(1)}KB)`);
       } catch (err) {
@@ -2183,9 +2301,14 @@ export async function capturePage(
       for (const sel of selectors) {
         let nodes: Element[] = [];
         try { nodes = Array.from(document.querySelectorAll(sel)); } catch { continue; }
+        const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
+        w.__clonyfyDeferred = w.__clonyfyDeferred || {};
         for (const el of nodes) {
           if (!el.childNodes.length) continue;
-          el.innerHTML = '';
+          // Emptied in the snapshot only — the live tree may still be framework-owned.
+          const deferId = `clonyfy-script-built-${n}-${Date.now()}`;
+          w.__clonyfyDeferred[deferId] = { mode: 'children', html: '' };
+          el.setAttribute('data-clonyfy-defer', deferId);
           el.setAttribute('data-clonyfy-script-built', '1');
           n++;
         }
@@ -2196,38 +2319,43 @@ export async function capturePage(
   }
 
   let html = await page.content();
+  const deferredEdits = await page.evaluate(
+    () => (window as unknown as { __clonyfyDeferred?: DeferredDomEdits }).__clonyfyDeferred || {},
+  ).catch(() => ({} as DeferredDomEdits));
+  try {
+    html = applyDeferredDomEdits(html, deferredEdits);
+  } catch (err) {
+    logger.debug(`  [DEFERRED DOM WARN] ${(err as Error).message}`);
+  }
 
   // Shopify/Remix/Next sometimes paint an Application Error / __next_error__
   // boundary mid-capture when stubbed XHR/JS races hydration, or when in-page
   // /_assets replacements 404 against the live origin. Prefer a reload snapshot.
   let finalHtml = html;
   try {
-    const isAppError = await page.evaluate(() => {
-      if (document.documentElement?.id === '__next_error__') return true;
-      if (document.getElementById('__next_error__')) return true;
-      const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-      if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
-      return /Application Error/i.test(text)
-        && /page could not be displayed|Something has gone wrong/i.test(text);
-    });
+    const isAppError = await page.evaluate(isFrameworkErrorPageInDocument);
     if (isAppError) {
       logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; reloading and re-snapshotting`);
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: IS_FAST ? 20_000 : 45_000 }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 12_000 }).catch(() => {});
       await page.waitForTimeout(IS_FAST ? 800 : 2000);
       const retryHtml = await page.content();
-      const stillError = await page.evaluate(() => {
-        if (document.documentElement?.id === '__next_error__') return true;
-        if (document.getElementById('__next_error__')) return true;
-        const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-        if (/This page could not/i.test(text) && text.length < 400) return true;
-        return /Application Error/i.test(text)
-          && /page could not be displayed|Something has gone wrong/i.test(text);
-      }).catch(() => true);
-      if (!stillError) finalHtml = retryHtml;
-      else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
+      const stillError = await page.evaluate(isFrameworkErrorPageInDocument).catch(() => true);
+      if (!stillError) {
+        finalHtml = retryHtml;
+      } else if (serverHtml && !isFrameworkErrorHtml(serverHtml)) {
+        // Client JS keeps crashing (e.g. React removeChild during hydration) — the
+        // server-rendered HTML still holds the real content, so keep that instead.
+        logger.warn(`  [APP ERROR] ${pageUrl} still crashing after reload; using server-rendered HTML`);
+        finalHtml = serverHtml;
+      } else {
+        throw new Error(`Page ${pathnameOfUrl(pageUrl)} only renders a framework error page`);
+      }
     }
-  } catch { /* best-effort */ }
+  } catch (err) {
+    if ((err as Error)?.message?.includes('only renders a framework error page')) throw err;
+    /* otherwise best-effort */
+  }
 
   // Reject empty SPA shells — better to fail/retry than store a blank /apps page.
   if (isThinSpaShell(finalHtml)) {
@@ -2244,6 +2372,8 @@ export async function capturePage(
   }
 
   finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
+  // Markers (data-clonyfy-st) only exist in this page load — skip after a reload.
+  if (/data-clonyfy-s[tr]=/.test(finalHtml)) finalHtml = injectScrollTimeline(finalHtml, scrollTimeline);
 
   // Bake generic media visibility so clone preview shows media without site JS.
   finalHtml = bakeStaticMediaVisibility(finalHtml);

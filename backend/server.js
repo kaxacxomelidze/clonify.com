@@ -2407,6 +2407,52 @@ function isAllowedLiveOriginUrl(rawUrl, targetOrigin) {
   }
 }
 
+// Many sites (griffin.com, pc.ge, stripe.com…) refuse to be framed via
+// X-Frame-Options or CSP frame-ancestors. Embedding them directly shows the
+// browser's "refused to connect" page, so probe once per origin and cache.
+const FRAMEABLE_CACHE_TTL_MS = 60 * 60 * 1000;
+const frameableCache = new Map(); // origin → { ok, at }
+
+function headersBlockFraming(headers) {
+  const xfo = String(headers.get('x-frame-options') || '').trim().toLowerCase();
+  if (xfo && xfo !== 'allowall') return true;
+  const csp = String(headers.get('content-security-policy') || '');
+  const fa = csp.split(';').map((d) => d.trim()).find((d) => /^frame-ancestors\b/i.test(d));
+  if (fa) {
+    const sources = fa.split(/\s+/).slice(1);
+    if (!sources.includes('*')) return true;
+  }
+  return false;
+}
+
+async function originAllowsFraming(targetOrigin) {
+  const cached = frameableCache.get(targetOrigin);
+  if (cached && Date.now() - cached.at < FRAMEABLE_CACHE_TTL_MS) return cached.ok;
+  let ok = false;
+  try {
+    if (!isPrivateOrLocalHostname(new URL(targetOrigin).hostname)) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 6_000);
+      try {
+        const r = await fetch(`${targetOrigin}/`, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: ac.signal,
+          headers: { 'user-agent': 'Mozilla/5.0 (compatible; ClonyfyLivePreview/1.0)', accept: 'text/html' },
+        });
+        ok = r.ok && !headersBlockFraming(r.headers);
+        r.body?.cancel().catch(() => {});
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  } catch {
+    ok = false; // unreachable or timed out — the offline clone is the safer preview
+  }
+  frameableCache.set(targetOrigin, { ok, at: Date.now() });
+  return ok;
+}
+
 function liveSitePrefix(outDir) {
   const token = cloneAssetToken(outDir);
   const base = outDirBasename(outDir);
@@ -4691,9 +4737,11 @@ async function handleRequest(req, res) {
       res.writeHead(404); res.end('Not found'); return;
     }
     const targetOrigin = await loadCloneTargetOrigin(outDir);
-    if (!targetOrigin) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Clone has no targetOrigin — re-run the clone.');
+    if (!targetOrigin || !await originAllowsFraming(targetOrigin)) {
+      // Origin can't be embedded (or is unknown) — show the offline clone instead.
+      const fallback = new URLSearchParams(url.searchParams);
+      res.writeHead(302, { Location: `/api/page?${fallback.toString()}`, 'Cache-Control': 'no-store' });
+      res.end();
       return;
     }
     let route = url.searchParams.get('route') || '/';

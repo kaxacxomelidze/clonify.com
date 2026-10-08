@@ -573,7 +573,8 @@ function ClonePage() {
             </Link>
           </div>
           <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-            Preview embeds the live website. Use the visual editor for your offline clone.
+            Preview embeds the live website when it allows embedding; otherwise it shows your
+            offline clone. Use the visual editor to edit the clone.
           </p>
           <iframe
             title="Clone preview"
