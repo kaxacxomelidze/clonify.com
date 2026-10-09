@@ -43,6 +43,8 @@ const NON_PAGE_EXTS = new Set([
   '.webp','.woff','.woff2','.xls','.xlsx','.xml','.zip',
 ]);
 const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
+/** Entry pages tried (in order) when the start URL itself can't be captured. */
+const FALLBACK_LANDING_PATHS = ['/home', '/index', '/en', '/en-us', '/main', '/welcome', '/product', '/features', '/about', '/pricing'];
 const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 150_000;
 /** Scale Max / full-site: give non-home pages more time before static salvage. */
 const FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
@@ -767,10 +769,51 @@ export async function crawl(
   let sitemapFetchDone = false;
   let sitemapEnqueued = false;
 
+  // Pages that were attempted but produced nothing don't use up the page budget —
+  // otherwise one blocked/failed home page leaves a 1-page clone with zero pages.
+  let failedAttempts = 0;
+  const budgetUsed = () => visited.size - failedAttempts;
+
+  // When the start URL can't be captured, try other entry pages of the same site
+  // (e.g. /home) one after another until one succeeds. Capped so a site that refuses
+  // every page isn't hammered.
+  const MAX_FALLBACK_ATTEMPTS = 6;
+  let fallbackQueue: string[] | null = null;
+  let fallbackAttempts = 0;
+  const pumpFallback = () => {
+    if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
+    while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
+      const next = fallbackQueue.shift()!;
+      const before = visited.size;
+      enqueue(next, 1, true);
+      if (visited.size > before) {
+        fallbackAttempts++;
+        logger.info(`  [FALLBACK PAGE] Start URL not captured — trying ${next}`);
+        return;
+      }
+    }
+  };
+  const sitemapFallbacks = () => [...sitemapUrls]
+    .filter((u) => { try { return new URL(u).origin === origin; } catch { return false; } })
+    .sort((a, b) => new URL(a).pathname.split('/').filter(Boolean).length - new URL(b).pathname.split('/').filter(Boolean).length
+      || a.length - b.length);
+  let sitemapFallbacksAdded = false;
+  /** Named entry pages start right away; sitemap pages join whenever the sitemap arrives. */
+  const startFallbacks = () => {
+    if (records.length > 0) return;
+    if (!fallbackQueue) fallbackQueue = FALLBACK_LANDING_PATHS.map((p) => new URL(p, origin).href);
+    if (sitemapFetchDone && !sitemapFallbacksAdded) {
+      sitemapFallbacksAdded = true;
+      fallbackQueue = [...new Set([...fallbackQueue, ...sitemapFallbacks()])];
+    }
+    pumpFallback();
+  };
+
   const maybeEnqueueSitemap = () => {
     if (sitemapEnqueued || !startUrlFinished || !sitemapFetchDone) return;
+    if (records.length === 0) startFallbacks();
     sitemapEnqueued = true;
-    const remaining = Math.max(0, opts.maxPages - visited.size);
+    const remaining = Math.max(0, opts.maxPages - budgetUsed());
     if (remaining <= 0) {
       logger.info('  Sitemap seeding skipped — page budget already filled by discovered links');
       return;
@@ -792,7 +835,7 @@ export async function crawl(
     try { if (new URL(clean).origin !== origin) return; } catch { return; }
     if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
-    if (visited.size >= opts.maxPages) return;
+    if (budgetUsed() >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
     visited.add(clean);
 
@@ -800,6 +843,7 @@ export async function crawl(
     let retryingAfterCrash = false;
     const task = async () => {
       retryingAfterCrash = false;
+      const recordsBefore = records.length;
       if (records.length >= opts.maxPages) return;
 
       // Guard: skip URLs whose path extension is a known non-page type.
@@ -914,11 +958,11 @@ export async function crawl(
         // Start URL must not silently vanish — always try a static HTML salvage.
         // Full-site / Max mode salvages every failed page so coverage stays high.
         const isStartUrl = !!startNorm && clean === startNorm;
-        // Bot-protection blocks every automated client: a static fetch or another
-        // browser attempt is refused the same way, so don't waste time retrying.
-        const blocked = err instanceof BotProtectionError;
-        if (blocked) noteBotProtection(clean, (err as BotProtectionError).vendor);
-        if (!blocked && shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
+        // Remember a bot-protection block so the final error can explain it, but keep
+        // the original fallback + retry path: a challenge on one attempt doesn't mean
+        // every attempt is refused.
+        if (err instanceof BotProtectionError) noteBotProtection(clean, err.vendor);
+        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -958,10 +1002,13 @@ export async function crawl(
           }
         }
       } finally {
+        if (!retryingAfterCrash && records.length === recordsBefore) failedAttempts++;
         if (startNorm && clean === startNorm && !retryingAfterCrash) {
           startUrlFinished = true;
+          if (records.length === 0) startFallbacks();
           maybeEnqueueSitemap();
         }
+        if (!retryingAfterCrash && records.length === 0) pumpFallback();
         await context?.close().catch(() => {});
       }
     };
@@ -971,18 +1018,24 @@ export async function crawl(
   enqueue(opts.url, 0);
 
   logger.info('  Checking sitemap...');
-  fetchSitemap(origin).then((urls) => {
+  const sitemapReady = fetchSitemap(origin).then((urls) => {
     sitemapUrls = urls;
-    sitemapFetchDone = true;
-    maybeEnqueueSitemap();
   }).catch(() => {
     sitemapUrls = [];
+  }).then(() => {
     sitemapFetchDone = true;
+    if (fallbackQueue) startFallbacks();
     maybeEnqueueSitemap();
   });
 
   try {
     await queue.onIdle();
+    // Nothing captured yet and the sitemap is still loading: its pages are the
+    // remaining fallbacks, so wait for it instead of ending with zero pages.
+    if (records.length === 0 && !sitemapFetchDone) {
+      await Promise.race([sitemapReady, new Promise((r) => setTimeout(r, 20_000))]);
+      await queue.onIdle();
+    }
   } finally {
     await browser.close();
   }

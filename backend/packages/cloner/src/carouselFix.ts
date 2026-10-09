@@ -288,45 +288,21 @@ export function normalizeAllMotionStacksInDocument(): void {
     });
   }
 
-  // Kept inside this function: page.evaluate() only ships this function's own body to
-  // the browser, so helpers defined at module level are undefined there.
-  /** Undo mistaken collapses of Stripe-style dual hero titles. */
-  function restoreHeroBlendLayersInDocument(): void {
-    document
-      .querySelectorAll(
-        '.hero-section__title--foreground, .hero-section__title--background, [class*="title--foreground"], [class*="title--background"]',
-      )
-      .forEach((node) => {
-        const el = node as HTMLElement;
-        el.removeAttribute('data-clonyfy-stack-hidden');
-        el.style.removeProperty('display');
-        el.style.removeProperty('visibility');
-        el.style.removeProperty('opacity');
-        el.style.removeProperty('pointer-events');
-        if (/title--foreground/i.test(String(el.className || ''))) {
-          el.style.setProperty('position', 'relative');
-          el.style.setProperty('z-index', '3');
-        }
-      });
-  }
-
-  /**
-   * Shell screenshots bake overlapping sibling chrome (titles, buttons) into the PNG while
-   * the live DOM still paints it — double text. Hide those shells in the preview.
-   */
+  /** Shell screenshots that overlap sibling chrome (titles, buttons) would paint it twice. */
   function normalizeShellCaptureOverlapsInDocument(): void {
-    document.querySelectorAll('img[data-clonyfy-shell-capture]').forEach((node) => {
-      const img = node as HTMLElement;
+    document.querySelectorAll('img[data-clonyfy-shell-capture]').forEach((img) => {
       const host = img.parentElement;
       if (!host || host.hasAttribute('data-clonyfy-stack-hidden')) return;
       const cls = String(host.className || '');
       const looksDecorativeBorder = /(?:^|[\s_-])(?:border|overlay|frame|mask|outline)(?:[\s_-]|$)|__border\b/i.test(cls);
       const imgRect = img.getBoundingClientRect();
       if (imgRect.width < 40 || imgRect.height < 40) return;
+
       let overlapsChrome = looksDecorativeBorder;
       if (!overlapsChrome) {
         const root = host.parentElement || host;
-        for (const sib of Array.from(root.children).filter((el) => el !== host)) {
+        for (const sib of Array.from(root.children)) {
+          if (sib === host) continue;
           const text = (sib.textContent || '').replace(/\s+/g, ' ').trim();
           const hasUi = !!sib.querySelector('h1,h2,h3,h4,h5,h6,button,a,svg,[aria-haspopup],summary');
           if (!hasUi && !/^H[1-6]$/.test(sib.tagName) && text.length < 4) continue;
@@ -338,14 +314,35 @@ export function normalizeAllMotionStacksInDocument(): void {
           if ((ix * iy) / Math.max(1, r.width * r.height) >= 0.35) { overlapsChrome = true; break; }
         }
       }
+
       if (!overlapsChrome) return;
-      host.setAttribute('data-clonyfy-stack-hidden', '1');
-      host.setAttribute('aria-hidden', 'true');
-      img.setAttribute('data-clonyfy-stack-hidden', '1');
-      host.style.setProperty('display', 'none', 'important');
-      host.style.setProperty('visibility', 'hidden', 'important');
-      host.style.setProperty('opacity', '0', 'important');
-      img.style.setProperty('display', 'none', 'important');
+      const hostEl = host as HTMLElement;
+      const imgEl = img as HTMLElement;
+      hostEl.setAttribute('data-clonyfy-stack-hidden', '1');
+      hostEl.setAttribute('aria-hidden', 'true');
+      imgEl.setAttribute('data-clonyfy-stack-hidden', '1');
+      hostEl.style.setProperty('display', 'none', 'important');
+      hostEl.style.setProperty('visibility', 'hidden', 'important');
+      hostEl.style.setProperty('opacity', '0', 'important');
+      imgEl.style.setProperty('display', 'none', 'important');
+    });
+  }
+
+  /** Undo mistaken collapses of Stripe-style dual hero titles. */
+  function restoreHeroBlendLayersInDocument(): void {
+    document.querySelectorAll(
+      '.hero-section__title--foreground, .hero-section__title--background, [class*="title--foreground"], [class*="title--background"]',
+    ).forEach((node) => {
+      const el = node as HTMLElement;
+      el.removeAttribute('data-clonyfy-stack-hidden');
+      el.style.removeProperty('display');
+      el.style.removeProperty('visibility');
+      el.style.removeProperty('opacity');
+      el.style.removeProperty('pointer-events');
+      if (/title--foreground/i.test(String(el.className || ''))) {
+        el.style.setProperty('position', 'relative');
+        el.style.setProperty('z-index', '3');
+      }
     });
   }
 
