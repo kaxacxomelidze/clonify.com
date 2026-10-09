@@ -531,30 +531,6 @@ function cssAttrValue(value: string): string {
  * Selectors for elements that are empty in the server HTML and referenced (by id or
  * data-* attribute name) from an inline script — i.e. filled in client-side.
  */
-/** True when server-rendered HTML carries real page text (not an empty shell or an error page). */
-export function serverHtmlHasContent(serverHtml: string): boolean {
-  if (!serverHtml || /client-side exception has occurred|id="__next_error__"/i.test(serverHtml)) return false;
-  const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(serverHtml)?.[1] || '';
-  const text = body
-    .replace(/<(script|style|noscript|template)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return text.length >= 200;
-}
-
-/**
- * Drop the Next.js runtime from server-rendered HTML whose app crashes on hydration:
- * left in, the clone preview re-runs it and swaps the page for the same error screen.
- */
-export function stripNextRuntimeScripts(html: string): string {
-  return html
-    .replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*\/_next\/[^"']*["'][^>]*>\s*<\/script>/gi, '')
-    .replace(/<script\b[^>]*\bid\s*=\s*["']__NEXT_DATA__["'][^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<script\b(?![^>]*\bsrc\s*=)[^>]*>(?:(?!<\/script>)[\s\S])*?(?:self\.__next_f|__next_s|__NEXT_)(?:(?!<\/script>)[\s\S])*<\/script>/gi, '')
-    .replace(/<link\b(?=[^>]*\brel\s*=\s*["'](?:preload|modulepreload)["'])(?=[^>]*\/_next\/[^"']*\.js)[^>]*>/gi, '');
-}
-
 export function findScriptBuiltContainers(serverHtml: string): string[] {
   if (!serverHtml) return [];
   let scripts = '';
@@ -2362,39 +2338,24 @@ export async function capturePage(
   // /_assets replacements 404 against the live origin. Prefer a reload snapshot.
   let finalHtml = html;
   try {
-    const isAppError = await page.evaluate(() => {
-      if (document.documentElement?.id === '__next_error__') return true;
-      if (document.getElementById('__next_error__')) return true;
-      const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-      if (/This page could not( be found| load|)/i.test(text) && text.length < 400) return true;
-      // Next.js default: "Application error: a client-side exception has occurred".
-      if (/client-side exception has occurred/i.test(text) && text.length < 600) return true;
-      return /Application Error/i.test(text)
-        && /page could not be displayed|Something has gone wrong/i.test(text);
-    });
+    const isAppError = await page.evaluate(isFrameworkErrorPageInDocument);
     if (isAppError) {
       logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; reloading and re-snapshotting`);
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: IS_FAST ? 20_000 : 45_000 }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 12_000 }).catch(() => {});
       await page.waitForTimeout(IS_FAST ? 800 : 2000);
       const retryHtml = await page.content();
-      const stillError = await page.evaluate(() => {
-        if (document.documentElement?.id === '__next_error__') return true;
-        if (document.getElementById('__next_error__')) return true;
-        const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-        if (/This page could not/i.test(text) && text.length < 400) return true;
-        // Next.js default: "Application error: a client-side exception has occurred".
-        if (/client-side exception has occurred/i.test(text) && text.length < 600) return true;
-        return /Application Error/i.test(text)
-          && /page could not be displayed|Something has gone wrong/i.test(text);
-      }).catch(() => true);
-      if (!stillError) finalHtml = retryHtml;
-      else if (serverHtmlHasContent(serverHtml)) {
-        // The app crashes while hydrating in the capture browser; the server-rendered
-        // HTML still holds the real page, so keep that instead of the error screen.
-        logger.warn(`  [APP ERROR] ${pageUrl} still crashing after reload; using the server-rendered HTML`);
-        finalHtml = stripNextRuntimeScripts(serverHtml);
-      } else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after reload`);
+      const stillError = await page.evaluate(isFrameworkErrorPageInDocument).catch(() => true);
+      if (!stillError) {
+        finalHtml = retryHtml;
+      } else if (serverHtml && !isFrameworkErrorHtml(serverHtml)) {
+        // Client JS keeps crashing (e.g. React removeChild during hydration) — the
+        // server-rendered HTML still holds the real content, so keep that instead.
+        logger.warn(`  [APP ERROR] ${pageUrl} still crashing after reload; using server-rendered HTML`);
+        finalHtml = serverHtml;
+      } else {
+        throw new Error(`Page ${pathnameOfUrl(pageUrl)} only renders a framework error page`);
+      }
     }
   } catch (err) {
     if ((err as Error)?.message?.includes('only renders a framework error page')) throw err;
