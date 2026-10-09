@@ -7,7 +7,8 @@ import { ExportFigmaDialog } from "@/components/dashboard/export-figma-dialog";
 import { GitHubPushDialog } from "@/components/dashboard/github-push-dialog";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import type { CloneJob } from "@/components/dashboard/data";
-import { ApiError, downloadZipBlob, pageLivePreviewUrl, triggerBrowserDownload } from "@/lib/api";
+import { ApiError, downloadZipBlob, triggerBrowserDownload } from "@/lib/api";
+import { useInteractivePreview } from "@/hooks/use-interactive-preview";
 import { useAuth } from "@/hooks/use-auth";
 
 export const Route = createFileRoute("/dashboard/")({
@@ -100,6 +101,7 @@ function ClonePage() {
   const [figmaOpen, setFigmaOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState("");
   const [zipProgress, setZipProgress] = useState<{ pct: number; stage: string } | null>(null);
+  const { src: previewSrc } = useInteractivePreview(run?.outDir, phase === "done");
   const busy = phase === "running";
   const stage = STAGES.reduce((active, item, index) => (progress >= item.at ? index : active), 0);
   const fullSiteAllowed =
@@ -584,12 +586,12 @@ function ClonePage() {
             </Link>
           </div>
           <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-            Preview embeds the live website when it allows embedding; otherwise it shows your
-            offline clone. Use the visual editor to edit the clone.
+            Preview runs your clone with the original site&apos;s interactions. Use the visual
+            editor to edit the clone.
           </p>
           <iframe
             title="Clone preview"
-            src={pageLivePreviewUrl(run.outDir)}
+            src={previewSrc || undefined}
             className="mb-6 h-[420px] w-full rounded-2xl border border-border bg-background"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
           />

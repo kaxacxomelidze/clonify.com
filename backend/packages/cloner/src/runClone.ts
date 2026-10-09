@@ -180,6 +180,25 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
         writeFileSync(pagePath, record.html, 'utf8');
         routeMap[record.route] = filename;
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: 'page' });
+        // Original server HTML for the interactive preview, where the site's own JS runs
+        // and must hydrate the exact markup it was built for. Asset URLs keep their
+        // ORIGINAL paths (bundler runtimes such as Turbopack match chunks by URL); the
+        // preview origin serves captured files at those paths. Same-origin absolute URLs
+        // become root-relative so they hit the preview origin instead of the live site.
+        if (record.serverHtml) {
+          const serverName = filename.replace(/\.html$/i, '.server.html');
+          const serverPath = join(capturedPagesDir, serverName);
+          // Attributes only: inline scripts must stay byte-identical — Next.js flight data
+          // ("self.__next_f") contains length-prefixed text rows that break if edited.
+          const originRe = new RegExp(targetOrigin.replace(/\/$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=/)', 'g');
+          const serverHtml = record.serverHtml.replace(
+            /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
+            (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, '')}${quote}`,
+          );
+          writeFileSync(serverPath, serverHtml, 'utf8');
+          await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: 'page' });
+          delete record.serverHtml; // keep manifest.json lean
+        }
       } catch (writeErr) {
         logger.warn(`  [WRITE ERR] final ${record.url}: ${(writeErr as Error).message}`);
       }

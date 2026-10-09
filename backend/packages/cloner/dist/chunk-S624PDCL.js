@@ -10709,6 +10709,28 @@ function isFrameworkErrorPageInDocument() {
   if (/Application error: a (client|server)-side exception has occurred/i.test(text)) return true;
   return /Application Error/i.test(text) && /page could not be displayed|Something has gone wrong/i.test(text);
 }
+var HYDRATION_MARKER = /\$_TSR|__remixContext|__staticRouterHydrationData|__reactRouterContext|window\.__NUXT__|__APOLLO_STATE__|__INITIAL_STATE__|__PRELOADED_STATE__|self\.__next_f|__sveltekit/;
+var SELF_REMOVE = /currentScript\??\.remove\(\)|currentScript\??\.parentNode\??\.removeChild|\.remove\(\)/;
+function restoreSelfRemovingScripts(snapshotHtml, serverHtml) {
+  const snapshot = String(snapshotHtml || "");
+  const server = String(serverHtml || "");
+  if (!snapshot || !server) return snapshot;
+  const restored = [];
+  for (const m of server.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const attrs = m[1] || "";
+    const body = (m[2] || "").trim();
+    if (!body || /\bsrc\s*=/i.test(attrs)) continue;
+    if (/\btype\s*=\s*["']?(?:application\/(?:ld\+)?json|importmap|speculationrules)/i.test(attrs)) continue;
+    if (!SELF_REMOVE.test(body) && !HYDRATION_MARKER.test(body)) continue;
+    if (snapshot.includes(body.slice(0, 160))) continue;
+    restored.push(`<script${attrs} data-clonyfy-restored-ssr>${m[2]}</script>`);
+  }
+  if (!restored.length) return snapshot;
+  const bodyOpen = snapshot.match(/<body\b[^>]*>/i);
+  if (!bodyOpen || bodyOpen.index === void 0) return restored.join("") + snapshot;
+  const at = bodyOpen.index + bodyOpen[0].length;
+  return snapshot.slice(0, at) + restored.join("") + snapshot.slice(at);
+}
 function shouldReplaceCapturedHtml(existing, candidate) {
   if (!existing) return true;
   if (!candidate) return false;
@@ -12792,6 +12814,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         throw new Error(`Capture produced a thin SPA shell for ${pathnameOfUrl(pageUrl)}`);
       }
     }
+    finalHtml = restoreSelfRemovingScripts(finalHtml, serverHtml);
     finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
     if (/data-clonyfy-s[tr]=/.test(finalHtml)) finalHtml = injectScrollTimeline(finalHtml, scrollTimeline);
     finalHtml = bakeStaticMediaVisibility(finalHtml);
@@ -12897,6 +12920,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         url: pageUrl,
         route,
         html: finalHtml,
+        ...serverHtml && /<html|<body/i.test(serverHtml) && !isFrameworkErrorHtml(serverHtml) ? { serverHtml } : {},
         assets,
         network: networkLog,
         failedAssets: [...failedAssets],
@@ -15135,6 +15159,18 @@ Captured ${records.length} page(s).`);
         writeFileSync5(pagePath, record.html, "utf8");
         routeMap[record.route] = filename;
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
+        if (record.serverHtml) {
+          const serverName = filename.replace(/\.html$/i, ".server.html");
+          const serverPath = join6(capturedPagesDir, serverName);
+          const originRe = new RegExp(targetOrigin.replace(/\/$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=/)", "g");
+          const serverHtml = record.serverHtml.replace(
+            /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
+            (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, "")}${quote}`
+          );
+          writeFileSync5(serverPath, serverHtml, "utf8");
+          await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: "page" });
+          delete record.serverHtml;
+        }
       } catch (writeErr) {
         logger.warn(`  [WRITE ERR] final ${record.url}: ${writeErr.message}`);
       }
@@ -15275,4 +15311,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-QRAQ6OH5.js.map
+//# sourceMappingURL=chunk-S624PDCL.js.map

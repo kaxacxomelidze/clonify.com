@@ -735,6 +735,8 @@ async function blockedUserResponse(res, user) {
 }
 
 async function getSessionUser(req) {
+  // The preview host runs third-party site scripts — it never acts as a logged-in user.
+  if (isPreviewHostRequest(req)) return null;
   const cookieToken = String(req.headers.cookie || '')
     .split(';')
     .map(part => part.trim())
@@ -1496,6 +1498,115 @@ function cloneAssetToken(outDir) {
   return createHash('sha256').update(`${key}:${PASSWORD_PEPPER}`).digest('hex').slice(0, 32);
 }
 
+/* ── Script-enabled previews ───────────────────────────────────────────────────
+ * The original site's JavaScript may only run on an origin that holds nothing of
+ * value: PREVIEW_ORIGIN (e.g. https://preview.clonyfy.com), or — in local dev — the
+ * API origin when the dashboard lives on a different origin. Those pages are
+ * authorized by a short-lived, clone-scoped preview token, never a login token. */
+const PREVIEW_TOKEN_TTL_MS = 6 * 60 * 60 * 1000;
+
+function previewOriginUrl() {
+  return String(process.env.PREVIEW_ORIGIN || '').trim().replace(/\/$/, '');
+}
+
+function requestHost(req) {
+  return String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+}
+
+function isPreviewHostRequest(req) {
+  const origin = previewOriginUrl();
+  if (!origin) return false;
+  try { return new URL(origin).host.toLowerCase() === requestHost(req); } catch { return false; }
+}
+
+function previewTokenSignature(payload) {
+  return createHmac('sha256', PASSWORD_PEPPER).update(`clone-preview:${payload}`).digest('base64url').slice(0, 32);
+}
+
+/** `scripts` is decided at issue time (isolated origin) and baked into the signature. */
+function createPreviewToken(outDir, { scripts }) {
+  const exp = (Date.now() + PREVIEW_TOKEN_TTL_MS).toString(36);
+  const flags = scripts ? 's' : '-';
+  return `${exp}.${flags}.${previewTokenSignature(`${outDirBasename(outDir)}|${exp}|${flags}`)}`;
+}
+
+function readPreviewToken(outDir, token) {
+  const [exp, flags, sig] = String(token || '').split('.');
+  if (!exp || !flags || !sig) return null;
+  const expMs = parseInt(exp, 36);
+  if (!Number.isFinite(expMs) || expMs < Date.now()) return null;
+  const expected = Buffer.from(previewTokenSignature(`${outDirBasename(outDir)}|${exp}|${flags}`));
+  const given = Buffer.from(sig);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
+  return { scripts: flags === 's' };
+}
+
+/* Interactive previews serve the clone's captured files at their ORIGINAL paths
+ * (/_next/static/chunks/x.js, /assets/app.js…): bundler runtimes match chunks by URL,
+ * so remapped addresses leave the site's JS waiting forever. The clone is identified
+ * by a cookie set on the preview origin (which holds no login) or by the Referer. */
+const PREVIEW_COOKIE = 'clonyfy_preview';
+const _mirrorIndexCache = new Map(); // outDir → { exp, targetOrigin, byPath }
+
+async function previewMirrorIndex(outDir) {
+  const hit = _mirrorIndexCache.get(outDir);
+  if (hit && hit.exp > Date.now()) return hit;
+  const { originalByRelPath, targetOrigin } = await buildPreviewAssetContext(outDir);
+  const origin = String(targetOrigin || '').replace(/\/$/, '');
+  const byPath = new Map();
+  for (const [relPath, original] of Object.entries(originalByRelPath || {})) {
+    let u;
+    try { u = new URL(original); } catch { continue; }
+    if (u.origin !== origin) continue;
+    const local = relPath.startsWith('public/') ? relPath : `public/${relPath.replace(/^\/+/, '')}`;
+    byPath.set(u.pathname + u.search, local);
+    if (!byPath.has(u.pathname)) byPath.set(u.pathname, local);
+  }
+  const entry = { exp: Date.now() + 60_000, targetOrigin: origin, byPath };
+  _mirrorIndexCache.set(outDir, entry);
+  if (_mirrorIndexCache.size > 200) _mirrorIndexCache.delete(_mirrorIndexCache.keys().next().value);
+  return entry;
+}
+
+/** Which clone a mirrored-file request belongs to (preview page Referer, else cookie). */
+function previewMirrorTarget(req) {
+  const fromParams = (params) => {
+    const outDir = resolveCloneOutDir(params.get('outDir'));
+    const grant = outDir ? readPreviewToken(outDir, params.get('pt')) : null;
+    return grant?.scripts ? outDir : null;
+  };
+  try {
+    const ref = new URL(String(req.headers.referer || ''));
+    if (ref.host.toLowerCase() === requestHost(req)) {
+      const outDir = fromParams(ref.searchParams);
+      if (outDir) return outDir;
+    }
+  } catch {}
+  const raw = readRequestCookie(req, PREVIEW_COOKIE);
+  if (!raw) return null;
+  return fromParams(new URLSearchParams(raw));
+}
+
+/** The original server HTML with only what an interactive preview needs added. */
+function renderLivePreviewHtml(html, outDir, { routes = [], livePath = '/', targetOrigin = '' } = {}) {
+  const path = String(livePath || '/').split(/[?#]/)[0].replace(/\.html?$/i, '') || '/';
+  // Runs before any site script: flag live mode, then show the page under its real path
+  // (keeping the preview query) — client-side routers render nothing for "/api/page".
+  const flag = '<script data-clonyfy-live-scripts>window.__clonyfyLiveScripts=true;'
+    + `try{var q=new URLSearchParams(location.search);q.set("route",${JSON.stringify(path)});`
+    + `history.replaceState(history.state,"",${JSON.stringify(path)}+"?"+q.toString()+location.hash)}catch(e){}</script>`;
+  let out = String(html || '');
+  out = /<head[^>]*>/i.test(out) ? out.replace(/<head[^>]*>/i, (m) => `${m}${flag}`) : flag + out;
+  // Link clicks to captured pages load them as previews; everything else is the site's.
+  return injectBeforeBodyEnd(out, previewNavigationPatch(outDir, targetOrigin, routes));
+}
+
+/** Paths a preview-only host may serve; everything else 404s there. */
+function isPreviewSurfacePath(pathname) {
+  return pathname === '/api/page' || pathname === '/api/asset' || pathname === '/api/health'
+    || pathname.startsWith('/_assets/');
+}
+
 function cloneAssetTokenMatches(outDir, token) {
   if (!token) return false;
   if (token === cloneAssetToken(outDir)) return true;
@@ -2120,7 +2231,8 @@ async function inferRouteMapFromCapturedPages(outDir) {
   const pagesDir = join(outDir, 'captured-pages');
   if (existsSync(pagesDir)) {
     for (const entry of readdirSync(pagesDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.html')) continue;
+      // *.server.html are interactive-preview sources, not pages of their own.
+      if (!entry.isFile() || !entry.name.endsWith('.html') || entry.name.endsWith('.server.html')) continue;
       const route = inferredRouteFromPageFilename(entry.name);
       if (route) map[route] = entry.name;
     }
@@ -2129,7 +2241,7 @@ async function inferRouteMapFromCapturedPages(outDir) {
     const files = await readPersistedCloneFileList(outDir).catch(() => []);
     for (const file of files) {
       const rel = String(file?.rel || '').replace(/\\/g, '/');
-      if (!rel.startsWith('captured-pages/') || !rel.endsWith('.html')) continue;
+      if (!rel.startsWith('captured-pages/') || !rel.endsWith('.html') || rel.endsWith('.server.html')) continue;
       const filename = rel.slice('captured-pages/'.length);
       const route = inferredRouteFromPageFilename(filename);
       if (route) map[route] = filename;
@@ -2245,6 +2357,61 @@ async function rewritePreviewCssAsset(css, outDir, relPath) {
   const assetMap = new Map(Object.entries(map));
   const baseUrl = originalByRelPath[relPath] || originalByRelPath[relPath.replace(/^public\//, '')] || undefined;
   return rewriteCssUrlsForPreview(css, assetMap, baseUrl);
+}
+
+/* Bundlers (Vite, Rollup, webpack) reference sibling chunks by their ORIGINAL file
+ * names — static `import "./app-boot-Cc.js"`, Vite preload lists `"assets/x.js"`,
+ * absolute URLs. The clone stores those files under hashed /_assets names, so the
+ * site's own JS can't load its modules unless the references are remapped. */
+const _jsRemapCache = new Map(); // outDir → { exp, byName, byPath }
+
+async function previewJsRemap(outDir) {
+  const hit = _jsRemapCache.get(outDir);
+  if (hit && hit.exp > Date.now()) return hit;
+  const { originalByRelPath, targetOrigin } = await buildPreviewAssetContext(outDir);
+  const byName = new Map();
+  const byPath = new Map();
+  const ambiguous = new Set();
+  for (const [relPath, original] of Object.entries(originalByRelPath || {})) {
+    let u;
+    try { u = new URL(original); } catch { continue; }
+    if (!/\.(m?js|css)$/i.test(u.pathname)) continue;
+    const local = relPath.replace(/^public\//, '');
+    byPath.set(u.origin + u.pathname, local);
+    const name = u.pathname.split('/').pop();
+    if (!name) continue;
+    if (byName.has(name) && byName.get(name) !== local) ambiguous.add(name);
+    else byName.set(name, local);
+  }
+  for (const name of ambiguous) byName.delete(name);
+  const entry = { exp: Date.now() + 60_000, byName, byPath, targetOrigin: String(targetOrigin || '') };
+  _jsRemapCache.set(outDir, entry);
+  if (_jsRemapCache.size > 200) _jsRemapCache.delete(_jsRemapCache.keys().next().value);
+  return entry;
+}
+
+async function rewritePreviewJsAsset(js, outDir) {
+  const { byName, byPath, targetOrigin } = await previewJsRemap(outDir);
+  if (!byName.size && !byPath.size) return js;
+  const assetUrl = (local) => `/api/asset?outDir=${encodeURIComponent(outDir)}&assetToken=${cloneAssetToken(outDir)}&path=${encodeURIComponent(local)}`;
+  return String(js).replace(
+    // File names may contain ~ % + (webpack/rspack shared-chunk names like "vendor~index~a.js").
+    /(["'`])((?:https?:\/\/[^"'`\s/]+)?(?:\.{1,2}\/|\/)?(?:[\w@.~%+-]+\/){0,6})([\w@.~%+-]+\.(?:m?js|css))\1/g,
+    (full, quote, dir, name) => {
+      let local = null;
+      if (/^https?:\/\//i.test(dir)) {
+        try { const u = new URL(dir + name); local = byPath.get(u.origin + u.pathname) || null; } catch {}
+      } else if (dir.startsWith('/') && targetOrigin) {
+        local = byPath.get(targetOrigin.replace(/\/$/, '') + dir + name) || byName.get(name) || null;
+      } else if (dir) {
+        local = byName.get(name) || null;
+      }
+      if (!local) return full;
+      // Vite preload lists are base-relative ("assets/x.js" gets "/" prepended) — keep them so.
+      if (!/^(https?:\/\/|\.{1,2}\/|\/)/i.test(dir)) return `${quote}${local}${quote}`;
+      return `${quote}${assetUrl(local)}${quote}`;
+    },
+  );
 }
 
 function previewReplayPatch(assetMap, targetOrigin = '') {
@@ -2813,6 +2980,8 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     injectInteractions = true,
     routes = null,
     assetContext = null,
+    // Interactive preview on an isolated origin: the original site's JS runs.
+    keepScripts = false,
   } = options;
   let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(html, outDir));
   // Force-show body even if the original site relies on JS hydration to reveal
@@ -2897,6 +3066,19 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     const scrollPatch = previewScrollAnimationsPatch();
     if (out.includes('</body>')) out = out.replace('</body>', `${scrollPatch}</body>`);
     else out += scrollPatch;
+  }
+  if (keepScripts) {
+    // Tell the preview runtime the site's own JS is live, so it stops replaying
+    // recorded scroll animations and doesn't flag buttons as "not cloned". Then show
+    // the page under its real path (keeping the preview query) BEFORE any site script
+    // runs: client-side routers render nothing for "/api/page".
+    const path = String(options.livePath || '/').split(/[?#]/)[0].replace(/\.html?$/i, '') || '/';
+    const flag = '<script data-clonyfy-live-scripts>window.__clonyfyLiveScripts=true;'
+      + `try{var q=new URLSearchParams(location.search);q.set("route",${JSON.stringify(path)});`
+      + `history.replaceState(history.state,"",${JSON.stringify(path)}+"?"+q.toString()+location.hash)}catch(e){}</script>`;
+    if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => `${m}${flag}`);
+    else out = flag + out;
+    return out;
   }
   // Must run AFTER Clonyfy patches are injected so only original-site scripts die.
   return neutralizeCloneScripts(out);
@@ -4251,6 +4433,49 @@ async function handleRequest(req, res) {
   const ip = (isPrivateIp(peerIp) && String(req.headers['x-real-ip'] || '').trim()) || peerIp || 'unknown';
   const reqOrigin = req.headers['origin'] || '';
 
+  // Interactive previews show pages under their real path (/home?outDir=…&pt=…) so
+  // the site's own router works; a reload of that address is the same preview page.
+  if (req.method === 'GET' && url.searchParams.get('pt') && url.searchParams.get('outDir')
+    && !/^\/(api|_assets|share)\//.test(url.pathname)) {
+    url.searchParams.set('route', url.pathname || '/');
+    url.pathname = '/api/page';
+  }
+
+  // Interactive-preview file mirror: the clone's captured files at their original paths.
+  // Only on an isolated preview origin (PREVIEW_ORIGIN, or the API origin in local dev
+  // where the dashboard lives elsewhere), and only for a validly signed preview.
+  if ((req.method === 'GET' || req.method === 'HEAD')
+    && !/^\/(api|share|_assets)\//.test(url.pathname)
+    && (isPreviewHostRequest(req) || !previewOriginUrl())) {
+    const mirrorOutDir = previewMirrorTarget(req);
+    if (mirrorOutDir) {
+      const index = await previewMirrorIndex(mirrorOutDir).catch(() => null);
+      const rel = index && (index.byPath.get(url.pathname + url.search) || index.byPath.get(url.pathname));
+      const data = rel ? await readCloneFile(mirrorOutDir, rel).catch(() => null) : null;
+      if (data?.length) {
+        let contentType = /\.m?js$/i.test(url.pathname) ? 'application/javascript' : contentTypeForPath(url.pathname);
+        if (contentType === 'application/octet-stream') contentType = contentTypeForPath(rel);
+        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
+        res.end(req.method === 'HEAD' ? undefined : data);
+        return;
+      }
+      // Not captured (e.g. an image the crawl skipped): fall back to the original site.
+      if (index?.targetOrigin) {
+        res.writeHead(302, { Location: `${index.targetOrigin}${url.pathname}${url.search}`, 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
+    }
+  }
+
+  // The preview host serves clone pages and their files only — no account APIs,
+  // so scripts from a cloned site can't reach anything beyond the clone itself.
+  if (isPreviewHostRequest(req) && !isPreviewSurfacePath(url.pathname)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Not found');
+    return;
+  }
+
   // CORS — only allow our own origin, not arbitrary third-party sites
   if (reqOrigin) {
     if (isAllowedOrigin(reqOrigin)) {
@@ -4352,6 +4577,12 @@ async function handleRequest(req, res) {
         res.end(css);
         return true;
       }
+      if (contentType === 'application/javascript') {
+        const js = await rewritePreviewJsAsset(data.toString('utf8'), outDir).catch(() => data.toString('utf8'));
+        res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
+        res.end(js);
+        return true;
+      }
       res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
       res.end(data);
       return true;
@@ -4440,6 +4671,12 @@ async function handleRequest(req, res) {
       const css = await rewritePreviewCssAsset(data.toString('utf8'), outDir, storageRel.replace(/^public\//, '')).catch(() => data.toString('utf8'));
       res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
       res.end(css);
+      return;
+    }
+    if (/javascript/.test(contentType)) {
+      const js = await rewritePreviewJsAsset(data.toString('utf8'), outDir).catch(() => data.toString('utf8'));
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
+      res.end(js);
       return;
     }
     res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
@@ -4713,7 +4950,10 @@ async function handleRequest(req, res) {
     const pageUser = await getSessionUser(req);
     const outDir = resolveCloneOutDir(url.searchParams.get('outDir'));
     if (!outDir) { res.writeHead(404); res.end('No clone specified'); return; }
-    if (!await canReadOutDir(pageUser, outDir) && !await canReadCloneRecord(pageUser, outDir)) {
+    const previewGrant = readPreviewToken(outDir, url.searchParams.get('pt'));
+    // On a preview host, only a preview token may open pages (never a login).
+    if (isPreviewHostRequest(req) && !previewGrant) { res.writeHead(404); res.end('Not found'); return; }
+    if (!previewGrant && !await canReadOutDir(pageUser, outDir) && !await canReadCloneRecord(pageUser, outDir)) {
       if (!pageUser) return json(res, { error: 'Not authenticated' }, 401);
       res.writeHead(404); res.end('Not found'); return;
     }
@@ -4750,7 +4990,29 @@ async function handleRequest(req, res) {
       // Editor chrome (selection, inline text editing) is injected by the Frontend editor.
       html = html.replace(/(<body\b[^>]*?)\scontenteditable\s*=\s*(["']?)true\2/i, '$1');
     } else {
-      html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map), includeBase: false });
+      let keepScripts = !!previewGrant?.scripts && url.searchParams.get('scripts') === '1';
+      if (keepScripts) {
+        // The site's JS hydrates the exact server markup it was built for; the post-load
+        // snapshot (with Clonyfy's freezes) makes frameworks bail out and re-render.
+        // Clones captured before server HTML was saved stay in offline mode rather than
+        // running scripts against a snapshot they can't hydrate (blank pages).
+        const serverFile = resolved.filename.replace(/\.html$/i, '.server.html');
+        const serverData = await readCloneFile(outDir, join('captured-pages', serverFile)).catch(() => null);
+        if (serverData?.length) html = serverData.toString('utf8');
+        else keepScripts = false;
+      }
+      if (keepScripts) {
+        // Original markup + original asset paths (served by the preview mirror below).
+        const targetOrigin = await loadCloneTargetOrigin(outDir);
+        html = renderLivePreviewHtml(html, outDir, { routes: Object.keys(map), livePath: resolved.route, targetOrigin });
+        // Lets the mirror find this clone for files requested without a usable Referer.
+        // Only ever set on the isolated preview origin, which holds no login.
+        const cookieVal = new URLSearchParams({ outDir, pt: url.searchParams.get('pt') || '' }).toString();
+        const secure = String(req.headers['x-forwarded-proto'] || '').includes('https') ? '; Secure' : '';
+        res.setHeader('Set-Cookie', `${PREVIEW_COOKIE}=${encodeURIComponent(cookieVal)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=21600${secure}`);
+      } else {
+        html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map), includeBase: false });
+      }
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(html);
@@ -5634,6 +5896,34 @@ async function handleRequest(req, res) {
   }
 
   // ── Preview / export / delete ─────────────────────────────────────────────
+
+  // Interactive clone preview: the saved clone with the original site's scripts,
+  // served from an isolated origin under a clone-scoped token.
+  if (req.method === 'POST' && url.pathname === '/api/preview-url') {
+    const previewUser = await getSessionUser(req);
+    if (!previewUser) return json(res, { error: 'Not authenticated' }, 401);
+    const body = await readJsonBody(req);
+    const outDir = resolveCloneOutDir(body?.outDir);
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
+    if (!await canReadOutDir(previewUser, outDir) && !await canReadCloneRecord(previewUser, outDir)) {
+      return json(res, { error: 'Not found' }, 404);
+    }
+    const base = previewOriginUrl() || apiPublicUrl(req).replace(/\/$/, '');
+    let embedder = '';
+    try { embedder = new URL(String(req.headers.origin || req.headers.referer || '')).origin; } catch {}
+    let scripts = false;
+    try {
+      // Isolated = the preview never shares an origin with the dashboard (which holds the login).
+      scripts = !!previewOriginUrl() || (!!embedder && new URL(base).origin !== embedder);
+    } catch {}
+    const qs = new URLSearchParams({
+      outDir,
+      route: String(body?.route || '/'),
+      pt: createPreviewToken(outDir, { scripts }),
+    });
+    if (scripts) qs.set('scripts', '1');
+    return json(res, { url: `${base}/api/page?${qs.toString()}`, scripts });
+  }
 
   if (req.method === 'POST' && url.pathname === '/api/preview') {
     const previewUser = await getSessionUser(req);

@@ -500,6 +500,18 @@ export function pagePreviewUrl(outDir: string, route = "/", mode?: "editor") {
   return `${getApiBaseUrl()}/api/page?${params.toString()}`;
 }
 
+/**
+ * Interactive clone preview: the saved clone with the original site's scripts running,
+ * served from an isolated origin under a clone-scoped token. `scripts` is false when no
+ * isolated origin is available (scripts then stay disabled for safety).
+ */
+export async function fetchInteractivePreviewUrl(outDir: string, route = "/") {
+  return apiFetch<{ url: string; scripts: boolean }>("/api/preview-url", {
+    method: "POST",
+    body: { outDir, route },
+  });
+}
+
 /** Live JS preview — auth-gated redirect to the clone's real targetOrigin (embedded as-is). */
 export function pageLivePreviewUrl(outDir: string, route = "/") {
   const token = getAuthToken();
@@ -623,7 +635,9 @@ export function loadThemeEngine(): Promise<ThemeEngine> {
 }
 
 export async function fetchCloneTheme(outDir: string) {
-  return apiFetch<{ themeId: string | null }>(`/api/clone-theme?outDir=${encodeURIComponent(outDir)}`);
+  return apiFetch<{ themeId: string | null }>(
+    `/api/clone-theme?outDir=${encodeURIComponent(outDir)}`,
+  );
 }
 
 export async function setCloneTheme(outDir: string, themeId: string | null) {
