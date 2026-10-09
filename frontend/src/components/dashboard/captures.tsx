@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import type { CloneJob, CloneStatus } from "./data";
+import { useInteractivePreview } from "@/hooks/use-interactive-preview";
 import { ExportFigmaDialog } from "./export-figma-dialog";
 import { GitHubPushDialog } from "./github-push-dialog";
 import {
@@ -25,6 +26,7 @@ import {
   createShareLink,
   deleteOutput,
   downloadZipBlob,
+  fetchInteractivePreviewUrl,
   getApiBaseUrl,
   pageLivePreviewUrl,
   previewClone,
@@ -138,7 +140,7 @@ export function CaptureDetails({
   const [figmaOpen, setFigmaOpen] = useState(false);
   const [view, setView] = useState<CaptureDetailsView>("desktop");
   const canPreview = !!job?.outDir && job.status === "done";
-  const previewSrc = canPreview && job?.outDir ? pageLivePreviewUrl(job.outDir) : "";
+  const { src: previewSrc } = useInteractivePreview(job?.outDir, canPreview);
 
   useEffect(() => {
     setIframeError(false);
@@ -173,7 +175,11 @@ export function CaptureDetails({
     setBusy("preview");
     try {
       const data = await previewClone(job.outDir);
-      const url = data.url?.startsWith("http") ? data.url : pageLivePreviewUrl(job.outDir);
+      // New tab: the interactive clone when available, otherwise the previous preview.
+      const interactive = await fetchInteractivePreviewUrl(job.outDir).catch(() => null);
+      const url =
+        interactive?.url ||
+        (data.url?.startsWith("http") ? data.url : pageLivePreviewUrl(job.outDir));
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (err) {
       toast.error(
@@ -292,7 +298,8 @@ export function CaptureDetails({
             </DialogDescription>
             <CaptureStatus status={job.status} />
             <p className="mt-3 text-xs text-muted-foreground">
-              Preview embeds the live website. Use Edit pages for your offline clone.
+              Preview runs your clone with the original site&apos;s interactions. Use Edit pages to
+              change it.
             </p>
             <dl className="capture-detail-grid">
               {[

@@ -173,8 +173,11 @@ function navigationRuntime(CFG) {
   var currentRoute = params.get('route') || CFG.defaultRoute || '/';
   var authQuery = '';
   if (!isShare) {
+    // Interactive previews carry a clone-scoped preview token (never a login token).
+    var pt = params.get('pt');
     var tok = params.get('access_token') || params.get('authToken');
-    if (tok) authQuery = '&access_token=' + encodeURIComponent(tok);
+    if (pt) authQuery = '&pt=' + encodeURIComponent(pt) + (params.get('scripts') === '1' ? '&scripts=1' : '');
+    else if (tok) authQuery = '&access_token=' + encodeURIComponent(tok);
   }
   function bareHost(h) { return String(h || '').toLowerCase().replace(/^www\./, ''); }
   var targetHost = '';
@@ -378,8 +381,12 @@ function navigationRuntime(CFG) {
       return native.call(this, state, title);
     };
   }
-  history.pushState = wrapHistory(nativePush);
-  history.replaceState = wrapHistory(nativeReplace);
+  // With the site's own JS running, its router owns in-page history (the page already
+  // sits at its real path). Rewriting its URLs back to /api/page loops forever.
+  if (!window.__clonyfyLiveScripts) {
+    history.pushState = wrapHistory(nativePush);
+    history.replaceState = wrapHistory(nativeReplace);
+  }
 
   window.open = function (url, target, features) {
     if (url == null || url === '') return nativeOpen.apply(window, arguments);
@@ -419,6 +426,8 @@ function navigationRuntime(CFG) {
       navApi.addEventListener('navigate', function (e) {
         if (e.hashChange || e.downloadRequest != null) return;
         if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
+        // Live site JS: in-page route changes (pushState) belong to the site's router.
+        if (window.__clonyfyLiveScripts && e.destination && e.destination.sameDocument) return;
         var dest;
         try { dest = new URL(e.destination.url); } catch (x) { return; }
         if (dest.origin === location.origin && /^\/(api|_assets|share)\//.test(dest.pathname)) return;
@@ -1372,6 +1381,8 @@ function interactionRuntime() {
     var watch = clickWatch;
     setTimeout(function () {
       if (clickWatch === watch) clickWatch = null;
+      // With the site's own JS running, the button is handled by the site — stay quiet.
+      if (window.__clonyfyLiveScripts) return;
       if (!watch.changed && Math.abs(window.scrollY - scrollY) < 2) {
         toast("This button's action is not cloned yet", 'Interactive JS from the original site is disabled in the preview.');
       }
@@ -1612,7 +1623,8 @@ function animationRuntime() {
    * anchor's progress through the viewport, so they survive a different iframe size.
    */
   function installScrollTimeline() {
-    if (window.__clonyfyScrollTimeline) return;
+    // The site's own scroll code is running — replaying the recording would fight it.
+    if (window.__clonyfyScrollTimeline || window.__clonyfyLiveScripts) return;
     var node = document.getElementById('__clonyfy_scroll_timeline__');
     if (!node) return;
     var data;

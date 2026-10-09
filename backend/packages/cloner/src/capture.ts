@@ -31,6 +31,7 @@ import {
   isFrameworkErrorPageInDocument,
   isThinSpaShell,
   pathnameOfUrl,
+  restoreSelfRemovingScripts,
   pathnamesMatch,
 } from './captureQuality.js';
 
@@ -2376,6 +2377,10 @@ export async function capturePage(
     }
   }
 
+  // SSR hydration scripts that deleted themselves after running must come back, or
+  // the site's JS crashes at startup when the clone runs it (TanStack's $_TSR, …).
+  finalHtml = restoreSelfRemovingScripts(finalHtml, serverHtml);
+
   finalHtml = injectInteractionsScript(finalHtml, interactionsScript);
   // Markers (data-clonyfy-st) only exist in this page load — skip after a reload.
   if (/data-clonyfy-s[tr]=/.test(finalHtml)) finalHtml = injectScrollTimeline(finalHtml, scrollTimeline);
@@ -2503,6 +2508,7 @@ export async function capturePage(
       url: pageUrl,
       route,
       html: finalHtml,
+      ...(serverHtml && /<html|<body/i.test(serverHtml) && !isFrameworkErrorHtml(serverHtml) ? { serverHtml } : {}),
       assets,
       network: networkLog,
       failedAssets: [...failedAssets],

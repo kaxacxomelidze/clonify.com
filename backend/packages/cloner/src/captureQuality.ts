@@ -98,6 +98,38 @@ export function isFrameworkErrorPageInDocument(): boolean {
     && /page could not be displayed|Something has gone wrong/i.test(text);
 }
 
+/** Framework hydration payloads that the app reads at startup. */
+const HYDRATION_MARKER = /\$_TSR|__remixContext|__staticRouterHydrationData|__reactRouterContext|window\.__NUXT__|__APOLLO_STATE__|__INITIAL_STATE__|__PRELOADED_STATE__|self\.__next_f|__sveltekit/;
+const SELF_REMOVE = /currentScript\??\.remove\(\)|currentScript\??\.parentNode\??\.removeChild|\.remove\(\)/;
+
+/**
+ * SSR frameworks (TanStack Start, Remix, streaming React…) ship their hydration data
+ * in inline scripts that delete themselves after running, so a post-load snapshot
+ * lacks them and the app crashes when the clone runs its JS again. Re-add inline
+ * scripts from the server HTML that are missing from the snapshot and either remove
+ * themselves or carry hydration data — in their original order, at the top of <body>.
+ */
+export function restoreSelfRemovingScripts(snapshotHtml: string, serverHtml: string): string {
+  const snapshot = String(snapshotHtml || '');
+  const server = String(serverHtml || '');
+  if (!snapshot || !server) return snapshot;
+  const restored: string[] = [];
+  for (const m of server.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const attrs = m[1] || '';
+    const body = (m[2] || '').trim();
+    if (!body || /\bsrc\s*=/i.test(attrs)) continue;
+    if (/\btype\s*=\s*["']?(?:application\/(?:ld\+)?json|importmap|speculationrules)/i.test(attrs)) continue;
+    if (!SELF_REMOVE.test(body) && !HYDRATION_MARKER.test(body)) continue;
+    if (snapshot.includes(body.slice(0, 160))) continue; // still present — nothing to restore
+    restored.push(`<script${attrs} data-clonyfy-restored-ssr>${m[2]}</script>`);
+  }
+  if (!restored.length) return snapshot;
+  const bodyOpen = snapshot.match(/<body\b[^>]*>/i);
+  if (!bodyOpen || bodyOpen.index === undefined) return restored.join('') + snapshot;
+  const at = bodyOpen.index + bodyOpen[0].length;
+  return snapshot.slice(0, at) + restored.join('') + snapshot.slice(at);
+}
+
 /**
  * Prefer keeping an existing capture when a later write for the same route is
  * thinner (query-variant race / failed re-capture).

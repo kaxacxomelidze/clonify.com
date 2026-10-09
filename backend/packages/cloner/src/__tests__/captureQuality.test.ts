@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isFrameworkErrorHtml,
   isThinSpaShell,
+  restoreSelfRemovingScripts,
   normalizePathname,
   pathnameOfUrl,
   pathnamesMatch,
@@ -72,5 +73,26 @@ describe('shouldReplaceCapturedHtml', () => {
 
   it('replaces a shell with a real page', () => {
     expect(shouldReplaceCapturedHtml(shell, rich)).toBe(true);
+  });
+});
+
+describe('restoreSelfRemovingScripts', () => {
+  const server = '<html><head><script>theme()</script></head><body>'
+    + '<script class="$tsr">self.$_TSR={c:1};document.currentScript.remove()</script>'
+    + '<div id="app">Hi</div><script type="application/json">{"a":1}</script>'
+    + '<script src="/a.js"></script><script>analytics()</script></body></html>';
+
+  it('puts back hydration scripts that removed themselves', () => {
+    const snapshot = '<html><head><script>theme()</script></head><body><div id="app">Hi</div></body></html>';
+    const out = restoreSelfRemovingScripts(snapshot, server);
+    expect(out).toContain('<body><script class="$tsr" data-clonyfy-restored-ssr>self.$_TSR={c:1}');
+    expect(out).not.toContain('analytics()'); // ordinary scripts that weren't self-removing stay out
+    expect(out.match(/theme\(\)/g)).toHaveLength(1); // already present — not duplicated
+  });
+
+  it('leaves the snapshot alone when nothing is missing or no server HTML exists', () => {
+    const snapshot = '<body><script>self.$_TSR={c:1};document.currentScript.remove()</script></body>';
+    expect(restoreSelfRemovingScripts(snapshot, server)).toBe(snapshot);
+    expect(restoreSelfRemovingScripts(snapshot, '')).toBe(snapshot);
   });
 });

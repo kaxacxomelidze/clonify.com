@@ -34,6 +34,8 @@ export interface PageRecord {
   url: string;
   route: string;   // pathname e.g. "/about"
   html: string;    // rewritten HTML
+  /** The site's original server response — what its JS hydrates from (interactive preview). */
+  serverHtml?: string;
   assets: AssetEntry[];
   network: NetworkEntry[];
   failedAssets?: string[]; // URLs that could not be saved locally
