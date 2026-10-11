@@ -2945,7 +2945,10 @@ function neutralizeCloneScripts(html) {
     return `<script${nextAttrs}>${body}</script>`;
   });
   // Stop browsers from fetching framework bundles before our neutralize runs.
-  out = out.replace(/<link\b([^>]*)>/gi, (match, attrs = '') => {
+  // Idempotent: links already disabled (inside our comment) are left alone — wrapping
+  // them again leaves a stray "-->" on the page as visible text (editor runs this twice).
+  out = out.replace(/<!--clonyfy-disabled-script-preload[\s\S]*?-->|<link\b([^>]*)>/gi, (match, attrs = '') => {
+    if (match.startsWith('<!--')) return match;
     const a = String(attrs);
     const isModulePreload = /\brel\s*=\s*["']modulepreload["']/i.test(a);
     const isScriptPreload = /\brel\s*=\s*["']preload["']/i.test(a) && /\bas\s*=\s*["']script["']/i.test(a);
