@@ -358,7 +358,8 @@ export function describeElement(el: HTMLElement, hasInlineEdits: boolean): Selec
   const link = el.closest("a");
   const bg = toHex(cs.backgroundColor);
   const shadowFilter = /drop-shadow/i.test(cs.filter || "");
-  const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+  // innerText keeps the visual gaps between blocks ("Log in Get started", not "Log inGet started").
+  const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
   const fontSize = parseFloat(cs.fontSize) || 16;
   const lh =
     cs.lineHeight === "normal" ? 1.2 : (parseFloat(cs.lineHeight) || fontSize * 1.2) / fontSize;

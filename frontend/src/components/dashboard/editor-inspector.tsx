@@ -151,6 +151,46 @@ function IconAction({
   );
 }
 
+/** Toolbar action with a visible label (no hovering needed to know what it does). */
+function ToolButton({
+  icon: Icon,
+  label,
+  hint,
+  onClick,
+  disabled,
+  active,
+  danger,
+}: {
+  icon: typeof Type;
+  label: string;
+  hint: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={hint}
+      aria-label={hint}
+      aria-pressed={active}
+      className={`flex h-12 flex-col items-center justify-center gap-1 rounded-lg text-[10px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-30 ${
+        active
+          ? "bg-foreground text-background"
+          : danger
+            ? "text-red-400 hover:bg-red-500/10"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+      }`}
+    >
+      <Icon size={15} />
+      {label}
+    </button>
+  );
+}
+
 function Group({
   title,
   icon: Icon,
@@ -164,13 +204,31 @@ function Group({
   aside?: ReactNode;
   defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  // Remember open/closed per section across selections and reloads.
+  const storageKey = `clonyfy.inspector.group.${title}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      return saved === null ? defaultOpen : saved === "1";
+    } catch {
+      return defaultOpen;
+    }
+  });
+  const toggle = () =>
+    setOpen((v) => {
+      try {
+        window.localStorage.setItem(storageKey, v ? "0" : "1");
+      } catch {
+        /* storage unavailable — still toggles */
+      }
+      return !v;
+    });
   return (
     <section className="border-b border-hairline last:border-b-0">
       <div className="flex items-center gap-2 px-4 py-3">
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={toggle}
           aria-expanded={open}
           className="flex flex-1 items-center gap-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground transition-colors hover:text-foreground"
         >
@@ -477,15 +535,20 @@ function Typography({
   sel,
   palette,
   a,
+  title = "Typography",
+  defaultOpen = true,
 }: {
   sel: SelectionInfo;
   palette: string[];
   a: InspectorActions;
+  title?: string;
+  defaultOpen?: boolean;
 }) {
   const known = FONT_LIBRARY.some((g) => g.families.includes(sel.fontFamily));
   return (
     <Group
-      title="Typography"
+      title={title}
+      defaultOpen={defaultOpen}
       icon={Type}
       aside={
         sel.similarCount > 1 ? (
@@ -671,7 +734,11 @@ function DesignTab({
   palette: string[];
   a: InspectorActions;
 }) {
-  const hasText = sel.canEditText || ["heading", "text", "link", "button"].includes(sel.kind);
+  // Text elements lead with Typography; layout blocks lead with Fill/Spacing and keep
+  // the (inherited) text styles collapsed at the bottom as "Text inside".
+  const isTextual = ["heading", "text", "link", "button"].includes(sel.kind);
+  const hasText = isTextual;
+  const hasTextInside = !isTextual && sel.canEditText;
   const shadow =
     SHADOW_PRESETS.find((p) => p.value.replace(/\s/g, "") === sel.boxShadow.replace(/\s/g, ""))
       ?.id ?? (sel.boxShadow === "none" ? "none" : "");
@@ -824,6 +891,9 @@ function DesignTab({
           />
         </Row>
       </Group>
+      {hasTextInside && (
+        <Typography sel={sel} palette={palette} a={a} title="Text inside" defaultOpen={false} />
+      )}
     </div>
   );
 }
@@ -1094,7 +1164,7 @@ export function EditorInspector({
   return (
     <TooltipProvider delayDuration={250}>
       <aside
-        className="flex h-[78vh] min-h-[520px] flex-col overflow-hidden rounded-2xl border border-border bg-card/60 shadow-[var(--glow)] backdrop-blur"
+        className="flex h-[78vh] min-h-[520px] flex-col self-start lg:sticky lg:top-4 overflow-hidden rounded-2xl border border-border bg-card/60 shadow-[var(--glow)] backdrop-blur"
         aria-label="Element inspector"
       >
         {/* Header */}
@@ -1123,7 +1193,10 @@ export function EditorInspector({
                     )}
                   </p>
                   <p className="mt-0.5 truncate text-sm font-medium" title={sel.label || sel.name}>
-                    {sel.label || sel.name}
+                    {/* Layout blocks: their combined text reads as noise — show a name. */}
+                    {["container", "section", "list"].includes(sel.kind)
+                      ? sel.name
+                      : sel.label || sel.name}
                   </p>
                 </div>
                 <IconAction label="Deselect (Esc)" onClick={a.deselect}>
@@ -1151,44 +1224,55 @@ export function EditorInspector({
                   );
                 })}
               </nav>
-              <div className="mt-3 flex items-center justify-between rounded-xl border border-border bg-background/50 p-0.5">
-                <IconAction
-                  label="Edit text (Enter)"
+              <div className="mt-3 grid grid-cols-7 gap-1 rounded-xl border border-border bg-background/50 p-1">
+                <ToolButton
+                  icon={Pencil}
+                  label="Edit"
+                  hint="Edit text (Enter)"
                   onClick={a.editText}
                   disabled={!sel.canEditText || editingText}
-                >
-                  <Pencil size={14} />
-                </IconAction>
-                <IconAction
-                  label="Select parent"
+                />
+                <ToolButton
+                  icon={CornerLeftUp}
+                  label="Parent"
+                  hint="Select the parent element"
                   onClick={() => a.selectAncestor(1)}
                   disabled={!sel.hasParent}
-                >
-                  <CornerLeftUp size={14} />
-                </IconAction>
-                <IconAction label="Duplicate (Ctrl+D)" onClick={a.duplicate}>
-                  <Copy size={14} />
-                </IconAction>
-                <IconAction label="Move up" onClick={() => a.move("up")} disabled={!sel.canMoveUp}>
-                  <ArrowUp size={14} />
-                </IconAction>
-                <IconAction
-                  label="Move down"
+                />
+                <ToolButton
+                  icon={Copy}
+                  label="Copy"
+                  hint="Duplicate (Ctrl+D)"
+                  onClick={a.duplicate}
+                />
+                <ToolButton
+                  icon={ArrowUp}
+                  label="Up"
+                  hint="Move up"
+                  onClick={() => a.move("up")}
+                  disabled={!sel.canMoveUp}
+                />
+                <ToolButton
+                  icon={ArrowDown}
+                  label="Down"
+                  hint="Move down"
                   onClick={() => a.move("down")}
                   disabled={!sel.canMoveDown}
-                >
-                  <ArrowDown size={14} />
-                </IconAction>
-                <IconAction
-                  label={sel.hidden ? "Show element" : "Hide element"}
+                />
+                <ToolButton
+                  icon={sel.hidden ? Eye : EyeOff}
+                  label={sel.hidden ? "Show" : "Hide"}
+                  hint={sel.hidden ? "Show element" : "Hide element"}
                   onClick={a.toggleHidden}
                   active={sel.hidden}
-                >
-                  {sel.hidden ? <Eye size={14} /> : <EyeOff size={14} />}
-                </IconAction>
-                <IconAction label="Delete (Del)" onClick={a.remove} danger>
-                  <Trash2 size={14} />
-                </IconAction>
+                />
+                <ToolButton
+                  icon={Trash2}
+                  label="Delete"
+                  hint="Delete (Del)"
+                  onClick={a.remove}
+                  danger
+                />
               </div>
             </>
           ) : (
