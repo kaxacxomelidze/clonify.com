@@ -5007,6 +5007,8 @@ async function handleRequest(req, res) {
       if (keepScripts) {
         // Original markup + original asset paths (served by the preview mirror below).
         const targetOrigin = await loadCloneTargetOrigin(outDir);
+        // Site Style lives in the edited snapshots; apply the clone's chosen style here too.
+        html = applyThemeScriptToHtml(html, getThemeModel(await readCloneThemeId(outDir)));
         html = renderLivePreviewHtml(html, outDir, { routes: Object.keys(map), livePath: resolved.route, targetOrigin });
         // Lets the mirror find this clone for files requested without a usable Referer.
         // Only ever set on the isolated preview origin, which holds no login.
@@ -5178,6 +5180,13 @@ async function handleRequest(req, res) {
       const themeModel = getThemeModel(await readCloneThemeId(outDir));
       const stored = applyThemeScriptToHtml(sanitizeStoredCloneHtml(String(html ?? '')), themeModel);
       await writeCloneFile(outDir, join('captured-pages', resolved.filename), stored, 'text/html; charset=utf-8');
+      // The page now carries the user's edits. Its original server HTML (used by the
+      // interactive preview) knows nothing about them, so retire it: previews of this
+      // page then show the edited version instead of silently showing the original.
+      const serverRel = join('captured-pages', resolved.filename.replace(/\.html$/i, '.server.html'));
+      if (await readCloneFile(outDir, serverRel).catch(() => null)) {
+        await writeCloneFile(outDir, serverRel, '', 'text/html; charset=utf-8').catch(() => {});
+      }
       const recorded = await consumeUsageQuota(saveUser, 'save', { outDir });
       json(res, { ok: true, route: resolved.route, usage: { kind: 'save', used: recorded.used, limit: recorded.limit } });
     }).catch(err => {
@@ -6218,7 +6227,9 @@ async function handleRequest(req, res) {
     try {
       const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
-      const filename = map[route] || map['/'];
+      // Same route resolution as the previews (incl. the landing-page fallback when the
+      // site's home page wasn't captured, e.g. /home on lovable.dev).
+      const filename = resolveSharedRoute(map, route, '/').filename;
       if (!filename) return json(res, { error: 'Route not found' }, 404);
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
       if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
@@ -6268,7 +6279,9 @@ async function handleRequest(req, res) {
     try {
       const map = await loadRouteMapWithRematerialize(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
-      const filename = map[route] || map['/'];
+      // Same route resolution as the previews (incl. the landing-page fallback when the
+      // site's home page wasn't captured, e.g. /home on lovable.dev).
+      const filename = resolveSharedRoute(map, route, '/').filename;
       if (!filename) return json(res, { error: 'Route not found' }, 404);
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
       if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
@@ -6331,7 +6344,7 @@ async function handleRequest(req, res) {
         routes,
         rewriteHtml: async (raw, dir) => prepareHtmlForFigmaExport(String(raw), dir),
         readHtml: async (dir, route) => {
-          const pageFile = map[route] || map['/'];
+          const pageFile = resolveSharedRoute(map, route, '/').filename;
           const pageData = await readCloneFile(dir, capturedPageStorageRel(pageFile));
           if (!pageData) throw new Error(`Missing page file for ${route}`);
           return pageData.toString('utf8');
