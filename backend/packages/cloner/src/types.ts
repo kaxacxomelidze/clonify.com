@@ -36,6 +36,8 @@ export interface PageRecord {
   html: string;    // rewritten HTML
   /** The site's original server response — what its JS hydrates from (interactive preview). */
   serverHtml?: string;
+  /** Top-viewport PNG of the live page at capture time (preview-mode choice; not persisted). */
+  liveScreenshot?: Buffer;
   assets: AssetEntry[];
   network: NetworkEntry[];
   failedAssets?: string[]; // URLs that could not be saved locally

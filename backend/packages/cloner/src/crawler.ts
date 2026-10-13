@@ -90,7 +90,7 @@ export function systemBrowserChannel(
   return undefined;
 }
 
-async function getChromiumLaunchOptions(chromium: ChromiumLauncher) {
+export async function getChromiumLaunchOptions(chromium: ChromiumLauncher) {
   const playwrightPath = IS_SERVERLESS ? '' : chromium.executablePath();
   const useBundledChromium = shouldUseBundledChromium(playwrightPath);
   const channel = systemBrowserChannel(playwrightPath);

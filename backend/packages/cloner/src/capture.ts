@@ -189,6 +189,8 @@ window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 const IS_FAST = IS_FAST_CLONE;
 const NAVIGATION_TIMEOUT = IS_FAST ? 18_000 : 30_000;
 const ROUTE_FETCH_TIMEOUT = IS_FAST ? 8_000 : 15_000;
+/** Request types loaded natively by the browser and copied from the response event. */
+const NATIVE_LOAD_TYPES = new Set(['image', 'font', 'media', 'script']);
 
 /** Re-navigate if interaction recording / clicks drifted away from the requested page. */
 async function restoreRequestedUrl(page: Page, pageUrl: string, reason: string): Promise<boolean> {
@@ -882,16 +884,38 @@ export async function capturePage(
       return;
     }
 
+    // Images, fonts, media and scripts are saved exactly as received, so the browser
+    // loads them natively (fully parallel) and the response listener below copies the
+    // bytes. Funnelling them through route.fetch() queues them: sites that fire 100+
+    // requests at once (framer.com) stalled for 15–20s per file and timed out.
+    if (NATIVE_LOAD_TYPES.has(resourceType)) {
+      await route.continue().catch(() => {});
+      return;
+    }
+
     let response;
     try {
       response = await route.fetch({ timeout: ROUTE_FETCH_TIMEOUT });
-      // route.fetch follows redirects itself; reject ones that landed inside.
-      if (!(await isPublicUrl(response.url()))) {
-        throw new Error(`redirected to a private address: ${response.url()}`);
-      }
     } catch (err) {
-      logger.debug(`  [FETCH FAIL] ${url}: ${(err as Error).message}`);
-      await route.abort();
+      // Our side-channel fetch can stall on some CDNs (e.g. framerusercontent.com)
+      // while the browser loads the same URL fine. Aborting here turned the MAIN
+      // document into Chromium's error page, which was then saved as the clone.
+      // Let the browser load it natively instead (that file just isn't saved here).
+      logger.debug(`  [FETCH FAIL] ${url}: ${(err as Error).message} — continuing natively`);
+      await route.continue().catch(() => route.abort().catch(() => {}));
+      return;
+    }
+    // Keep the main document's server HTML as soon as we have it: page.goto() can time
+    // out waiting for "load" on heavy pages (raycast.com, walmart.com), and the HTML
+    // read from goto's response was then lost — dropping the interactive preview.
+    if (resourceType === 'document' && req.isNavigationRequest() && req.frame() === page.mainFrame()
+      && response.status() >= 200 && response.status() < 300) {
+      try { mainDocumentHtml = await response.text(); } catch { /* body unavailable */ }
+    }
+    // route.fetch follows redirects itself; reject ones that landed inside.
+    if (!(await isPublicUrl(response.url()))) {
+      logger.debug(`  [BLOCKED private redirect] ${url} -> ${response.url()}`);
+      await route.abort('blockedbyclient');
       return;
     }
 
@@ -1010,6 +1034,45 @@ export async function capturePage(
     await route.fulfill({ response });
   });
 
+  // Main document HTML as served (set by the route handler; see serverHtml below).
+  let mainDocumentHtml = '';
+
+  // Copy natively loaded assets (see NATIVE_LOAD_TYPES in the route handler).
+  const pendingNativeSaves = new Set<Promise<void>>();
+  page.on('response', (response) => {
+    const req = response.request();
+    const resourceType = req.resourceType();
+    if (!NATIVE_LOAD_TYPES.has(resourceType)) return;
+    const url = response.url();
+    const status = response.status();
+    if (status < 200 || status >= 300 || shouldSkipAsset(url)) return;
+    // Stubs and files we served ourselves are not the site's assets.
+    if (SCRIPT_STUB_PATTERNS.some((p) => p.test(url)) || ABORT_PATTERNS.some((p) => p.test(url))) return;
+    try { if (new URL(url).pathname.startsWith('/_assets/')) return; } catch { return; }
+    const job: Promise<void> = (async () => {
+      const contentType = response.headers()['content-type'] ?? '';
+      if (resourceType === 'script' && /text\/html|application\/json|xml/.test(contentType)) return;
+      const len = Number(response.headers()['content-length'] || 0);
+      if (len > maxAssetBytes) {
+        logger.debug(`  [ASSET SKIP] ${url} - too large (${(len / 1024 / 1024).toFixed(1)}MB)`);
+        return;
+      }
+      const buf = await response.body();
+      assetsIntercepted++;
+      const effectiveType = contentType
+        || (resourceType === 'image' ? 'image/png'
+          : resourceType === 'font' ? 'font/woff2'
+          : resourceType === 'script' ? 'application/javascript'
+          : 'application/octet-stream');
+      await saveAsset(url, buf, effectiveType, false);
+      networkLog.push({ method: req.method(), url, postData: req.postData(), status, contentType, body: null });
+    })().catch((err) => {
+      logger.debug(`  [BODY ERR] ${url}: ${(err as Error).message}`);
+    });
+    pendingNativeSaves.add(job);
+    void job.finally(() => pendingNativeSaves.delete(job));
+  });
+
   try { // outer try - ensures page.close() always runs
   logger.debug(`  [NAV] -> ${pageUrl}`);
   let serverHtml = '';
@@ -1040,9 +1103,19 @@ export async function capturePage(
     if (!isNonFatal) throw err;
     logger.debug(`  [NAV WARN] ${msg}`);
   }
+  // goto() timed out (or gave no body): use the HTML captured from the main document.
+  if (!serverHtml && mainDocumentHtml) serverHtml = mainDocumentHtml;
 
   // Wait for web fonts so the HTML snapshot reflects the real rendered state
   await page.evaluate(() => document.fonts.ready).catch(() => {});
+
+  // Reference picture of the live page (top viewport, before any capture freezes):
+  // used after capture to pick the preview mode that actually looks closer.
+  let liveScreenshot: Buffer | null = null;
+  try {
+    await page.waitForTimeout(1500);
+    liveScreenshot = await page.screenshot({ type: 'png', timeout: 10_000 });
+  } catch { /* optional */ }
 
   // Scroll to trigger lazy-loaded images and content.
   // Re-check scrollHeight each step - some sites (infinite scroll, lazy sections) grow the page as you scroll.
@@ -2324,6 +2397,11 @@ export async function capturePage(
     if (reset) logger.debug(`  [SCRIPT-BUILT] reset ${reset} container(s) the page's own JS rebuilds`);
   }
 
+  // Natively loaded assets still being copied must land before the HTML is rewritten.
+  await Promise.race([
+    Promise.allSettled([...pendingNativeSaves]),
+    new Promise((resolve) => setTimeout(resolve, 20_000)),
+  ]);
   let html = await page.content();
   const deferredEdits = await page.evaluate(
     () => (window as unknown as { __clonyfyDeferred?: DeferredDomEdits }).__clonyfyDeferred || {},
@@ -2509,6 +2587,7 @@ export async function capturePage(
       route,
       html: finalHtml,
       ...(serverHtml && /<html|<body/i.test(serverHtml) && !isFrameworkErrorHtml(serverHtml) ? { serverHtml } : {}),
+      ...(liveScreenshot ? { liveScreenshot } : {}),
       assets,
       network: networkLog,
       failedAssets: [...failedAssets],

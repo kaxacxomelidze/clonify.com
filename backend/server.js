@@ -1546,6 +1546,44 @@ function readPreviewToken(outDir, token) {
  * so remapped addresses leave the site's JS waiting forever. The clone is identified
  * by a cookie set on the preview origin (which holds no login) or by the Referer. */
 const PREVIEW_COOKIE = 'clonyfy_preview';
+const PREVIEW_CDN_PREFIX = '/__clonyfy_cdn/';
+
+/** Point captured cross-origin URLs at the preview's CDN mirror (attributes + CSS only). */
+function mirrorCdnUrls(text, cdnByUrl, { css = false } = {}) {
+  if (!cdnByUrl?.size) return text;
+  const map = (raw) => {
+    const value = String(raw || '').trim();
+    if (!/^(https?:)?\/\//i.test(value)) return null;
+    try {
+      const u = new URL(value, 'https://x.invalid');
+      return cdnByUrl.get(u.origin + u.pathname + u.search) || cdnByUrl.get(u.origin + u.pathname) || null;
+    } catch { return null; }
+  };
+  const rewriteCss = (s) => String(s).replace(/url\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi, (m, q, v) => {
+    const hit = map(v);
+    return hit ? `url(${q}${hit}${q})` : m;
+  });
+  if (css) return rewriteCss(text);
+  let out = String(text || '');
+  // Attributes (never script bodies — framework data streams must stay byte-identical).
+  out = out.replace(/(\s(?:src|href|poster|data-src)\s*=\s*)(["'])([^"']*)\2/gi, (m, pre, q, v) => {
+    const hit = map(v);
+    return hit ? `${pre}${q}${hit}${q}` : m;
+  });
+  out = out.replace(/(\s(?:srcset|imagesrcset|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi, (m, pre, q, list) => {
+    const next = list.split(',').map((part) => {
+      const seg = part.trim();
+      const sp = seg.search(/\s/);
+      const u = sp === -1 ? seg : seg.slice(0, sp);
+      const hit = map(u);
+      return hit ? hit + (sp === -1 ? '' : seg.slice(sp)) : seg;
+    }).join(', ');
+    return `${pre}${q}${next}${q}`;
+  });
+  // Inline <style> blocks (@font-face sources, backgrounds).
+  out = out.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (_m, open, body, close) => open + rewriteCss(body) + close);
+  return out;
+}
 const _mirrorIndexCache = new Map(); // outDir → { exp, targetOrigin, byPath }
 
 async function previewMirrorIndex(outDir) {
@@ -1554,15 +1592,26 @@ async function previewMirrorIndex(outDir) {
   const { originalByRelPath, targetOrigin } = await buildPreviewAssetContext(outDir);
   const origin = String(targetOrigin || '').replace(/\/$/, '');
   const byPath = new Map();
+  // Captured files from OTHER domains (CDN fonts/CSS/images) are served under
+  // /__clonyfy_cdn/<host>/<path>: live CDNs often refuse fonts to foreign origins.
+  const cdnByUrl = new Map(); // absolute original URL (with and without query) → mirror path
   for (const [relPath, original] of Object.entries(originalByRelPath || {})) {
     let u;
     try { u = new URL(original); } catch { continue; }
-    if (u.origin !== origin) continue;
+    if (!/^https?:$/.test(u.protocol)) continue;
     const local = relPath.startsWith('public/') ? relPath : `public/${relPath.replace(/^\/+/, '')}`;
-    byPath.set(u.pathname + u.search, local);
-    if (!byPath.has(u.pathname)) byPath.set(u.pathname, local);
+    if (u.origin === origin) {
+      byPath.set(u.pathname + u.search, local);
+      if (!byPath.has(u.pathname)) byPath.set(u.pathname, local);
+      continue;
+    }
+    const mirrorPath = `${PREVIEW_CDN_PREFIX}${u.host}${u.pathname}`;
+    byPath.set(mirrorPath + u.search, local);
+    if (!byPath.has(mirrorPath)) byPath.set(mirrorPath, local);
+    cdnByUrl.set(u.origin + u.pathname + u.search, mirrorPath + u.search);
+    if (!cdnByUrl.has(u.origin + u.pathname)) cdnByUrl.set(u.origin + u.pathname, mirrorPath);
   }
-  const entry = { exp: Date.now() + 60_000, targetOrigin: origin, byPath };
+  const entry = { exp: Date.now() + 60_000, targetOrigin: origin, byPath, cdnByUrl };
   _mirrorIndexCache.set(outDir, entry);
   if (_mirrorIndexCache.size > 200) _mirrorIndexCache.delete(_mirrorIndexCache.keys().next().value);
   return entry;
@@ -4458,11 +4507,22 @@ async function handleRequest(req, res) {
       if (data?.length) {
         let contentType = /\.m?js$/i.test(url.pathname) ? 'application/javascript' : contentTypeForPath(url.pathname);
         if (contentType === 'application/octet-stream') contentType = contentTypeForPath(rel);
+        let body = data;
+        // Stylesheets may reference other captured CDN files by absolute URL (fonts).
+        if (contentType.startsWith('text/css')) body = Buffer.from(mirrorCdnUrls(data.toString('utf8'), index.cdnByUrl, { css: true }), 'utf8');
         res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' });
-        res.end(req.method === 'HEAD' ? undefined : data);
+        res.end(req.method === 'HEAD' ? undefined : body);
         return;
       }
-      // Not captured (e.g. an image the crawl skipped): fall back to the original site.
+      // Not captured: fall back to the original file (CDN mirror paths → their CDN).
+      if (url.pathname.startsWith(PREVIEW_CDN_PREFIX)) {
+        const rest = url.pathname.slice(PREVIEW_CDN_PREFIX.length);
+        if (/^[a-z0-9.-]+(:\d+)?\//i.test(rest)) {
+          res.writeHead(302, { Location: `https://${rest}${url.search}`, 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
       if (index?.targetOrigin) {
         res.writeHead(302, { Location: `${index.targetOrigin}${url.pathname}${url.search}`, 'Cache-Control': 'no-store' });
         res.end();
@@ -4999,8 +5059,14 @@ async function handleRequest(req, res) {
         // snapshot (with Clonyfy's freezes) makes frameworks bail out and re-render.
         // Clones captured before server HTML was saved stay in offline mode rather than
         // running scripts against a snapshot they can't hydrate (blank pages).
+        // The cloner measured at capture time whether this page's own JS still renders its
+        // content without the original backend; pages marked offline preview offline.
+        const modesData = await readCloneFile(outDir, 'preview-mode.json').catch(() => null);
+        const modes = modesData ? safeJsonParse(modesData.toString('utf8'), {}) : {};
         const serverFile = resolved.filename.replace(/\.html$/i, '.server.html');
-        const serverData = await readCloneFile(outDir, join('captured-pages', serverFile)).catch(() => null);
+        const serverData = modes?.[resolved.filename] === 'offline'
+          ? null
+          : await readCloneFile(outDir, join('captured-pages', serverFile)).catch(() => null);
         if (serverData?.length) html = serverData.toString('utf8');
         else keepScripts = false;
       }
@@ -5009,6 +5075,9 @@ async function handleRequest(req, res) {
         const targetOrigin = await loadCloneTargetOrigin(outDir);
         // Site Style lives in the edited snapshots; apply the clone's chosen style here too.
         html = applyThemeScriptToHtml(html, getThemeModel(await readCloneThemeId(outDir)));
+        // Captured CDN files (fonts especially) come from the preview's own mirror.
+        const mirror = await previewMirrorIndex(outDir).catch(() => null);
+        if (mirror) html = mirrorCdnUrls(html, mirror.cdnByUrl);
         html = renderLivePreviewHtml(html, outDir, { routes: Object.keys(map), livePath: resolved.route, targetOrigin });
         // Lets the mirror find this clone for files requested without a usable Referer.
         // Only ever set on the isolated preview origin, which holds no login.

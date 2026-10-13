@@ -4,6 +4,7 @@ import { checkRobots } from './robots.js';
 import { crawl, isFastCloneProfile, isServerlessRuntime } from './crawler.js';
 import { shouldReplaceCapturedHtml } from './captureQuality.js';
 import { botProtectionMessage, takeBotProtection } from './botProtection.js';
+import { choosePreviewModes, type LiveCheckPage } from './livePreviewCheck.js';
 import { rewriteHtml } from './rewriter.js';
 import { analyzeTraffic } from './analyzer.js';
 import { generateNextApp, safeName } from './generator.js';
@@ -171,6 +172,7 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
       }
     }
     const completeAssets = [...completeAssetMap.values()];
+    const liveCheckPages: LiveCheckPage[] = [];
     for (const record of uniqueRecords) {
       record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
       // Re-write final HTML so serverless offload / persist get the complete asset rewrite.
@@ -197,12 +199,29 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
           );
           writeFileSync(serverPath, serverHtml, 'utf8');
           await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: 'page' });
+          liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
           delete record.serverHtml; // keep manifest.json lean
         }
+        delete record.liveScreenshot; // in-memory only — never written to manifest.json
       } catch (writeErr) {
         logger.warn(`  [WRITE ERR] final ${record.url}: ${(writeErr as Error).message}`);
       }
     }
+
+    // Pages whose own JS can't render without the original backend (loading skeletons,
+    // error banners) preview better offline — measure once and record the choice.
+    if (liveCheckPages.length && !IS_SERVERLESS && !IS_FAST_CLONE) {
+      try {
+        const modes = await choosePreviewModes(liveCheckPages, completeAssets, join(opts.out, 'public'));
+        const modesPath = join(opts.out, 'preview-mode.json');
+        writeFileSync(modesPath, JSON.stringify(modes, null, 2), 'utf8');
+        await notifyArtifact({ relPath: 'preview-mode.json', absPath: modesPath, kind: 'route-map' });
+      } catch (modeErr) {
+        logger.debug(`  [PREVIEW MODE] skipped: ${(modeErr as Error).message}`);
+      }
+    }
+    // Screenshots are in-memory only: never let one reach manifest.json.
+    for (const r of records) delete r.liveScreenshot;
     try {
       const routeMapPath = join(opts.out, 'route-map.json');
       writeFileSync(routeMapPath, JSON.stringify(routeMap, null, 2), 'utf8');
