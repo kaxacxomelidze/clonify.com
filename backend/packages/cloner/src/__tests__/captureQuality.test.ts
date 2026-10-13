@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 import {
+  isBrowserErrorPage,
   isFrameworkErrorHtml,
   isThinSpaShell,
   restoreSelfRemovingScripts,
@@ -87,12 +88,27 @@ describe('restoreSelfRemovingScripts', () => {
     const out = restoreSelfRemovingScripts(snapshot, server);
     expect(out).toContain('<body><script class="$tsr" data-clonyfy-restored-ssr>self.$_TSR={c:1}');
     expect(out).not.toContain('analytics()'); // ordinary scripts that weren't self-removing stay out
-    expect(out.match(/theme\(\)/g)).toHaveLength(1); // already present — not duplicated
+    expect(out.match(/theme\(\)/g)).toHaveLength(1); // already present â€” not duplicated
   });
 
   it('leaves the snapshot alone when nothing is missing or no server HTML exists', () => {
     const snapshot = '<body><script>self.$_TSR={c:1};document.currentScript.remove()</script></body>';
     expect(restoreSelfRemovingScripts(snapshot, server)).toBe(snapshot);
     expect(restoreSelfRemovingScripts(snapshot, '')).toBe(snapshot);
+  });
+});
+
+describe('isBrowserErrorPage', () => {
+  it('flags Chromium error pages so they are never saved as a clone', () => {
+    const chromeError = '<html><body style="font-family: system-ui"><div id="main-frame-error" class="interstitial-wrapper"><h1>Hmmmâ€¦ can\'t reach this page</h1></div></body></html>';
+    expect(isBrowserErrorPage(chromeError)).toBe(true);
+    expect(isThinSpaShell(chromeError)).toBe(true);
+    expect(isBrowserErrorPage('<html><body class="neterror"></body></html>')).toBe(true);
+  });
+
+  it('leaves real pages alone', () => {
+    const real = `<html><body><main><h1>Framer is the design agent</h1><p>${'Build sites. '.repeat(40)}</p></main></body></html>`;
+    expect(isBrowserErrorPage(real)).toBe(false);
+    expect(isThinSpaShell(real)).toBe(false);
   });
 });

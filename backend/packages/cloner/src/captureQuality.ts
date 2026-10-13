@@ -35,6 +35,8 @@ export function pathnameOfUrl(url: string): string {
 export function isThinSpaShell(html: string): boolean {
   const raw = String(html || '');
   if (!raw) return true;
+  // A browser error page is never a capture of the site.
+  if (isBrowserErrorPage(raw)) return true;
 
   const withoutNoise = raw
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
@@ -74,8 +76,17 @@ export function isFrameworkErrorText(text: string): boolean {
     && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(t);
 }
 
+/** Chromium's own "This site can't be reached" / ERR_* page (not the site at all). */
+export function isBrowserErrorPage(html: string): boolean {
+  const raw = String(html || '');
+  return /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(raw)
+    || /\bid=["']main-frame-error["']/i.test(raw)
+    || /chrome-error:\/\/chromewebdata/i.test(raw);
+}
+
 export function isFrameworkErrorHtml(html: string): boolean {
   const raw = String(html || '');
+  if (isBrowserErrorPage(raw)) return true;
   if (/<html[^>]*\bid=["']__next_error__["']/i.test(raw)) return true;
   const text = raw
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')

@@ -187,8 +187,8 @@ var require_eventemitter3 = __commonJS({
 });
 
 // src/runClone.ts
-import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync3, existsSync as existsSync5 } from "fs";
-import { resolve as resolve2, join as join6 } from "path";
+import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync3, existsSync as existsSync6 } from "fs";
+import { resolve as resolve2, join as join7 } from "path";
 
 // src/robots.ts
 import { createRequire } from "module";
@@ -10677,6 +10677,7 @@ function pathnameOfUrl(url) {
 function isThinSpaShell(html) {
   const raw = String(html || "");
   if (!raw) return true;
+  if (isBrowserErrorPage(raw)) return true;
   const withoutNoise = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
   if (/<div\s+id=["'](?:__next|root|app|__nuxt)["']\s*>\s*<\/div>/i.test(withoutNoise)) {
     return true;
@@ -10694,8 +10695,13 @@ function isFrameworkErrorText(text) {
   if (/Application error: a (client|server)-side exception has occurred/i.test(t)) return true;
   return /Application Error/i.test(t) && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(t);
 }
+function isBrowserErrorPage(html) {
+  const raw = String(html || "");
+  return /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(raw) || /\bid=["']main-frame-error["']/i.test(raw) || /chrome-error:\/\/chromewebdata/i.test(raw);
+}
 function isFrameworkErrorHtml(html) {
   const raw = String(html || "");
+  if (isBrowserErrorPage(raw)) return true;
   if (/<html[^>]*\bid=["']__next_error__["']/i.test(raw)) return true;
   const text = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
   return isFrameworkErrorText(text);
@@ -10920,6 +10926,7 @@ window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 var IS_FAST = IS_FAST_CLONE;
 var NAVIGATION_TIMEOUT = IS_FAST ? 18e3 : 3e4;
 var ROUTE_FETCH_TIMEOUT = IS_FAST ? 8e3 : 15e3;
+var NATIVE_LOAD_TYPES = /* @__PURE__ */ new Set(["image", "font", "media", "script"]);
 async function restoreRequestedUrl(page, pageUrl, reason) {
   const wanted = pathnameOfUrl(pageUrl);
   let current = "";
@@ -11470,15 +11477,29 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       await route.fulfill({ status: 200, contentType: "application/json; charset=utf-8", body: "{}" });
       return;
     }
+    if (NATIVE_LOAD_TYPES.has(resourceType)) {
+      await route.continue().catch(() => {
+      });
+      return;
+    }
     let response;
     try {
       response = await route.fetch({ timeout: ROUTE_FETCH_TIMEOUT });
-      if (!await isPublicUrl(response.url())) {
-        throw new Error(`redirected to a private address: ${response.url()}`);
-      }
     } catch (err) {
-      logger.debug(`  [FETCH FAIL] ${url}: ${err.message}`);
-      await route.abort();
+      logger.debug(`  [FETCH FAIL] ${url}: ${err.message} \u2014 continuing natively`);
+      await route.continue().catch(() => route.abort().catch(() => {
+      }));
+      return;
+    }
+    if (resourceType === "document" && req.isNavigationRequest() && req.frame() === page.mainFrame() && response.status() >= 200 && response.status() < 300) {
+      try {
+        mainDocumentHtml = await response.text();
+      } catch {
+      }
+    }
+    if (!await isPublicUrl(response.url())) {
+      logger.debug(`  [BLOCKED private redirect] ${url} -> ${response.url()}`);
+      await route.abort("blockedbyclient");
       return;
     }
     const status = response.status();
@@ -11563,6 +11584,40 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }
     await route.fulfill({ response });
   });
+  let mainDocumentHtml = "";
+  const pendingNativeSaves = /* @__PURE__ */ new Set();
+  page.on("response", (response) => {
+    const req = response.request();
+    const resourceType = req.resourceType();
+    if (!NATIVE_LOAD_TYPES.has(resourceType)) return;
+    const url = response.url();
+    const status = response.status();
+    if (status < 200 || status >= 300 || shouldSkipAsset(url)) return;
+    if (SCRIPT_STUB_PATTERNS.some((p) => p.test(url)) || ABORT_PATTERNS.some((p) => p.test(url))) return;
+    try {
+      if (new URL(url).pathname.startsWith("/_assets/")) return;
+    } catch {
+      return;
+    }
+    const job = (async () => {
+      const contentType = response.headers()["content-type"] ?? "";
+      if (resourceType === "script" && /text\/html|application\/json|xml/.test(contentType)) return;
+      const len = Number(response.headers()["content-length"] || 0);
+      if (len > maxAssetBytes) {
+        logger.debug(`  [ASSET SKIP] ${url} - too large (${(len / 1024 / 1024).toFixed(1)}MB)`);
+        return;
+      }
+      const buf = await response.body();
+      assetsIntercepted++;
+      const effectiveType = contentType || (resourceType === "image" ? "image/png" : resourceType === "font" ? "font/woff2" : resourceType === "script" ? "application/javascript" : "application/octet-stream");
+      await saveAsset(url, buf, effectiveType, false);
+      networkLog.push({ method: req.method(), url, postData: req.postData(), status, contentType, body: null });
+    })().catch((err) => {
+      logger.debug(`  [BODY ERR] ${url}: ${err.message}`);
+    });
+    pendingNativeSaves.add(job);
+    void job.finally(() => pendingNativeSaves.delete(job));
+  });
   try {
     logger.debug(`  [NAV] -> ${pageUrl}`);
     let serverHtml = "";
@@ -11595,8 +11650,15 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       if (!isNonFatal) throw err;
       logger.debug(`  [NAV WARN] ${msg}`);
     }
+    if (!serverHtml && mainDocumentHtml) serverHtml = mainDocumentHtml;
     await page.evaluate(() => document.fonts.ready).catch(() => {
     });
+    let liveScreenshot = null;
+    try {
+      await page.waitForTimeout(1500);
+      liveScreenshot = await page.screenshot({ type: "png", timeout: 1e4 });
+    } catch {
+    }
     await page.evaluate(async (fast) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
@@ -12768,6 +12830,10 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }, scriptBuilt).catch(() => 0);
       if (reset) logger.debug(`  [SCRIPT-BUILT] reset ${reset} container(s) the page's own JS rebuilds`);
     }
+    await Promise.race([
+      Promise.allSettled([...pendingNativeSaves]),
+      new Promise((resolve3) => setTimeout(resolve3, 2e4))
+    ]);
     let html = await page.content();
     const deferredEdits = await page.evaluate(
       () => window.__clonyfyDeferred || {}
@@ -12921,6 +12987,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         route,
         html: finalHtml,
         ...serverHtml && /<html|<body/i.test(serverHtml) && !isFrameworkErrorHtml(serverHtml) ? { serverHtml } : {},
+        ...liveScreenshot ? { liveScreenshot } : {},
         assets,
         network: networkLog,
         failedAssets: [...failedAssets],
@@ -14312,6 +14379,123 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   return records;
 }
 
+// src/livePreviewCheck.ts
+import { join as join5 } from "path";
+import { existsSync as existsSync4 } from "fs";
+var OFFLINE_MARGIN = 5;
+var MAX_PAGES = 8;
+var SETTLE_MS2 = 6e3;
+var VIEWPORT = { width: 1440, height: 900 };
+async function choosePreviewModes(pages, assets, publicDir) {
+  const result = {};
+  const candidates = pages.filter((p) => p.liveScreenshot?.length).slice(0, MAX_PAGES);
+  if (!candidates.length) return result;
+  let browser;
+  try {
+    const { chromium } = await import("playwright-core");
+    const launchOptions = await getChromiumLaunchOptions(chromium);
+    browser = await chromium.launch({ headless: true, ...launchOptions });
+  } catch (err) {
+    logger.debug(`  [PREVIEW MODE] browser unavailable, keeping interactive default: ${err.message.split("\n")[0]}`);
+    return result;
+  }
+  const origin = new URL(candidates[0].url).origin;
+  const files = /* @__PURE__ */ new Map();
+  for (const a of assets) {
+    if (!a.originalUrl || !a.localPath) continue;
+    const local = "/" + a.localPath.replace(/^\/+/, "");
+    const abs = join5(publicDir, local);
+    files.set(a.originalUrl.split("#")[0], abs);
+    files.set(a.originalUrl.split("#")[0].split("?")[0], abs);
+    files.set(origin + local, abs);
+  }
+  try {
+    const scorer = await browser.newPage();
+    for (const page of candidates) {
+      try {
+        const live = await render(browser, page, files, true);
+        const offline = await render(browser, page, files, false);
+        const liveScore = live.errorScreen ? 0 : await similarity(scorer, page.liveScreenshot, live.png);
+        const offlineScore = await similarity(scorer, page.liveScreenshot, offline.png);
+        const useOffline = offlineScore > liveScore + OFFLINE_MARGIN;
+        logger.info(`  [PREVIEW MODE] ${page.url}: interactive ${liveScore}% vs offline ${offlineScore}% match with the live page${live.errorScreen ? " (error screen)" : ""} \u2192 ${useOffline ? "offline" : "interactive"}`);
+        if (useOffline) result[page.filename] = "offline";
+      } catch (err) {
+        logger.debug(`  [PREVIEW MODE] ${page.url}: check failed, keeping interactive: ${err.message}`);
+      }
+    }
+  } finally {
+    await browser.close().catch(() => {
+    });
+  }
+  return result;
+}
+async function render(browser, page, files, withScripts) {
+  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, javaScriptEnabled: withScripts });
+  try {
+    const tab = await context.newPage();
+    const origin = new URL(page.url).origin;
+    await tab.route("**/*", async (route) => {
+      const req = route.request();
+      const url = String(req.url());
+      if (req.isNavigationRequest() && req.frame() === tab.mainFrame()) {
+        await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: withScripts ? page.serverHtml : page.snapshotHtml });
+        return;
+      }
+      const file = files.get(url.split("#")[0]) || files.get(url.split("#")[0].split("?")[0]);
+      if (file && existsSync4(file)) {
+        await route.fulfill({ path: file });
+        return;
+      }
+      if (!withScripts || url.startsWith(origin)) {
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
+    await tab.goto(page.url, { waitUntil: "load", timeout: 3e4 }).catch(() => {
+    });
+    await tab.waitForTimeout(withScripts ? SETTLE_MS2 : 1500);
+    const errorScreen = await tab.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return document.documentElement.id === "__next_error__" || /Application error: a (client|server)-side exception|This page couldn.t load/i.test(text) && text.length < 800;
+    }).catch(() => false);
+    const png = await tab.screenshot({ type: "png", timeout: 1e4 });
+    return { png, errorScreen };
+  } finally {
+    await context.close().catch(() => {
+    });
+  }
+}
+async function similarity(scorer, a, b) {
+  return scorer.evaluate(async ({ a: a2, b: b2 }) => {
+    const load = (src) => new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = rej;
+      img.src = src;
+    });
+    const [ia, ib] = await Promise.all([load(a2), load(b2)]);
+    const w = Math.min(ia.width, ib.width);
+    const h = Math.min(ia.height, ib.height);
+    const pixels = (img) => {
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const g = c.getContext("2d");
+      g.drawImage(img, 0, 0);
+      return g.getImageData(0, 0, w, h).data;
+    };
+    const da = pixels(ia);
+    const db = pixels(ib);
+    let same = 0;
+    for (let i = 0; i < da.length; i += 4) {
+      if (Math.abs(da[i] - db[i]) <= 24 && Math.abs(da[i + 1] - db[i + 1]) <= 24 && Math.abs(da[i + 2] - db[i + 2]) <= 24) same++;
+    }
+    return Math.round(same / (w * h) * 1e3) / 10;
+  }, { a: `data:image/png;base64,${a.toString("base64")}`, b: `data:image/png;base64,${b.toString("base64")}` });
+}
+
 // src/rewriter.ts
 function normalizeAssetLookupUrl(value) {
   let s = String(value || "").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#x2F;/gi, "/").replace(/\\u002[fF]/g, "/").replace(/\\\//g, "/").trim();
@@ -14856,13 +15040,13 @@ function tryParseJson(raw, contentType = "") {
 }
 
 // src/generator.ts
-import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4, rmSync, existsSync as existsSync4, readFileSync as readFileSync2 } from "fs";
-import { join as join5, dirname as dirname2, resolve } from "path";
+import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4, rmSync, existsSync as existsSync5, readFileSync as readFileSync2 } from "fs";
+import { join as join6, dirname as dirname2, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createHash as createHash5 } from "crypto";
 import Handlebars from "handlebars";
 var __dirname = dirname2(fileURLToPath(import.meta.url));
-var TEMPLATES_DIR = join5(__dirname, "..", "templates");
+var TEMPLATES_DIR = join6(__dirname, "..", "templates");
 var SERVE_PATCHES_PATH = resolve(__dirname, "../../../lib/cloneServePatches.js");
 var PREVIEW_RUNTIME_PATH = resolve(__dirname, "../../../lib/clonePreviewRuntime.js");
 var _servePatches = null;
@@ -14878,7 +15062,7 @@ async function loadPreviewRuntime() {
   return _previewRuntime;
 }
 function tpl(name, data) {
-  const src = readFileSync2(join5(TEMPLATES_DIR, name), "utf8");
+  const src = readFileSync2(join6(TEMPLATES_DIR, name), "utf8");
   return Handlebars.compile(src)(data);
 }
 function write(path, content) {
@@ -14912,12 +15096,12 @@ function routeSegments(path) {
 async function generateNextApp(outDir, manifest, apiRoutes) {
   const { pages } = manifest;
   const hostname = new URL(manifest.targetOrigin).hostname;
-  mkdirSync5(join5(outDir, "public", "_assets"), { recursive: true });
-  const pagesDataDir = join5(outDir, "captured-pages");
+  mkdirSync5(join6(outDir, "public", "_assets"), { recursive: true });
+  const pagesDataDir = join6(outDir, "captured-pages");
   mkdirSync5(pagesDataDir, { recursive: true });
-  const existingRouteMap = existsSync4(join5(outDir, "route-map.json")) ? (() => {
+  const existingRouteMap = existsSync5(join6(outDir, "route-map.json")) ? (() => {
     try {
-      return JSON.parse(readFileSync2(join5(outDir, "route-map.json"), "utf8"));
+      return JSON.parse(readFileSync2(join6(outDir, "route-map.json"), "utf8"));
     } catch {
       return {};
     }
@@ -14926,7 +15110,7 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
   for (const page of pages) {
     const name = safeName(page.route);
     const filename = existingRouteMap[page.route] || `${name}.html`;
-    const pageHtmlPath = join5(pagesDataDir, filename);
+    const pageHtmlPath = join6(pagesDataDir, filename);
     if (page.html && page.html.length > 0) {
       writeFileSync4(pageHtmlPath, page.html, "utf8");
     }
@@ -14938,14 +15122,14 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
       routeMap[`${page.route}.html`] ??= filename;
     }
   }
-  writeFileSync4(join5(outDir, "route-map.json"), JSON.stringify(routeMap, null, 2), "utf8");
-  const fixturesDir = join5(outDir, "fixtures");
+  writeFileSync4(join6(outDir, "route-map.json"), JSON.stringify(routeMap, null, 2), "utf8");
+  const fixturesDir = join6(outDir, "fixtures");
   mkdirSync5(fixturesDir, { recursive: true });
   for (const spec of apiRoutes) {
     for (const resp of spec.responses) {
       const fname = `${spec.fixtureKey}.${spec.method}.${resp.status}.json`;
       try {
-        writeFileSync4(join5(fixturesDir, fname), JSON.stringify({
+        writeFileSync4(join6(fixturesDir, fname), JSON.stringify({
           status: resp.status,
           contentType: resp.contentType || "application/json",
           body: resp.body
@@ -14954,12 +15138,12 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
       }
     }
   }
-  write(join5(outDir, "app", "layout.tsx"), tpl("layout.tsx.hbs", { hostname, targetOrigin: manifest.targetOrigin }));
-  const stalePage = join5(outDir, "app", "[[...slug]]", "page.tsx");
-  if (existsSync4(stalePage)) rmSync(stalePage);
+  write(join6(outDir, "app", "layout.tsx"), tpl("layout.tsx.hbs", { hostname, targetOrigin: manifest.targetOrigin }));
+  const stalePage = join6(outDir, "app", "[[...slug]]", "page.tsx");
+  if (existsSync5(stalePage)) rmSync(stalePage);
   const servePatches = await loadServePatches();
   const previewRuntime = await loadPreviewRuntime();
-  write(join5(outDir, "app", "[[...slug]]", "route.ts"), tpl("page.tsx.hbs", {
+  write(join6(outDir, "app", "[[...slug]]", "route.ts"), tpl("page.tsx.hbs", {
     targetOrigin: manifest.targetOrigin,
     targetOriginJson: JSON.stringify(manifest.targetOrigin),
     visibilityPatchJson: JSON.stringify(servePatches.buildVisibilityPatchHtml("/", { includeBase: false })),
@@ -14972,7 +15156,7 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
   for (const spec of filteredRoutes) {
     const segments = routeSegments(spec.path);
     if (segments.length === 0) continue;
-    write(join5(outDir, "app", ...segments, "route.ts"), tpl("route.ts.hbs", {
+    write(join6(outDir, "app", ...segments, "route.ts"), tpl("route.ts.hbs", {
       method: spec.method,
       path: spec.path,
       fixtureKey: spec.fixtureKey,
@@ -14987,18 +15171,18 @@ async function generateNextApp(outDir, manifest, apiRoutes) {
     name: prismaModelName(r.path),
     fields: toPrismaFields(r.inferredFields)
   }));
-  write(join5(outDir, "prisma", "schema.prisma"), tpl("schema.prisma.hbs", { models }));
-  write(join5(outDir, "lib", "replay.ts"), tpl("replay.ts.hbs", {}));
-  write(join5(outDir, "next.config.js"), tpl("next.config.js.hbs", {}));
-  write(join5(outDir, "package.json"), tpl("package.json.hbs", {
+  write(join6(outDir, "prisma", "schema.prisma"), tpl("schema.prisma.hbs", { models }));
+  write(join6(outDir, "lib", "replay.ts"), tpl("replay.ts.hbs", {}));
+  write(join6(outDir, "next.config.js"), tpl("next.config.js.hbs", {}));
+  write(join6(outDir, "package.json"), tpl("package.json.hbs", {
     siteName: hostname.replace(/\./g, "-"),
     hasPrisma: models.length > 0
   }));
-  write(join5(outDir, "Dockerfile"), tpl("Dockerfile.hbs", {}));
-  write(join5(outDir, "docker-compose.yml"), tpl("docker-compose.yml.hbs", {}));
-  write(join5(outDir, ".env.example"), 'DATABASE_URL="file:./dev.db"\n');
-  write(join5(outDir, "tsconfig.json"), tpl("tsconfig.json.hbs", {}));
-  write(join5(outDir, "README.md"), tpl("README.md.hbs", {
+  write(join6(outDir, "Dockerfile"), tpl("Dockerfile.hbs", {}));
+  write(join6(outDir, "docker-compose.yml"), tpl("docker-compose.yml.hbs", {}));
+  write(join6(outDir, ".env.example"), 'DATABASE_URL="file:./dev.db"\n');
+  write(join6(outDir, "tsconfig.json"), tpl("tsconfig.json.hbs", {}));
+  write(join6(outDir, "README.md"), tpl("README.md.hbs", {
     targetOrigin: manifest.targetOrigin,
     hostname,
     pagesCount: Object.keys(routeMap).filter((route) => !route.endsWith(".html")).length,
@@ -15039,7 +15223,7 @@ CLONYFY v0.1`);
     if (opts.fullSite) {
       logger.info("Full-site mode: crawling all discoverable same-origin pages until the page budget is reached.");
     }
-    logger.info(`Log file    : ${join6(opts.out, "cloner.log")}`);
+    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
     logger.info(`Tip         : run with --verbose (or DEBUG=1) to see per-asset/rewrite detail on the console`);
     let targetOrigin;
     try {
@@ -15059,9 +15243,9 @@ CLONYFY v0.1`);
     } else {
       logger.info("robots.txt check skipped (--ignore-robots)");
     }
-    const assetsDir = join6(opts.out, "public", "_assets");
+    const assetsDir = join7(opts.out, "public", "_assets");
     mkdirSync6(assetsDir, { recursive: true });
-    const capturedPagesDir = join6(opts.out, "captured-pages");
+    const capturedPagesDir = join7(opts.out, "captured-pages");
     mkdirSync6(capturedPagesDir, { recursive: true });
     const routeMap = {};
     const pageFilename = (route) => `${safeName(route)}.html`;
@@ -15094,8 +15278,8 @@ CLONYFY v0.1`);
       logger.info(`  [${pagesCompleted}/${opts.maxPages}] \u2713 ${page.url}  (assets: ${page.assets.length}, network: ${page.network.length})`);
       try {
         const filename = pageFilename(page.route);
-        const pagePath = join6(capturedPagesDir, filename);
-        if (existsSync5(pagePath)) {
+        const pagePath = join7(capturedPagesDir, filename);
+        if (existsSync6(pagePath)) {
           const existing = readFileSync3(pagePath, "utf8");
           if (!shouldReplaceCapturedHtml(existing, page.html)) {
             logger.info(`  [KEEP] ${page.route} \u2014 keeping richer capture (skipped thinner overwrite)`);
@@ -15105,7 +15289,7 @@ CLONYFY v0.1`);
         }
         writeFileSync5(pagePath, page.html, "utf8");
         routeMap[page.route] = filename;
-        const routeMapPath = join6(opts.out, "route-map.json");
+        const routeMapPath = join7(opts.out, "route-map.json");
         writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
         await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
@@ -15151,17 +15335,18 @@ Captured ${records.length} page(s).`);
       }
     }
     const completeAssets = [...completeAssetMap.values()];
+    const liveCheckPages = [];
     for (const record of uniqueRecords) {
       record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
       try {
         const filename = pageFilename(record.route);
-        const pagePath = join6(capturedPagesDir, filename);
+        const pagePath = join7(capturedPagesDir, filename);
         writeFileSync5(pagePath, record.html, "utf8");
         routeMap[record.route] = filename;
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
         if (record.serverHtml) {
           const serverName = filename.replace(/\.html$/i, ".server.html");
-          const serverPath = join6(capturedPagesDir, serverName);
+          const serverPath = join7(capturedPagesDir, serverName);
           const originRe = new RegExp(targetOrigin.replace(/\/$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=/)", "g");
           const serverHtml = record.serverHtml.replace(
             /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
@@ -15169,14 +15354,27 @@ Captured ${records.length} page(s).`);
           );
           writeFileSync5(serverPath, serverHtml, "utf8");
           await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: "page" });
+          liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
           delete record.serverHtml;
         }
+        delete record.liveScreenshot;
       } catch (writeErr) {
         logger.warn(`  [WRITE ERR] final ${record.url}: ${writeErr.message}`);
       }
     }
+    if (liveCheckPages.length && !IS_SERVERLESS2 && !IS_FAST_CLONE2) {
+      try {
+        const modes = await choosePreviewModes(liveCheckPages, completeAssets, join7(opts.out, "public"));
+        const modesPath = join7(opts.out, "preview-mode.json");
+        writeFileSync5(modesPath, JSON.stringify(modes, null, 2), "utf8");
+        await notifyArtifact({ relPath: "preview-mode.json", absPath: modesPath, kind: "route-map" });
+      } catch (modeErr) {
+        logger.debug(`  [PREVIEW MODE] skipped: ${modeErr.message}`);
+      }
+    }
+    for (const r of records) delete r.liveScreenshot;
     try {
-      const routeMapPath = join6(opts.out, "route-map.json");
+      const routeMapPath = join7(opts.out, "route-map.json");
       writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
       await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
     } catch (writeErr) {
@@ -15232,7 +15430,7 @@ Total unique assets saved: ${uniqueAssets.size}`);
         failedAssetReasons: r.failedAssetReasons
       }))
     };
-    const manifestPath = join6(opts.out, "manifest.json");
+    const manifestPath = join7(opts.out, "manifest.json");
     const manifestJson = IS_SERVERLESS2 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
     writeFileSync5(manifestPath, manifestJson, "utf8");
     await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
@@ -15248,7 +15446,7 @@ Total unique assets saved: ${uniqueAssets.size}`);
     logger.info(`Pages       : ${uniqueRecords.length}`);
     logger.info(`Assets      : ${uniqueAssets.size}`);
     logger.info(`API routes  : ${apiRoutes.length}`);
-    logger.info(`Log file    : ${join6(opts.out, "cloner.log")}`);
+    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
     logger.info(`
 Next steps:`);
     logger.info(`  cd "${opts.out}"`);
@@ -15259,7 +15457,7 @@ Next steps:`);
       pages: uniqueRecords.length,
       assets: uniqueAssets.size,
       apiRoutes: apiRoutes.length,
-      logFile: join6(opts.out, "cloner.log")
+      logFile: join7(opts.out, "cloner.log")
     };
   } catch (err) {
     logger.error(err instanceof Error ? err.message : "Clone failed", err);
@@ -15270,18 +15468,18 @@ Next steps:`);
   }
 }
 async function regenerateCloneProject(outDir) {
-  const manifestPath = join6(outDir, "manifest.json");
-  if (!existsSync5(manifestPath)) {
+  const manifestPath = join7(outDir, "manifest.json");
+  if (!existsSync6(manifestPath)) {
     throw new Error("manifest.json not found \u2014 cannot regenerate export project");
   }
   const manifest = JSON.parse(readFileSync3(manifestPath, "utf8"));
-  const routeMapPath = join6(outDir, "route-map.json");
-  const routeMap = existsSync5(routeMapPath) ? JSON.parse(readFileSync3(routeMapPath, "utf8")) : {};
-  const capturedPagesDir = join6(outDir, "captured-pages");
+  const routeMapPath = join7(outDir, "route-map.json");
+  const routeMap = existsSync6(routeMapPath) ? JSON.parse(readFileSync3(routeMapPath, "utf8")) : {};
+  const capturedPagesDir = join7(outDir, "captured-pages");
   const readPageHtml = (route) => {
     const filename = routeMap[route] || `${safeName(route)}.html`;
-    const htmlPath = join6(capturedPagesDir, filename);
-    return existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "";
+    const htmlPath = join7(capturedPagesDir, filename);
+    return existsSync6(htmlPath) ? readFileSync3(htmlPath, "utf8") : "";
   };
   let pages = (manifest.pages || []).map((page) => ({
     ...page,
@@ -15289,11 +15487,11 @@ async function regenerateCloneProject(outDir) {
   }));
   if (!pages.length && Object.keys(routeMap).length) {
     pages = Object.entries(routeMap).filter(([route]) => !route.endsWith(".html")).map(([route, filename]) => {
-      const htmlPath = join6(capturedPagesDir, filename);
+      const htmlPath = join7(capturedPagesDir, filename);
       return {
         url: `${manifest.targetOrigin}${route}`,
         route,
-        html: existsSync5(htmlPath) ? readFileSync3(htmlPath, "utf8") : "",
+        html: existsSync6(htmlPath) ? readFileSync3(htmlPath, "utf8") : "",
         assets: [],
         network: [],
         failedAssets: []
@@ -15311,4 +15509,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-S624PDCL.js.map
+//# sourceMappingURL=chunk-I4VYHYTJ.js.map
