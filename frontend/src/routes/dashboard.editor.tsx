@@ -45,18 +45,9 @@ function EditorPage() {
       </div>
     );
   }
+  // The Studio is a full-height workspace with its own top bar (back link included).
   return (
-    <div className="space-y-4 p-2">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="eyebrow">Editor</p>
-          <h1 className="mt-1 font-display text-2xl">Edit captured pages</h1>
-        </div>
-        <Link to="/dashboard/library" className="dashboard-button" search={{} as never}>
-          <ArrowLeft size={16} />
-          Library
-        </Link>
-      </div>
+    <div className="p-1">
       <VisualEditor outDir={outDir} initialRoute={route || "/"} />
     </div>
   );

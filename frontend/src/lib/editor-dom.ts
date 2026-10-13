@@ -4,10 +4,22 @@ export const EDITOR_STYLE_ID = "clonyfy-editor-style";
 export const ATTR_HOVER = "data-clonyfy-editor-hover";
 export const ATTR_SELECTED = "data-clonyfy-editor-selected";
 export const ATTR_EDITING = "data-clonyfy-editor-editing";
+/** Drop indicator while dragging a block onto the canvas ("before" | "after" | "inside"). */
+export const ATTR_DROP = "data-clonyfy-editor-drop";
+/** On <html> while the canvas is in Preview mode (no selection chrome). */
+export const ATTR_PREVIEW = "data-clonyfy-editor-preview";
+/** On the element being dragged to a new position. */
+export const ATTR_DRAGGING = "data-clonyfy-editor-dragging";
 
+const EDIT = `html:not([${ATTR_PREVIEW}])`;
 const EDITOR_CSS = `
-[${ATTR_HOVER}]{outline:2px dashed rgba(91,141,239,.85)!important;outline-offset:1px!important;cursor:pointer!important}
-[${ATTR_SELECTED}]{outline:2px solid #5b8def!important;outline-offset:2px!important;cursor:text!important}
+${EDIT} [${ATTR_HOVER}]{outline:1.5px dashed rgba(52,211,153,.9)!important;outline-offset:1px!important;cursor:pointer!important}
+${EDIT} [${ATTR_SELECTED}]{outline:2px solid #34d399!important;outline-offset:2px!important;cursor:move!important}
+${EDIT} [${ATTR_DRAGGING}],${EDIT} [${ATTR_DRAGGING}] *{cursor:grabbing!important;user-select:none!important}
+${EDIT} [${ATTR_DRAGGING}]{outline-style:dashed!important;transition:none!important}
+[${ATTR_DROP}="before"]{box-shadow:0 -3px 0 0 #34d399!important}
+[${ATTR_DROP}="after"]{box-shadow:0 3px 0 0 #34d399!important}
+[${ATTR_DROP}="inside"]{outline:2px dashed #34d399!important;outline-offset:-2px!important}
 [${ATTR_EDITING}]{outline:2px solid #22c55e!important;outline-offset:2px!important;cursor:text!important;-webkit-user-modify:read-write!important}
 [${ATTR_EDITING}],[${ATTR_EDITING}] *{
   cursor:text!important;
@@ -36,7 +48,7 @@ export function installEditorChrome(doc: Document) {
 
 export function clearEditorAttrs(
   root: ParentNode,
-  attrs = [ATTR_HOVER, ATTR_SELECTED, ATTR_EDITING],
+  attrs = [ATTR_HOVER, ATTR_SELECTED, ATTR_EDITING, ATTR_DROP, ATTR_DRAGGING],
 ) {
   for (const attr of attrs) {
     root.querySelectorAll(`[${attr}]`).forEach((el) => el.removeAttribute(attr));
@@ -48,6 +60,7 @@ export function htmlForSave(doc: Document): string {
   const clone = doc.documentElement.cloneNode(true) as HTMLElement;
   clone.querySelector(`#${EDITOR_STYLE_ID}`)?.remove();
   clearEditorAttrs(clone);
+  clone.removeAttribute(ATTR_PREVIEW);
   clone
     .querySelectorAll("[contenteditable]")
     .forEach((el) => el.removeAttribute("contenteditable"));
@@ -190,12 +203,39 @@ export function insertPlainText(doc: Document, text: string) {
   sel.addRange(range);
 }
 
+let colorCtx: CanvasRenderingContext2D | null = null;
+
+/**
+ * Any computed CSS color → hex. rgb()/rgba() are parsed directly; modern formats
+ * browsers now return (oklab(), oklch(), lab(), color() — e.g. Tailwind v4 sites)
+ * are resolved by painting them on a 1×1 canvas.
+ */
 function toHex(color: string) {
-  const m = color.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/i);
-  if (!m) return { hex: "#000000", transparent: true };
-  const alpha = m[4] === undefined ? 1 : Number(m[4]);
-  const hex = "#" + [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, "0")).join("");
-  return { hex, transparent: alpha === 0 };
+  const c = String(color || "").trim();
+  if (!c || c === "transparent") return { hex: "#000000", transparent: true };
+  const m = c.match(/^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+)(%?))?\s*\)$/i);
+  if (m) {
+    const alpha = m[4] === undefined ? 1 : Number(m[4]) / (m[5] ? 100 : 1);
+    const hex =
+      "#" + [m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, "0")).join("");
+    return { hex, transparent: alpha === 0 };
+  }
+  try {
+    colorCtx ||= document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    if (!colorCtx) throw new Error("no canvas");
+    colorCtx.clearRect(0, 0, 1, 1);
+    colorCtx.fillStyle = "#000";
+    colorCtx.fillStyle = c; // unsupported values leave the previous fill
+    colorCtx.fillRect(0, 0, 1, 1);
+    const [r = 0, g = 0, b = 0, a = 0] = colorCtx.getImageData(0, 0, 1, 1).data;
+    const hex = "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+    // Alpha in the source string is authoritative (tiny alphas round to 0 on canvas).
+    const slash = c.match(/\/\s*([\d.]+)(%?)\s*\)$/);
+    const alpha = slash ? Number(slash[1]) / (slash[2] ? 100 : 1) : a / 255;
+    return { hex, transparent: alpha === 0 };
+  } catch {
+    return { hex: "#000000", transparent: true };
+  }
 }
 
 export type ElementKind =
