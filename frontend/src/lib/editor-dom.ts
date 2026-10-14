@@ -298,7 +298,10 @@ export function friendlyName(el: Element): string {
   const aria = el.getAttribute("aria-label");
   if (aria?.trim()) return aria.trim().slice(0, 48);
   const heading = el.matches("h1,h2,h3,h4") ? el : el.querySelector("h1,h2,h3,h4");
-  const headingText = (heading?.textContent || "").replace(/\s+/g, " ").trim();
+  // innerText keeps line breaks between spans ("The bank you can…", not "The bankyou…").
+  const headingText = ((heading as HTMLElement | null)?.innerText || heading?.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (headingText) return headingText.slice(0, 48);
   const cls = String(el.getAttribute("class") || "")
     .split(/\s+/)
@@ -497,11 +500,18 @@ export function listSections(doc: Document): PageSection[] {
         isSelectable(c) && !c.matches("script,style,link,meta,noscript,template") && isRendered(c),
     ) as HTMLElement[];
 
+  // Unwrap framework wrappers (#__next > div > …). A wrapper is followed even when
+  // small siblings sit next to it (an inserted icon, a cookie banner, a portal):
+  // it only has to hold nearly all of the page's height.
   let root: Element = body;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     const kids = rendered(root);
-    const only = kids.length === 1 ? kids[0] : undefined;
+    const heights = kids.map((k) => k.getBoundingClientRect().height);
+    const total = heights.reduce((a, b) => a + b, 0) || 1;
+    const idx = heights.findIndex((h) => h / total >= 0.85);
+    const only = kids.length === 1 ? kids[0] : idx >= 0 ? kids[idx] : undefined;
     if (!only || /^(HEADER|NAV|FOOTER)$/.test(only.tagName)) break;
+    if (kids.length > 1 && only.children.length < 2) break;
     root = only;
   }
 

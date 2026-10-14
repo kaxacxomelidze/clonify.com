@@ -269,6 +269,9 @@ export function normalizeAllMotionStacksInDocument(): void {
   }
 
   function collapseStack(layers: Element[], seen: Set<Element>): void {
+    // Layers moved by the recorded scroll animation (stacked cards, step panels) overlap by
+    // design — they are not carousel slides; hiding them would break the animation.
+    if (layers.some((el) => el.closest('[data-clonyfy-st],[data-clonyfy-sr]') || el.querySelector('[data-clonyfy-st]'))) return;
     let active = layers.find((el) =>
       el.getAttribute('aria-hidden') === 'false'
       || /\b(is-active|active|current|visible|show|in)\b/i.test(el.className || ''),

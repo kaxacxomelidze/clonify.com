@@ -1,8 +1,10 @@
 import {
+  backfillScrollTimeline,
   regenerateCloneProject,
   runClone
-} from "./chunk-I4VYHYTJ.js";
+} from "./chunk-AEBR6C2K.js";
 export {
+  backfillScrollTimeline,
   regenerateCloneProject,
   runClone
 };

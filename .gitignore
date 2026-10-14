@@ -12,6 +12,7 @@ admin-password.txt
 storage/
 backups/
 certbot/
+reference/
 
 # Database
 *.dump

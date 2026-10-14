@@ -1276,6 +1276,7 @@ function normalizeAllMotionStacksInDocument() {
     });
   }
   function collapseStack(layers, seen) {
+    if (layers.some((el) => el.closest("[data-clonyfy-st],[data-clonyfy-sr]") || el.querySelector("[data-clonyfy-st]"))) return;
     let active = layers.find(
       (el) => el.getAttribute("aria-hidden") === "false" || /\b(is-active|active|current|visible|show|in)\b/i.test(el.className || "")
     ) || null;
@@ -10678,6 +10679,7 @@ function isThinSpaShell(html) {
   const raw = String(html || "");
   if (!raw) return true;
   if (isBrowserErrorPage(raw)) return true;
+  if (isSoftNotFoundPage(raw)) return true;
   const withoutNoise = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
   if (/<div\s+id=["'](?:__next|root|app|__nuxt)["']\s*>\s*<\/div>/i.test(withoutNoise)) {
     return true;
@@ -10694,6 +10696,14 @@ function isFrameworkErrorText(text) {
   if (t.length >= 800) return false;
   if (/Application error: a (client|server)-side exception has occurred/i.test(t)) return true;
   return /Application Error/i.test(t) && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(t);
+}
+function isSoftNotFoundPage(html) {
+  const raw = String(html || "");
+  const title = (raw.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || "").trim();
+  const body = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<(nav|header|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&[a-z#0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
+  const notFound = /\b404\b|page (?:was )?not found|page (?:does ?n.t|could ?n.t be) (?:exist|found)|this page could not be found/i;
+  if (/\b404\b|not found/i.test(title) && body.length < 1500) return true;
+  return notFound.test(body) && body.length < 600;
 }
 function isBrowserErrorPage(html) {
   const raw = String(html || "");
@@ -15203,6 +15213,167 @@ Next steps:`);
   console.log(`  npm run build && npm start`);
 }
 
+// src/motionBackfill.ts
+var VIEWPORT2 = { width: 1440, height: 900 };
+function matchInPage(args) {
+  const SKIP = "script,style,link,meta,noscript,template,base,title,[data-clonyfy-ui]";
+  const parsed = new DOMParser().parseFromString(args.html, "text/html");
+  const content = (el) => Array.from(el.children).filter((c) => !c.matches(SKIP));
+  const contentPath = (el) => {
+    const p = [];
+    for (let x = el; x && x !== x.ownerDocument.documentElement; x = x.parentElement) {
+      const parent = x.parentElement;
+      if (!parent) return null;
+      const i = content(parent).indexOf(x);
+      if (i < 0) return null;
+      p.unshift(i);
+    }
+    return p;
+  };
+  const byPath = (doc, p) => {
+    let x = doc.documentElement;
+    for (const i of p) {
+      x = x ? content(x)[i] : void 0;
+      if (!x) return null;
+    }
+    return x || null;
+  };
+  const classes = (el) => new Set(String(el.getAttribute("class") || "").split(/\s+/).filter(Boolean));
+  const similar = (a, b) => {
+    if (a.tagName !== b.tagName) return false;
+    if (a.id || b.id) return a.id === b.id;
+    const ca = classes(a);
+    const cb = classes(b);
+    if (!ca.size && !cb.size) return true;
+    let common = 0;
+    for (const c of ca) if (cb.has(c)) common++;
+    return common / Math.max(ca.size, cb.size) >= 0.5;
+  };
+  const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  const signature = (el) => `${el.tagName}|${el.id}|${Array.from(classes(el)).sort().join(" ")}|${text(el)}`;
+  const sigIndex = /* @__PURE__ */ new Map();
+  for (const el of Array.from(parsed.body ? parsed.body.getElementsByTagName("*") : [])) {
+    const s = signature(el);
+    sigIndex.set(s, sigIndex.has(s) ? null : el);
+  }
+  const find = (live) => {
+    const p = contentPath(live);
+    const cand = p ? byPath(parsed, p) : null;
+    if (cand && similar(live, cand)) return cand;
+    return sigIndex.get(signature(live)) || null;
+  };
+  const realPath = (el) => {
+    const p = [];
+    for (let x = el; x && x !== parsed.documentElement; x = x.parentElement) {
+      if (!x.parentElement) return null;
+      p.unshift(Array.prototype.indexOf.call(x.parentElement.children, x));
+    }
+    return p;
+  };
+  const out = /* @__PURE__ */ new Map();
+  const mark = (target, name, value) => {
+    const path = realPath(target);
+    if (!path) return false;
+    let m = out.get(target);
+    if (!m) out.set(target, m = { path, attrs: {} });
+    m.attrs[name] = value;
+    return true;
+  };
+  const dropAnchors = [];
+  const dropRegions = [];
+  for (const live of Array.from(document.querySelectorAll("[data-clonyfy-sa]"))) {
+    const id = live.getAttribute("data-clonyfy-sa");
+    const t = find(live);
+    if (!t || !mark(t, "data-clonyfy-sa", id)) dropAnchors.push(Number(id.slice(1)));
+  }
+  for (const live of Array.from(document.querySelectorAll("[data-clonyfy-st]"))) {
+    const t = find(live);
+    if (t) mark(t, "data-clonyfy-st", live.getAttribute("data-clonyfy-st"));
+  }
+  for (const live of Array.from(document.querySelectorAll("[data-clonyfy-sr]"))) {
+    const id = live.getAttribute("data-clonyfy-sr");
+    const t = find(live);
+    if (!t || !mark(t, "data-clonyfy-sr", id)) dropRegions.push(id);
+  }
+  return { marks: Array.from(out.values()), dropAnchors, dropRegions };
+}
+function applyMarks(html, marks) {
+  const doc = parse(html, { sourceCodeLocationInfo: true });
+  const root = doc.childNodes?.find((n) => n.tagName === "html");
+  const inserts = [];
+  for (const m of marks) {
+    let x = root;
+    for (const i of m.path) x = x?.childNodes?.filter((c) => !!c.tagName)[i];
+    const tag = x?.sourceCodeLocation?.startTag;
+    if (!x || !tag) continue;
+    const existing = new Set((x.attrs || []).map((a) => a.name));
+    const add = Object.entries(m.attrs).filter(([n]) => !existing.has(n));
+    if (!add.length) continue;
+    const end = html.slice(tag.startOffset, tag.endOffset);
+    const at = tag.endOffset - (end.endsWith("/>") ? 2 : 1);
+    const text = add.map(([n, v]) => ` ${n}="${v.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`).join("");
+    inserts.push({ at, text, names: add.map(([n, v]) => `${n}=${v}`) });
+  }
+  inserts.sort((a, b) => b.at - a.at);
+  let out = html;
+  const applied = /* @__PURE__ */ new Set();
+  for (const ins of inserts) {
+    out = out.slice(0, ins.at) + ins.text + out.slice(ins.at);
+    ins.names.forEach((n) => applied.add(n));
+  }
+  return { html: out, applied };
+}
+function pruneTimeline(tl, applied) {
+  const anchorOk = (a) => tl.anchors[a]?.mode === "doc" || applied.has(`data-clonyfy-sa=${tl.anchors[a]?.id}`);
+  const regionsKept = /* @__PURE__ */ new Map();
+  const regions = [];
+  (tl.regions || []).forEach((r, i) => {
+    if (!anchorOk(r.a) || !applied.has(`data-clonyfy-sr=${r.id}`)) return;
+    regionsKept.set(i, regions.length);
+    regions.push(r);
+  });
+  const tracks = tl.tracks.filter((t) => anchorOk(t.a)).filter((t) => typeof t.r === "number" ? regionsKept.has(t.r) : applied.has(`data-clonyfy-st=${t.id}`)).map((t) => typeof t.r === "number" ? { ...t, r: regionsKept.get(t.r) } : t);
+  if (!tracks.length && !regions.length) return null;
+  return regions.length ? { ...tl, tracks, regions } : { v: 1, anchors: tl.anchors, tracks };
+}
+async function backfillScrollTimeline(previewUrl, snapshotHtml, opts = {}) {
+  if (/id=["']__clonyfy_scroll_timeline__["']/.test(snapshotHtml)) return { html: null, tracks: 0, regions: 0, reason: "already recorded" };
+  let browser;
+  const deadline = Date.now() + (opts.timeoutMs ?? 6e4);
+  try {
+    const { chromium } = await import("playwright-core");
+    browser = await chromium.launch({ headless: true, ...await getChromiumLaunchOptions(chromium) });
+    const page = await browser.newPage({ viewport: VIEWPORT2 });
+    await page.addInitScript(() => {
+      window.__name = (f) => f;
+    });
+    await page.goto(previewUrl, { waitUntil: "domcontentloaded", timeout: 3e4 });
+    await page.waitForLoadState("load", { timeout: 1e4 }).catch(() => {
+    });
+    await page.waitForLoadState("networkidle", { timeout: 4e3 }).catch(() => {
+    });
+    await page.waitForTimeout(1500);
+    const left = deadline - Date.now();
+    if (left < 5e3) return { html: null, tracks: 0, regions: 0, reason: "timeout" };
+    const tl = await Promise.race([
+      recordScrollTimeline(page, { fast: true }),
+      new Promise((r) => setTimeout(() => r(null), left))
+    ]);
+    if (!tl) return { html: null, tracks: 0, regions: 0, reason: "no scroll animation" };
+    const match = await page.evaluate(matchInPage, { html: snapshotHtml });
+    const { html, applied } = applyMarks(snapshotHtml, match.marks);
+    const pruned = pruneTimeline(tl, applied);
+    if (!pruned) return { html: null, tracks: 0, regions: 0, reason: "animated elements not found in the snapshot" };
+    return { html: injectScrollTimeline(html, pruned), tracks: pruned.tracks.length, regions: pruned.regions?.length || 0 };
+  } catch (err) {
+    logger.debug(`  [MOTION BACKFILL] ${err.message.split("\n")[0]}`);
+    return { html: null, tracks: 0, regions: 0, reason: err.message.split("\n")[0] };
+  } finally {
+    await browser?.close().catch(() => {
+    });
+  }
+}
+
 // src/runClone.ts
 var IS_SERVERLESS2 = isServerlessRuntime();
 var IS_FAST_CLONE2 = isFastCloneProfile();
@@ -15506,7 +15677,8 @@ async function regenerateCloneProject(outDir) {
 
 export {
   logger,
+  backfillScrollTimeline,
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-I4VYHYTJ.js.map
+//# sourceMappingURL=chunk-AEBR6C2K.js.map

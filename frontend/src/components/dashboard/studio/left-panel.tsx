@@ -67,6 +67,14 @@ export type DropZone = "before" | "after" | "inside";
 
 export type LeftActions = {
   select: (el: HTMLElement) => void;
+  /** Scroll-animation info: whether the layer animates, and the steps of a step panel. */
+  animation: (
+    el: HTMLElement,
+  ) => { animated: boolean; steps: { index: number; label: string }[] | null } | null;
+  /** Scroll the canvas to one step of a scroll-driven step panel. */
+  revealStep: (panel: HTMLElement, index: number) => void;
+  /** Copies the preview scripts add while animating (marquee loops) — not page layers. */
+  isRuntimeNode: (el: Element) => boolean;
   moveLayer: (el: HTMLElement, target: HTMLElement, zone: DropZone) => void;
   insertBlock: (html: string, asSection: boolean) => void;
   insertLibrary: (item: LibraryItem) => void;
@@ -114,10 +122,11 @@ const ICONS: Array<[string, LucideIcon]> = [
 
 /* ----------------------------------------------------------------- layers */
 
-function layerChildren(el: Element): HTMLElement[] {
+function layerChildren(el: Element, actions: LeftActions): HTMLElement[] {
   return Array.from(el.children).filter(
     (c) =>
       isSelectable(c) &&
+      !actions.isRuntimeNode(c) &&
       c.id !== STUDIO_STYLE_ID &&
       !c.matches("script,style,link,meta,noscript,template"),
   ) as HTMLElement[];
@@ -159,11 +168,12 @@ function LayerRow({
   version: number;
 }) {
   const [zone, setZone] = useState<DropZone | null>(null);
-  const kids = layerChildren(el);
+  const kids = layerChildren(el, actions);
   const open = expanded.has(el);
   const isSel = selected === el;
   const hidden = el.ownerDocument.defaultView?.getComputedStyle(el).display === "none";
   const locked = el.hasAttribute(ATTR_LOCK);
+  const anim = actions.animation(el);
   const rowRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (isSel) rowRef.current?.scrollIntoView({ block: "nearest" });
@@ -229,7 +239,7 @@ function LayerRow({
             e.stopPropagation();
             toggle(el);
           }}
-          className={`grid h-4 w-4 shrink-0 place-items-center rounded ${kids.length ? "hover:bg-accent" : "invisible"}`}
+          className={`grid h-4 w-4 shrink-0 place-items-center rounded ${kids.length || anim?.steps ? "hover:bg-accent" : "invisible"}`}
           aria-label={open ? "Collapse" : "Expand"}
         >
           {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
@@ -243,10 +253,31 @@ function LayerRow({
         </span>
         <span className="truncate">{layerLabel(el)}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {anim?.animated && (
+            <span title="Animated on scroll — click to jump to where it plays">
+              <Sparkles size={10} className="text-sky-400" />
+            </span>
+          )}
           {locked && <Lock size={10} className="text-amber-400" />}
           {hidden && <EyeOff size={10} />}
         </span>
       </div>
+      {open &&
+        anim?.steps?.map((s) => (
+          <div
+            key={`step-${s.index}`}
+            onClick={() => actions.revealStep(el, s.index)}
+            title="Scroll the canvas to this step"
+            className="flex h-6 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-[11px] text-sky-300/80 hover:bg-accent/60 hover:text-foreground"
+            style={{ paddingLeft: 6 + (depth + 1) * 12 + 16 }}
+          >
+            <Sparkles size={9} className="shrink-0" />
+            <span className="truncate">
+              Step {s.index + 1}
+              {s.label ? ` · ${s.label}` : ""}
+            </span>
+          </div>
+        ))}
       {open &&
         kids
           .slice(0, 200)
@@ -370,7 +401,7 @@ function LayersTab({
             <p className="px-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
               Page
             </p>
-            {layerChildren(doc.body).map((el, i) => (
+            {layerChildren(doc.body, actions).map((el, i) => (
               <LayerRow
                 key={i}
                 el={el}

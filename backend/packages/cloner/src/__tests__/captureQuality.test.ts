@@ -2,6 +2,7 @@
 import {
   isBrowserErrorPage,
   isFrameworkErrorHtml,
+  isSoftNotFoundPage,
   isThinSpaShell,
   restoreSelfRemovingScripts,
   normalizePathname,
@@ -110,5 +111,19 @@ describe('isBrowserErrorPage', () => {
     const real = `<html><body><main><h1>Framer is the design agent</h1><p>${'Build sites. '.repeat(40)}</p></main></body></html>`;
     expect(isBrowserErrorPage(real)).toBe(false);
     expect(isThinSpaShell(real)).toBe(false);
+  });
+});
+
+describe('isSoftNotFoundPage', () => {
+  it('flags a site 404 screen served as a normal page', () => {
+    const page = '<html><head><title>Griffin</title></head><body><header><a>Products</a><a>Pricing</a></header><main><h1>404</h1><p>Page not found</p><p>The page you are looking for does not exist or has been moved.</p><a>Go home</a></main><footer>© Griffin</footer></body></html>';
+    expect(isSoftNotFoundPage(page)).toBe(true);
+    expect(isThinSpaShell(page)).toBe(true);
+    expect(isSoftNotFoundPage('<html><head><title>404 Not Found</title></head><body><p>Nothing here.</p></body></html>')).toBe(true);
+  });
+
+  it('keeps real pages that merely mention 404', () => {
+    const real = `<html><head><title>Pricing</title></head><body><h1>Pricing</h1><p>${'Plans for every team, from 404 seats upward. '.repeat(30)}</p></body></html>`;
+    expect(isSoftNotFoundPage(real)).toBe(false);
   });
 });

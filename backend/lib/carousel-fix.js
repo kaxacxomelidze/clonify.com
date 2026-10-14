@@ -233,6 +233,9 @@ function hideInactiveLayer(el, active, opts = {}) {
 }
 
 function collapseStack(layers, seen) {
+  // Layers moved by the recorded scroll animation (stacked cards, step panels) overlap by
+  // design — they are not carousel slides; hiding them would break the animation.
+  if (layers.some((el) => el.closest('[data-clonyfy-st],[data-clonyfy-sr]') || el.querySelector('[data-clonyfy-st]'))) return;
   let active = layers.find((el) =>
     el.getAttribute('aria-hidden') === 'false'
     || /\b(is-active|active|current|visible|show|in)\b/i.test(el.className || ''),
@@ -261,7 +264,7 @@ function normalizeDuplicateTextOverlays(seen) {
   const candidates = [];
   document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,a,li,div,label,figcaption,blockquote,strong,em,b').forEach((el) => {
     if (seen.has(el)) return;
-    if (el.closest && el.closest('[data-clonyfy-ui],[data-clonyfy-stack-hidden]')) return;
+    if (el.closest && el.closest('[data-clonyfy-ui],[data-clonyfy-stack-hidden],[data-clonyfy-st],[data-clonyfy-sr]')) return;
     // Never collapse Stripe/Framer blend title pairs — both layers are required.
     if (isIntentionalBlendLayer(el)) return;
     if (!looksLikeTextLayer(el)) return;
@@ -537,6 +540,11 @@ function browserCarouselFixRuntime() {
     }
   }
   function collapse(layers, seen) {
+    // Layers moved by the recorded scroll animation (stacked cards, step panels) overlap by
+    // design — they are not carousel slides; hiding them would break the animation.
+    for (var g = 0; g < layers.length; g++) {
+      if (layers[g].closest('[data-clonyfy-st],[data-clonyfy-sr]') || layers[g].querySelector('[data-clonyfy-st]')) return;
+    }
     var active = null;
     for (var i = 0; i < layers.length; i++) {
       var el = layers[i];
@@ -591,7 +599,7 @@ function browserCarouselFixRuntime() {
     var candidates = [];
     document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,a,li,div,label,figcaption,blockquote,strong,em,b').forEach(function (el) {
       if (seen.has(el)) return;
-      if (el.closest && el.closest('[data-clonyfy-ui],[data-clonyfy-stack-hidden]')) return;
+      if (el.closest && el.closest('[data-clonyfy-ui],[data-clonyfy-stack-hidden],[data-clonyfy-st],[data-clonyfy-sr]')) return;
       if (isBlend(el)) return;
       if (!textLayer(el)) return;
       var text = normText(el);
