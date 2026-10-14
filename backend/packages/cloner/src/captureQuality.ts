@@ -37,6 +37,8 @@ export function isThinSpaShell(html: string): boolean {
   if (!raw) return true;
   // A browser error page is never a capture of the site.
   if (isBrowserErrorPage(raw)) return true;
+  // Nor is the site's own "404 / page not found" screen (served with status 200).
+  if (isSoftNotFoundPage(raw)) return true;
 
   const withoutNoise = raw
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
@@ -74,6 +76,23 @@ export function isFrameworkErrorText(text: string): boolean {
   if (/Application error: a (client|server)-side exception has occurred/i.test(t)) return true;
   return /Application Error/i.test(t)
     && /page could not be displayed|Something has gone wrong|This page could not be found/i.test(t);
+}
+
+/** The site's own "404 — page not found" screen, even when served with status 200. */
+export function isSoftNotFoundPage(html: string): boolean {
+  const raw = String(html || '');
+  const title = (raw.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || '').trim();
+  const body = raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z#0-9]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const notFound = /\b404\b|page (?:was )?not found|page (?:does ?n.t|could ?n.t be) (?:exist|found)|this page could not be found/i;
+  if (/\b404\b|not found/i.test(title) && body.length < 1500) return true;
+  return notFound.test(body) && body.length < 600;
 }
 
 /** Chromium's own "This site can't be reached" / ERR_* page (not the site at all). */

@@ -10,7 +10,7 @@ import { lookup as dnsLookup, Resolver as DnsResolver } from 'dns/promises';
 import { createRequire } from 'module';
 import { tmpdir, totalmem } from 'os';
 import 'dotenv/config';
-import { runClone, regenerateCloneProject } from './packages/cloner/dist/runClone.js';
+import { runClone, regenerateCloneProject, backfillScrollTimeline } from './packages/cloner/dist/runClone.js';
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
@@ -1528,6 +1528,86 @@ function createPreviewToken(outDir, { scripts }) {
   const exp = (Date.now() + PREVIEW_TOKEN_TTL_MS).toString(36);
   const flags = scripts ? 's' : '-';
   return `${exp}.${flags}.${previewTokenSignature(`${outDirBasename(outDir)}|${exp}|${flags}`)}`;
+}
+
+/**
+ * The clone preview page — exactly what "Preview" opens. Share links embed this same
+ * page, so a shared clone behaves like the preview: captured pages, the "not cloned yet"
+ * notice for pages that weren't captured, and the site's own scripts only when the
+ * preview never shares an origin with the dashboard (which holds the login).
+ * `embedderOrigin` is the origin the preview is opened from.
+ */
+function clonePreviewPageUrl(req, outDir, route, embedderOrigin = '') {
+  const base = previewOriginUrl() || apiPublicUrl(req).replace(/\/$/, '');
+  let scripts = false;
+  try {
+    scripts = !!previewOriginUrl() || (!!embedderOrigin && new URL(base).origin !== embedderOrigin);
+  } catch {}
+  const qs = new URLSearchParams({
+    outDir: outDirBasename(outDir),
+    route: String(route || '/'),
+    pt: createPreviewToken(outDir, { scripts }),
+  });
+  if (scripts) qs.set('scripts', '1');
+  return { url: `${base}/api/page?${qs.toString()}`, scripts };
+}
+
+/** Origin of the dashboard app (where Preview is opened from). */
+function frontendAppOrigin() {
+  for (const raw of [process.env.FRONTEND_URL, process.env.PUBLIC_APP_URL]) {
+    try { if (raw) return new URL(String(raw).split(',')[0].trim()).origin; } catch {}
+  }
+  return '';
+}
+
+const MOTION_STATE_FILE = 'motion-backfill.json';
+const motionBackfills = new Map();
+
+/**
+ * The editor plays a page's scroll animations from the timeline recorded at capture.
+ * Pages captured without one (older clones, lost recordings) get it recorded once, the
+ * first time they're opened in the editor: from the interactive preview, where the
+ * site's own JS still animates the original markup. The result is saved into the page,
+ * so the offline preview and share links play it too. Never blocks longer than ~75s.
+ */
+async function ensureMotionTimeline(outDir, filename, route, data) {
+  const html = data.toString('utf8');
+  if (/id=["']__clonyfy_scroll_timeline__["']/.test(html)) return data;
+  const key = `${outDir}|${filename}`;
+  if (motionBackfills.has(key)) return motionBackfills.get(key);
+  const job = (async () => {
+    const stateData = await readCloneFile(outDir, MOTION_STATE_FILE).catch(() => null);
+    const state = stateData ? safeJsonParse(stateData.toString('utf8'), {}) : {};
+    if (state[filename]) return data; // tried before
+    const remember = (status) => {
+      state[filename] = status;
+      return writeCloneFile(outDir, MOTION_STATE_FILE, JSON.stringify(state), 'application/json').catch(() => {});
+    };
+    // Recording needs the site's JS on its original server HTML (retired once the page is edited).
+    const modesData = await readCloneFile(outDir, 'preview-mode.json').catch(() => null);
+    const modes = modesData ? safeJsonParse(modesData.toString('utf8'), {}) : {};
+    const serverData = modes?.[filename] === 'offline'
+      ? null
+      : await readCloneFile(outDir, join('captured-pages', filename.replace(/\.html$/i, '.server.html'))).catch(() => null);
+    if (!serverData?.length) { await remember('no-interactive-preview'); return data; }
+    const qs = new URLSearchParams({
+      outDir: outDirBasename(outDir),
+      route,
+      pt: createPreviewToken(outDir, { scripts: true }),
+      scripts: '1',
+    });
+    const result = await backfillScrollTimeline(`http://127.0.0.1:${PORT}/api/page?${qs}`, html, { timeoutMs: 75_000 });
+    if (!result.html) { await remember(result.reason || 'none'); return data; }
+    await writeCloneFile(outDir, join('captured-pages', filename), result.html, 'text/html; charset=utf-8');
+    await remember(`added ${result.tracks} tracks, ${result.regions} regions`);
+    console.log(`[motion] ${outDirBasename(outDir)} ${route}: recorded ${result.tracks} animation tracks, ${result.regions} regions`);
+    return Buffer.from(result.html, 'utf8');
+  })().catch((err) => {
+    console.warn('[motion] backfill failed:', err?.message || err);
+    return data;
+  }).finally(() => motionBackfills.delete(key));
+  motionBackfills.set(key, job);
+  return job;
 }
 
 function readPreviewToken(outDir, token) {
@@ -3249,20 +3329,17 @@ async function prepareHtmlForSharePreview(html, outDir, shareId, { routes = [], 
   return out;
 }
 
-function shareWrapperHtml(shareId, route = '/', targetOrigin = '') {
-  const cleanRoute = String(route || '/');
-  let iframeSrc = '';
-  const origin = String(targetOrigin || '').replace(/\/$/, '');
-  if (origin) {
-    try {
-      iframeSrc = new URL(cleanRoute.startsWith('/') ? cleanRoute : `/${cleanRoute}`, `${origin}/`).href;
-    } catch {
-      iframeSrc = `${origin}${cleanRoute.startsWith('/') ? cleanRoute : `/${cleanRoute}`}`;
-    }
-  } else {
-    // Legacy fallback: static clone snapshot when manifest has no targetOrigin.
-    iframeSrc = `/api/share-page?shareId=${encodeURIComponent(shareId)}&route=${encodeURIComponent(cleanRoute)}`;
-  }
+function shareWrapperHtml(shareId, iframeSrc) {
+  let frameOrigin = '';
+  try { frameOrigin = new URL(iframeSrc).origin; } catch {}
+  // The preview reports each page it shows; keep the share URL on that page so it can be
+  // copied, reloaded and bookmarked like a normal site URL.
+  // shareId is [a-z0-9] and frameOrigin a parsed URL origin, both safe inside <script>.
+  const sync = `(function(){var base=${JSON.stringify(`/share/${shareId}`)},origin=${JSON.stringify(frameOrigin)};`
+    + `addEventListener('message',function(e){var d=e.data;`
+    + `if(e.origin!==origin||!d||d.type!=='clonyfy-preview-nav'||typeof d.route!=='string')return;`
+    + `var r=d.route.charAt(0)==='/'?d.route:'/'+d.route;`
+    + `try{history.replaceState(null,'',base+(r==='/'?'/':r))}catch(_){}});})();`;
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -3271,13 +3348,20 @@ function shareWrapperHtml(shareId, route = '/', targetOrigin = '') {
 <style>html,body{margin:0;height:100%;overflow:hidden;background:#0a0a0a}iframe{border:0;width:100%;height:100%;display:block}</style>
 </head><body>
 <iframe src="${htmlEsc(iframeSrc)}" title="Shared site preview" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads" referrerpolicy="no-referrer-when-downgrade"></iframe>
+<script>${sync}</script>
 </body></html>`;
 }
 
-async function shareWrapperHtmlForShare(share, shareId, route = '/') {
-  const outDir = resolveCloneOutDir(share.out_dir) || share.out_dir;
-  const targetOrigin = outDir ? await loadCloneTargetOrigin(outDir) : '';
-  return shareWrapperHtml(shareId, route, targetOrigin);
+/**
+ * A share link shows the clone exactly as Preview does — never the original live site
+ * (which would ignore the user's edits and show pages that were never cloned).
+ */
+async function shareWrapperHtmlForShare(req, share, shareId, route = '/') {
+  const outDir = resolveCloneOutDir(share.out_dir);
+  if (!outDir) return null;
+  const start = !route || route === '/' ? (share.route || '/') : route;
+  const { url } = clonePreviewPageUrl(req, outDir, start, frontendAppOrigin());
+  return shareWrapperHtml(shareId, url);
 }
 
 async function loadSharedPreviewHtml(share, shareId, requestedRoute) {
@@ -3370,6 +3454,23 @@ function pickLandingRoute(map) {
       for (let i = 0; i < a.s.length; i++) if (a.s[i] !== b.s[i]) return a.s[i] - b.s[i];
       return a.r.localeCompare(b.r);
     })[0].r;
+}
+
+/** A captured page that is really the site's "404 — page not found" screen. */
+function isSoftNotFoundHtml(html) {
+  const raw = String(html || '');
+  const title = (raw.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || '').trim();
+  const body = raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z#0-9]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const notFound = /\b404\b|page (?:was )?not found|page (?:does ?n.t|could ?n.t be) (?:exist|found)|this page could not be found/i;
+  if (/\b404\b|not found/i.test(title) && body.length < 1500) return true;
+  return notFound.test(body) && body.length < 600;
 }
 
 function cloneMissingRouteHtml(requestedRoute, capturedRoutes = []) {
@@ -4409,6 +4510,8 @@ function contentSecurityPolicyForPath(pathname) {
         for (const o of originsFromEnvValue(part.trim())) allowed.add(o);
       }
     }
+    // Share links (served by this API) embed the preview page, which may live on PREVIEW_ORIGIN.
+    try { allowed.add(new URL(apiPublicUrl()).origin); } catch {}
     allowed.add('http://localhost:8080');
     allowed.add('http://127.0.0.1:8080');
     return [...allowed].join(' ');
@@ -5006,7 +5109,16 @@ async function handleRequest(req, res) {
     }
     const map = await loadRouteMapWithRematerialize(outDir);
     if (!map) return json(res, []);
-    return json(res, Object.keys(map));
+    // Hide pages the cloner captured from the site's own "404 / page not found" screen
+    // (older clones; new clones no longer save them).
+    const routes = Object.keys(map);
+    const verdicts = await Promise.all(routes.map(async (route) => {
+      if (route === '/') return true;
+      const data = await readCloneFile(outDir, join('captured-pages', map[route])).catch(() => null);
+      return !data || !isSoftNotFoundHtml(data.toString('utf8'));
+    }));
+    const kept = routes.filter((_, i) => verdicts[i]);
+    return json(res, kept.length ? kept : routes);
   }
 
   if (req.method === 'GET' && url.pathname === '/api/page') {
@@ -5038,6 +5150,7 @@ async function handleRequest(req, res) {
     catch { return json(res, { error: 'Invalid page path' }, 400); }
     if (!data) { res.writeHead(404); res.end('File missing'); return; }
     const editorMode = url.searchParams.get('mode') === 'editor';
+    if (editorMode) data = await ensureMotionTimeline(outDir, resolved.filename, resolved.route, data);
     let html = data.toString('utf8');
     if (editorMode) {
       html = neutralizeCloneScripts(html);
@@ -5989,21 +6102,9 @@ async function handleRequest(req, res) {
     if (!await canReadOutDir(previewUser, outDir) && !await canReadCloneRecord(previewUser, outDir)) {
       return json(res, { error: 'Not found' }, 404);
     }
-    const base = previewOriginUrl() || apiPublicUrl(req).replace(/\/$/, '');
     let embedder = '';
     try { embedder = new URL(String(req.headers.origin || req.headers.referer || '')).origin; } catch {}
-    let scripts = false;
-    try {
-      // Isolated = the preview never shares an origin with the dashboard (which holds the login).
-      scripts = !!previewOriginUrl() || (!!embedder && new URL(base).origin !== embedder);
-    } catch {}
-    const qs = new URLSearchParams({
-      outDir,
-      route: String(body?.route || '/'),
-      pt: createPreviewToken(outDir, { scripts }),
-    });
-    if (scripts) qs.set('scripts', '1');
-    return json(res, { url: `${base}/api/page?${qs.toString()}`, scripts });
+    return json(res, clonePreviewPageUrl(req, outDir, body?.route || '/', embedder));
   }
 
   if (req.method === 'POST' && url.pathname === '/api/preview') {
@@ -6869,7 +6970,7 @@ async function handleRequest(req, res) {
         'Content-Type': 'text/html; charset=utf-8',
         'Set-Cookie': shareAccessSetCookie(share),
       });
-      res.end(await shareWrapperHtmlForShare(share, shareId, requestedRoute));
+      res.end(await shareWrapperHtmlForShare(req, share, shareId, requestedRoute) || '<h2 style="font-family:system-ui;padding:40px">This clone no longer exists.</h2>');
       return;
     }
     let requestedRoute = shareRouteFromPath(url.pathname, shareId, url.search) + (url.hash || '');
@@ -6879,8 +6980,9 @@ async function handleRequest(req, res) {
       res.end(sharePasswordFormHtml(shareId, undefined, pwAction));
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(await shareWrapperHtmlForShare(share, shareId, requestedRoute));
+    const wrapper = await shareWrapperHtmlForShare(req, share, shareId, requestedRoute);
+    res.writeHead(wrapper ? 200 : 404, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(wrapper || '<h2 style="font-family:system-ui;padding:40px">This clone no longer exists.</h2>');
     return;
   }
 

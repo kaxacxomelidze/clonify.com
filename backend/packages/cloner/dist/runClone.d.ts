@@ -15,6 +15,20 @@ interface ArtifactWrittenEvent {
     kind: 'page' | 'route-map' | 'manifest' | 'asset';
 }
 
+interface MotionBackfillResult {
+    html: string | null;
+    tracks: number;
+    regions: number;
+    reason?: string;
+}
+/**
+ * @param previewUrl interactive preview of the page (site JS running, served by this API)
+ * @param snapshotHtml the saved snapshot to add the timeline to
+ */
+declare function backfillScrollTimeline(previewUrl: string, snapshotHtml: string, opts?: {
+    timeoutMs?: number;
+}): Promise<MotionBackfillResult>;
+
 interface CloneRunEvents {
     onLog?: (line: string) => void;
     onArtifactWritten?: (event: ArtifactWrittenEvent) => Promise<void>;
@@ -30,4 +44,4 @@ declare function runClone(options: ClonerOptions, events?: CloneRunEvents): Prom
 /** Rebuild the Next.js project from persisted manifest + captured HTML (for exports after blob storage). */
 declare function regenerateCloneProject(outDir: string): Promise<void>;
 
-export { type CloneRunEvents, type CloneRunResult, regenerateCloneProject, runClone };
+export { type CloneRunEvents, type CloneRunResult, type MotionBackfillResult, backfillScrollTimeline, regenerateCloneProject, runClone };

@@ -108,6 +108,8 @@ import {
 import type { MotionConfig } from "@/lib/studio/motion";
 import { describeStudio, type StudioInfo } from "@/lib/studio/describe";
 import { addAsset, addLibraryItem, type LibraryItem } from "@/lib/studio/library";
+import { startRuntimeHost, type RuntimeHost } from "@/lib/studio/runtime-host";
+import { startScrollReplay, type ScrollReplay } from "@/lib/studio/scroll-replay";
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -121,10 +123,32 @@ function fileToDataUrl(file: File): Promise<string> {
 type Device = "desktop" | "tablet" | "mobile";
 type Mode = "edit" | "preview" | "source";
 type Zoom = "fit" | 1 | 0.75 | 0.5;
-const DEVICES: Array<{ id: Device; label: string; width: number; Icon: typeof Monitor }> = [
-  { id: "desktop", label: "Desktop", width: 1440, Icon: Monitor },
-  { id: "tablet", label: "Tablet", width: 820, Icon: Tablet },
-  { id: "mobile", label: "Mobile", width: 390, Icon: Smartphone },
+/**
+ * Each device's viewport. The height matters as much as the width: pages size sections
+ * with vh/dvh, so the canvas must report a real screen height — never the zoomed-out
+ * canvas height, which made screen-tall sections (heroes) grow far taller than in the
+ * preview. Desktop uses the shape of the user's own browser window, where Live preview
+ * opens.
+ */
+const DEVICES: Array<{
+  id: Device;
+  label: string;
+  width: number;
+  height: (width: number) => number;
+  Icon: typeof Monitor;
+}> = [
+  {
+    id: "desktop",
+    label: "Desktop",
+    width: 1440,
+    height: (w) =>
+      Math.round(
+        Math.min(1100, Math.max(640, (w * window.innerHeight) / Math.max(1, window.innerWidth))),
+      ),
+    Icon: Monitor,
+  },
+  { id: "tablet", label: "Tablet", width: 820, height: () => 1180, Icon: Tablet },
+  { id: "mobile", label: "Mobile", width: 390, height: () => 844, Icon: Smartphone },
 ];
 const SCOPE_OF: Record<Device, Scope> = { desktop: "base", tablet: "tablet", mobile: "mobile" };
 const DEFAULT_LAYOUT: Record<SectionKind, string> = {
@@ -198,6 +222,14 @@ export function VisualEditor({
   const [route, setRoute] = useState(initialRoute);
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(true);
+  // The first open of a page may record its scroll animations on the server (~1 min, once).
+  const [slowLoad, setSlowLoad] = useState(false);
+  useEffect(() => {
+    setSlowLoad(false);
+    if (!loading) return;
+    const t = setTimeout(() => setSlowLoad(true), 5000);
+    return () => clearTimeout(t);
+  }, [loading]);
   const [busy, setBusy] = useState("");
   const [dirty, setDirty] = useState(false);
   const [device, setDevice] = useState<Device>("desktop");
@@ -309,7 +341,36 @@ export function VisualEditor({
 
   const updateHistory = () =>
     setHistory({ undo: undoRef.current.length, redo: redoRef.current.length });
-  const snapshot = (doc: Document) => doc.body.innerHTML.replace(EDITOR_ATTR_RE, "");
+  const replayRef = useRef<ScrollReplay | null>(null);
+  const hostRef = useRef<RuntimeHost | null>(null);
+  /** Stop the preview scripts and the scroll replay; the page is back to its saved state. */
+  const stopRuntime = () => {
+    replayRef.current?.destroy();
+    replayRef.current = null;
+    hostRef.current?.destroy();
+    hostRef.current = null;
+  };
+  useEffect(() => stopRuntime, []);
+  /** Run fn against the page as saved (no animation frame or script change baked in). */
+  const asSaved = <T,>(fn: () => T): T => {
+    const host = hostRef.current;
+    const replay = replayRef.current;
+    const inner = host ? () => host.withOriginals(fn) : fn;
+    const run = replay ? () => replay.withOriginals(inner) : inner;
+    return host ? host.quiet(run) : run();
+  };
+  /** Like selectableTarget, but copies the preview scripts made (marquee loops) select their host. */
+  const pickTarget = (node: EventTarget | null) => {
+    let el = selectableTarget(node);
+    while (el && hostRef.current?.isRuntimeNode(el)) el = selectableTarget(el.parentElement);
+    return el;
+  };
+  /** The user is about to edit `el`: animations and preview scripts leave it alone. */
+  const handOver = (el: Element | null) => {
+    replayRef.current?.touch(el);
+    hostRef.current?.own(el);
+  };
+  const snapshot = (doc: Document) => asSaved(() => doc.body.innerHTML.replace(EDITOR_ATTR_RE, ""));
   const trimHistory = (stack: string[]) => {
     let total = stack.reduce((n, s) => n + s.length, 0);
     while (stack.length > MAX_HISTORY || (stack.length > 1 && total > MAX_HISTORY_CHARS)) {
@@ -324,6 +385,7 @@ export function VisualEditor({
     redoRef.current = [];
     lastChangeRef.current = null;
     updateHistory();
+    handOver(selectedRef.current);
   };
   /** Coalesce rapid changes of the same control (sliders, color pickers) into one step. */
   const recordChange = (key: string) => {
@@ -331,6 +393,7 @@ export function VisualEditor({
     const last = lastChangeRef.current;
     const el = selectedRef.current;
     if (!last || last.key !== key || last.el !== el || now - last.at > 1500) pushUndo();
+    else handOver(el);
     lastChangeRef.current = { key, at: now, el };
     setDirty(true);
   };
@@ -397,9 +460,11 @@ export function VisualEditor({
     if (!doc?.body) return;
     editingRef.current = null;
     setEditingText(false);
+    stopRuntime();
     doc.body.innerHTML = bodyHtml;
     clearEditorAttrs(doc.body);
     applyThemeToDoc();
+    startRuntime(doc);
     selectedRef.current = null;
     hoverRef.current = null;
     setSel(null);
@@ -408,6 +473,33 @@ export function VisualEditor({
     lastChangeRef.current = null;
     setDirty(true);
     refreshLayers();
+  };
+
+  /**
+   * Make the canvas behave like the preview: run Clonyfy's preview scripts (canvas
+   * frames, marquees, entrance animations…) and play the recorded scroll animation.
+   */
+  const swapRefreshRef = useRef(0);
+  const startRuntime = (doc: Document) => {
+    stopRuntime();
+    const host = startRuntimeHost(doc);
+    hostRef.current = host;
+    replayRef.current = startScrollReplay(doc, {
+      ...(host ? { quiet: host.quiet } : {}),
+      onRegionSwap: (panel) => {
+        // The step panel's children were replaced: drop a stale selection, re-tag
+        // designed sections (designs address parts by role), refresh the layer list.
+        if (selectedRef.current && !selectedRef.current.isConnected) select(null);
+        const list = listSections(doc);
+        list.forEach((s, i) => {
+          if (!s.el.contains(panel)) return;
+          const choice = getDesign(s.el);
+          if (choice) analyzeSection(s.el, detectKind(s.el, i, list.length));
+        });
+        cancelAnimationFrame(swapRefreshRef.current);
+        swapRefreshRef.current = requestAnimationFrame(() => setVersion((v) => v + 1));
+      },
+    });
   };
 
   const isLocked = (el: HTMLElement | null) => !!el && !!lockedAncestor(el);
@@ -859,15 +951,39 @@ export function VisualEditor({
     let zone: DropZone = dropZone ?? "after";
     if (!dropTarget) {
       const selected = selectedRef.current;
+      // Nothing selected: use the section currently in view on the canvas — never the
+      // end of <body>, which sits outside every section (often below the footer).
+      const view = doc.defaultView;
+      const centerEl = view
+        ? pickTarget(doc.elementFromPoint(view.innerWidth / 2, view.innerHeight / 2))
+        : null;
+      const inView = sectionElFor(centerEl) || listSections(doc).at(-1)?.el || null;
       if (asSection) {
-        target = sectionElFor(selected) || listSections(doc).at(-1)?.el || null;
-      } else {
+        target = sectionElFor(selected) || inView;
+        zone = "after";
+      } else if (selected) {
         target = selected;
+        zone = "after";
+      } else {
+        // Right after the block the user is looking at (not the end of a tall section).
+        let anchor: HTMLElement | null = centerEl;
+        while (
+          anchor &&
+          anchor !== inView &&
+          /^inline/.test(view?.getComputedStyle(anchor).display || "") &&
+          anchor.parentElement
+        ) {
+          anchor = anchor.parentElement;
+        }
+        const usable =
+          anchor && inView && anchor !== inView && inView.contains(anchor) && !isLocked(anchor);
+        target = usable ? anchor : inView;
+        zone = usable ? "after" : "inside";
       }
-      zone = "after";
     }
     if (target && isLocked(target)) zone = "after";
     pushUndo();
+    handOver(target);
     const nodes = insertNodes(html, target, zone);
     if (!nodes.length) return;
     if (asSection && pageLook) {
@@ -879,7 +995,7 @@ export function VisualEditor({
       }
     }
     select(nodes[0]!);
-    nodes[0]!.scrollIntoView({ block: "center", behavior: "smooth" });
+    nodes[0]!.scrollIntoView({ block: "nearest", behavior: "smooth" });
     setDirty(true);
     refreshLayers();
   };
@@ -894,7 +1010,7 @@ export function VisualEditor({
     if (!nodes.length) return;
     adoptFragment(nodes, item.model);
     select(nodes[0]!);
-    nodes[0]!.scrollIntoView({ block: "center", behavior: "smooth" });
+    nodes[0]!.scrollIntoView({ block: "nearest", behavior: "smooth" });
     setDirty(true);
     refreshLayers();
     toast.success(`Inserted “${item.name}”.`);
@@ -923,6 +1039,8 @@ export function VisualEditor({
     if (guardLocked(el) || el.contains(target)) return;
     commitEditing();
     pushUndo();
+    handOver(el);
+    handOver(target);
     if (zone === "before") target.before(el);
     else if (zone === "inside") target.append(el);
     else target.after(el);
@@ -1095,6 +1213,7 @@ export function VisualEditor({
     initializedDocsRef.current.add(doc); // listeners are installed exactly once per document
     docRef.current = doc;
     installEditorChrome(doc);
+    startRuntime(doc);
     applyThemeToDoc();
     if (modeRef.current === "preview") doc.documentElement.setAttribute(ATTR_PREVIEW, "");
     selectedRef.current = null;
@@ -1130,7 +1249,7 @@ export function VisualEditor({
       (e) => {
         if (!editing() || dragRef.current?.active) return;
         if (editingRef.current?.el.contains(e.target as Node)) return;
-        const el = selectableTarget(e.target);
+        const el = pickTarget(e.target);
         if (hoverRef.current === el) return;
         hoverRef.current?.removeAttribute(ATTR_HOVER);
         hoverRef.current = el;
@@ -1155,7 +1274,7 @@ export function VisualEditor({
         const ed = editingRef.current;
         if (ed && ed.el.contains(e.target as Node)) return;
         e.stopPropagation();
-        const target = selectableTarget(e.target);
+        const target = pickTarget(e.target);
         if (
           target &&
           target === selectedRef.current &&
@@ -1175,7 +1294,7 @@ export function VisualEditor({
       (e) => {
         e.preventDefault();
         if (!editing()) return;
-        const el = selectableTarget(e.target);
+        const el = pickTarget(e.target);
         if (!el || editingRef.current?.el.contains(el)) return;
         startEditing(el, { x: e.clientX, y: e.clientY });
       },
@@ -1187,7 +1306,7 @@ export function VisualEditor({
       "pointerdown",
       (e) => {
         if (!editing() || e.button !== 0 || editingRef.current) return;
-        const target = selectableTarget(e.target);
+        const target = pickTarget(e.target);
         const sel = selectedRef.current;
         if (!sel || !target || !(target === sel || sel.contains(target)) || isLocked(sel)) return;
         // Stops the browser's own link/image drag and text selection from competing
@@ -1261,7 +1380,7 @@ export function VisualEditor({
       if (!e.dataTransfer?.types.includes(BLOCK_MIME)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
-      let el = selectableTarget(doc.elementFromPoint(e.clientX, e.clientY));
+      let el = pickTarget(doc.elementFromPoint(e.clientX, e.clientY));
       const asSection = e.dataTransfer.types.includes("text/x-clonyfy-section");
       if (el && asSection) el = sectionElFor(el) || el;
       if (!el) return;
@@ -1371,10 +1490,11 @@ export function VisualEditor({
   const getSource = useCallback((which: "selection" | "page") => {
     const doc = docRef.current;
     if (!doc?.body) return "";
-    const raw =
+    const raw = asSaved(() =>
       which === "selection" && selectedRef.current
         ? selectedRef.current.outerHTML
-        : doc.body.innerHTML;
+        : doc.body.innerHTML,
+    );
     return raw.replace(EDITOR_ATTR_RE, "").replace(/\scontenteditable="true"/g, "");
   }, []);
 
@@ -1384,9 +1504,11 @@ export function VisualEditor({
     commitEditing();
     pushUndo();
     if (which === "page") {
+      stopRuntime();
       doc.body.innerHTML = code;
       clearEditorAttrs(doc.body);
       applyThemeToDoc();
+      startRuntime(doc);
       select(null);
     } else {
       const el = selectedRef.current;
@@ -1498,7 +1620,11 @@ export function VisualEditor({
     setBusy("save");
     try {
       await ensureApiAwake({ attempts: 3, timeoutMs: 10_000 }).catch(() => {});
-      await savePage(outDir, route, htmlForSave(doc));
+      await savePage(
+        outDir,
+        route,
+        asSaved(() => htmlForSave(doc)),
+      );
       setDirty(false);
       toast.success("Page saved.");
       return true;
@@ -1526,7 +1652,7 @@ export function VisualEditor({
   const exportHtml = () => {
     const doc = docRef.current;
     if (!doc) return;
-    const blob = new Blob([htmlForSave(doc)], { type: "text/html;charset=utf-8" });
+    const blob = new Blob([asSaved(() => htmlForSave(doc))], { type: "text/html;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     const name =
@@ -1549,10 +1675,22 @@ export function VisualEditor({
     return () => ro.disconnect();
   }, []);
 
-  const deviceWidth = DEVICES.find((d) => d.id === device)!.width;
+  const deviceSpec = DEVICES.find((d) => d.id === device)!;
+  const deviceWidth = deviceSpec.width;
+  const screenHeight = deviceSpec.height(deviceWidth);
+  // Desktop shows a taller frame so the canvas below it isn't left empty.
+  const frameHeight = device === "desktop" ? Math.round(screenHeight * 1.4) : screenHeight;
+  // Fit sizes by the device screen: canvas padding (48), title bar (28) and bottom bar room (56).
   const scale =
-    zoom === "fit" ? Math.min(1, Math.max(0.2, (canvasSize.w - 48) / deviceWidth)) : zoom;
-  const frameHeight = Math.max(320, (canvasSize.h - 72) / scale);
+    zoom === "fit"
+      ? Math.min(
+          1,
+          Math.max(
+            0.2,
+            Math.min((canvasSize.w - 48) / deviceWidth, (canvasSize.h - 108) / screenHeight),
+          ),
+        )
+      : zoom;
   let host = "clone";
   try {
     host =
@@ -1608,8 +1746,22 @@ export function VisualEditor({
     select: (el) => {
       commitEditing();
       if (modeRef.current !== "edit") switchMode("edit");
-      select(el);
-      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      // Animated layers: scroll to where the animation reveals them (as in the preview).
+      if (!replayRef.current?.reveal(el))
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+      select(el.isConnected ? el : null);
+    },
+    revealStep: (panel, index) => {
+      commitEditing();
+      if (modeRef.current !== "edit") switchMode("edit");
+      replayRef.current?.revealStep(panel, index);
+      select(panel.isConnected ? panel : null);
+    },
+    isRuntimeNode: (el) => !!hostRef.current?.isRuntimeNode(el),
+    animation: (el) => {
+      const r = replayRef.current;
+      if (!r) return null;
+      return { animated: r.isAnimated(el), steps: r.steps(el) };
     },
     moveLayer,
     insertBlock: (h, s) => insertBlock(h, s),
@@ -1787,14 +1939,22 @@ export function VisualEditor({
               <div
                 className={`z-20 grid place-items-center text-sm text-muted-foreground ${html ? "absolute inset-0 bg-black/60 backdrop-blur-sm" : "h-full"}`}
               >
-                Loading editor…
+                <div className="max-w-sm text-center">
+                  <p>Loading editor…</p>
+                  {slowLoad && (
+                    <p className="mt-2 text-xs opacity-80">
+                      First time opening this page: recording its scroll animations so the canvas
+                      matches the preview. This takes up to a minute and only happens once.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {/* The canvas stays mounted while a page reloads, so the editor never loses its document. */}
             {!html && loading ? null : html ? (
               <div className="flex min-h-full justify-center p-6 pb-14">
                 <div
-                  className="shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white shadow-2xl shadow-black/50 transition-[width] duration-200"
+                  className="shrink-0 self-start overflow-hidden rounded-xl border border-white/10 bg-white shadow-2xl shadow-black/50 transition-[width] duration-200"
                   style={{ width: deviceWidth * scale }}
                 >
                   <div className="flex h-7 items-center gap-1.5 border-b border-black/10 bg-[#f4f4f5] px-3">
