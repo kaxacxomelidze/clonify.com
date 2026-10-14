@@ -10,7 +10,7 @@ import { lookup as dnsLookup, Resolver as DnsResolver } from 'dns/promises';
 import { createRequire } from 'module';
 import { tmpdir, totalmem } from 'os';
 import 'dotenv/config';
-import { runClone, regenerateCloneProject, backfillScrollTimeline } from './packages/cloner/dist/runClone.js';
+import { runClone, regenerateCloneProject, backfillPageMedia } from './packages/cloner/dist/runClone.js';
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
@@ -1572,16 +1572,24 @@ const motionBackfills = new Map();
  */
 async function ensureMotionTimeline(outDir, filename, route, data) {
   const html = data.toString('utf8');
-  if (/id=["']__clonyfy_scroll_timeline__["']/.test(html)) return data;
+  const needTimeline = !/id=["']__clonyfy_scroll_timeline__["']/.test(html);
+  // A <canvas> the capture couldn't shoot (WebGL backgrounds) is empty without site JS.
+  const needCanvas = /<canvas\b[^>]*data-clonyfy-canvas-id/i.test(html);
+  if (!needTimeline && !needCanvas) return data;
   const key = `${outDir}|${filename}`;
   if (motionBackfills.has(key)) return motionBackfills.get(key);
   const job = (async () => {
     const stateData = await readCloneFile(outDir, MOTION_STATE_FILE).catch(() => null);
     const state = stateData ? safeJsonParse(stateData.toString('utf8'), {}) : {};
-    if (state[filename]) return data; // tried before
-    const remember = (status) => {
-      state[filename] = status;
-      return writeCloneFile(outDir, MOTION_STATE_FILE, JSON.stringify(state), 'application/json').catch(() => {});
+    const timelineKey = filename;
+    const canvasKey = `${filename}#canvas`;
+    const doTimeline = needTimeline && !state[timelineKey];
+    const doCanvas = needCanvas && !state[canvasKey];
+    if (!doTimeline && !doCanvas) return data; // tried before
+    const remember = async (status) => {
+      if (doTimeline) state[timelineKey] = status.timeline || status.all;
+      if (doCanvas) state[canvasKey] = status.canvas || status.all;
+      await writeCloneFile(outDir, MOTION_STATE_FILE, JSON.stringify(state), 'application/json').catch(() => {});
     };
     // Recording needs the site's JS on its original server HTML (retired once the page is edited).
     const modesData = await readCloneFile(outDir, 'preview-mode.json').catch(() => null);
@@ -1589,18 +1597,29 @@ async function ensureMotionTimeline(outDir, filename, route, data) {
     const serverData = modes?.[filename] === 'offline'
       ? null
       : await readCloneFile(outDir, join('captured-pages', filename.replace(/\.html$/i, '.server.html'))).catch(() => null);
-    if (!serverData?.length) { await remember('no-interactive-preview'); return data; }
+    if (!serverData?.length) { await remember({ all: 'no-interactive-preview' }); return data; }
     const qs = new URLSearchParams({
       outDir: outDirBasename(outDir),
       route,
       pt: createPreviewToken(outDir, { scripts: true }),
       scripts: '1',
     });
-    const result = await backfillScrollTimeline(`http://127.0.0.1:${PORT}/api/page?${qs}`, html, { timeoutMs: 75_000 });
-    if (!result.html) { await remember(result.reason || 'none'); return data; }
+    const result = await backfillPageMedia(`http://127.0.0.1:${PORT}/api/page?${qs}`, html, {
+      timeoutMs: 75_000,
+      timeline: doTimeline,
+      canvases: doCanvas,
+    });
+    if (!result.html) { await remember({ all: result.reason || 'none' }); return data; }
+    for (const f of result.files) {
+      await writeCloneFile(outDir, join('public', '_assets', f.name), f.data, contentTypeForPath(f.name));
+    }
     await writeCloneFile(outDir, join('captured-pages', filename), result.html, 'text/html; charset=utf-8');
-    await remember(`added ${result.tracks} tracks, ${result.regions} regions`);
-    console.log(`[motion] ${outDirBasename(outDir)} ${route}: recorded ${result.tracks} animation tracks, ${result.regions} regions`);
+    _mirrorIndexCache.delete(outDir);
+    await remember({
+      timeline: result.tracks || result.regions ? `added ${result.tracks} tracks, ${result.regions} regions` : (result.reason || 'none'),
+      canvas: result.canvases ? `added ${result.canvases} canvas loop(s)` : 'none',
+    });
+    console.log(`[motion] ${outDirBasename(outDir)} ${route}: recorded ${result.tracks} animation tracks, ${result.regions} regions, ${result.canvases} canvas loop(s)`);
     return Buffer.from(result.html, 'utf8');
   })().catch((err) => {
     console.warn('[motion] backfill failed:', err?.message || err);
@@ -1651,7 +1670,7 @@ function mirrorCdnUrls(text, cdnByUrl, { css = false } = {}) {
     return hit ? `${pre}${q}${hit}${q}` : m;
   });
   out = out.replace(/(\s(?:srcset|imagesrcset|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi, (m, pre, q, list) => {
-    const next = list.split(',').map((part) => {
+    const next = list.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
       const seg = part.trim();
       const sp = seg.search(/\s/);
       const u = sp === -1 ? seg : seg.slice(0, sp);
@@ -1664,6 +1683,82 @@ function mirrorCdnUrls(text, cdnByUrl, { css = false } = {}) {
   out = out.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (_m, open, body, close) => open + rewriteCss(body) + close);
   return out;
 }
+/**
+ * The site's own JS builds many URLs at runtime (React <img src>, srcset, fetch of JSON /
+ * Lottie data) — the static rewrite above never sees them, so they went to the live CDN:
+ * slow, blocked, or gone. Route every captured CDN file to the clone's copy at the moment
+ * the page asks for it. Runs first in <head>, before any site script.
+ */
+function injectRuntimeCdnMirror(html, cdnByUrl) {
+  if (!cdnByUrl?.size) return html;
+  const json = JSON.stringify(Object.fromEntries(cdnByUrl)).replace(/</g, '\u003c');
+  const tag = `<script data-clonyfy-cdn-mirror>(${cdnMirrorRuntime.toString()})(${json});</script>`;
+  return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}${tag}`) : tag + html;
+}
+
+/** Runs in the preview page (serialized with toString — keep it self-contained). */
+function cdnMirrorRuntime(M) {
+  if (window.__clonyfyCdnMirror) return;
+  window.__clonyfyCdnMirror = 1;
+  function m(v) {
+    if (typeof v !== 'string' || !/^(https?:)?\/\//i.test(v)) return v;
+    try {
+      var u = new URL(v, location.href);
+      return M[u.origin + u.pathname + u.search] || M[u.origin + u.pathname] || v;
+    } catch (e) { return v; }
+  }
+  function ms(v) {
+    if (typeof v !== 'string') return v;
+    return v.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map(function (p) {
+      p = p.trim();
+      var i = p.search(/\s/);
+      return i < 0 ? m(p) : m(p.slice(0, i)) + p.slice(i);
+    }).join(', ');
+  }
+  var setAttr = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (n, v) {
+    var k = String(n).toLowerCase();
+    if (k === 'src' || k === 'href' || k === 'poster' || k === 'data') v = m(String(v));
+    else if (k === 'srcset' || k === 'imagesrcset') v = ms(String(v));
+    return setAttr.call(this, n, v);
+  };
+  function hook(C, prop, fn) {
+    try {
+      var d = C && Object.getOwnPropertyDescriptor(C.prototype, prop);
+      if (!d || !d.set) return;
+      Object.defineProperty(C.prototype, prop, {
+        configurable: true,
+        enumerable: d.enumerable,
+        get: d.get,
+        set: function (v) { d.set.call(this, fn(v)); },
+      });
+    } catch (e) { /* ignore */ }
+  }
+  hook(window.HTMLImageElement, 'src', m);
+  hook(window.HTMLImageElement, 'srcset', ms);
+  hook(window.HTMLSourceElement, 'src', m);
+  hook(window.HTMLSourceElement, 'srcset', ms);
+  hook(window.HTMLVideoElement, 'poster', m);
+  hook(window.HTMLMediaElement, 'src', m);
+  hook(window.HTMLLinkElement, 'href', m);
+  hook(window.HTMLScriptElement, 'src', m);
+  var nativeFetch = window.fetch;
+  if (nativeFetch) {
+    window.fetch = function (input, init) {
+      try {
+        if (typeof input === 'string') input = m(input);
+        else if (input && input.url && m(input.url) !== input.url) input = new Request(m(input.url), input);
+      } catch (e) { /* ignore */ }
+      return nativeFetch.call(this, input, init);
+    };
+  }
+  var open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    arguments[1] = m(String(url));
+    return open.apply(this, arguments);
+  };
+}
+
 const _mirrorIndexCache = new Map(); // outDir → { exp, targetOrigin, byPath }
 
 async function previewMirrorIndex(outDir) {
@@ -2565,7 +2660,7 @@ function previewReplayPatch(assetMap, targetOrigin = '') {
     } catch {}
     return s;
   };
-  const rewriteSrcset = (value) => String(value || '').split(',').map((part) => {
+  const rewriteSrcset = (value) => String(value || '').split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
     const trimmed = part.trim();
     const spaceIdx = trimmed.search(/\\s/);
     if (spaceIdx === -1) return localize(trimmed);
@@ -2789,7 +2884,7 @@ function rewriteLiveHtml(html, { prefix, targetOrigin, outDir, route }) {
     (_full, attr, quote, val) => `${attr}=${quote}${mapUrl(val)}${quote}`,
   );
   out = out.replace(/\bsrcset\s*=\s*(["'])([^"']*)\1/gi, (_m, quote, list) => {
-    const next = list.split(',').map((part) => {
+    const next = list.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
       const seg = part.trim();
       if (!seg) return seg;
       const sp = seg.search(/\s/);
@@ -3102,6 +3197,20 @@ function previewVisibilityFix(baseHref = '/') {
   return buildVisibilityPatchHtml(baseHref);
 }
 
+/**
+ * Clones captured before the fix carry an unlayered fallback-font style; unlayered CSS
+ * beats the site's layered rules (Tailwind v4 @layer base), forcing system fonts. Put it
+ * in the lowest-priority layer so the site's own font wins, as on the live site.
+ */
+function layerFallbackFonts(html) {
+  return String(html || '').replace(
+    /(<style[^>]*id=["']clonyfy-fallback-fonts["'][^>]*>)([\s\S]*?)(<\/style>)/i,
+    (m, open, body, close) => (/@layer/.test(body) ? m
+      // <html> only: a body rule would beat the font body inherits from the site's html rule.
+      : `${open}@layer clonyfy-fallback {${body.replace(/html\s*,\s*body\s*\{/, 'html {')}}${close}`),
+  );
+}
+
 async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   const {
     baseHref = '/',
@@ -3115,7 +3224,7 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     // Interactive preview on an isolated origin: the original site's JS runs.
     keepScripts = false,
   } = options;
-  let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(html, outDir));
+  let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(layerFallbackFonts(html), outDir));
   // Force-show body even if the original site relies on JS hydration to reveal
   // content. Many SSG/SPA sites ship initial HTML with opacity:0 / visibility:hidden
   // and only reveal once React hydrates — but in a clone the hydration JS often
@@ -3155,7 +3264,7 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     // srcset can carry several comma-separated candidates with width descriptors.
     const extTest = new RegExp(`\\.(?:${MEDIA_EXT})$`, 'i');
     out = out.replace(/(\bsrcset\s*=\s*["'])([^"']+)(["'])/gi, (_m, pre, val, post) => {
-      const fixed = val.split(',').map((part) => {
+      const fixed = val.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
         const seg = part.trim();
         if (!seg) return seg;
         const sp = seg.search(/\s/);
@@ -5191,6 +5300,8 @@ async function handleRequest(req, res) {
         // Captured CDN files (fonts especially) come from the preview's own mirror.
         const mirror = await previewMirrorIndex(outDir).catch(() => null);
         if (mirror) html = mirrorCdnUrls(html, mirror.cdnByUrl);
+        // Files the site's JS asks for at runtime (React-rendered <img>, fetch) too.
+        if (mirror) html = injectRuntimeCdnMirror(html, mirror.cdnByUrl);
         html = renderLivePreviewHtml(html, outDir, { routes: Object.keys(map), livePath: resolved.route, targetOrigin });
         // Lets the mirror find this clone for files requested without a usable Referer.
         // Only ever set on the isolated preview origin, which holds no login.

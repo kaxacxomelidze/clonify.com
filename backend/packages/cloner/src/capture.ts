@@ -22,7 +22,7 @@ import {
   normalizeAllMotionStacksInDocument,
 } from './carouselFix.js';
 import { injectInteractionsScript, recordNavInteractions } from './interactionRecorder.js';
-import { captureCanvasFrames } from './canvasFrames.js';
+import { captureCanvasFrames, canvasImageHtml } from './canvasFrames.js';
 import { BotProtectionError, detectBotProtection } from './botProtection.js';
 import { applyDeferredDomEdits, type DeferredDomEdits } from './deferredDom.js';
 import { injectScrollTimeline, recordScrollTimeline, type ScrollTimelineData } from './scrollTimeline.js';
@@ -520,6 +520,8 @@ export function rewriteCssUrls(css: string, assetMap: Map<string, string>, baseU
 
 export interface CaptureHooks {
   onArtifactWritten?: (event: ArtifactWrittenEvent) => Promise<void>;
+  /** When the crawler gives up on this page (ms timestamp); optional steps fit inside it. */
+  deadline?: number;
 }
 
 const CONTAINER_TAGS = 'div|ul|ol|span|nav|section|select|tbody|dl|aside';
@@ -565,6 +567,11 @@ export async function capturePage(
   hooks: CaptureHooks = {},
 ): Promise<{ record: PageRecord; links: string[]; navLinks: string[] }> {
   ensurePlaceholderAsset(assetsDir);
+  // Time left before the crawler abandons this page. Optional recordings (scroll
+  // animations, nav menus) take what fits and keep partial results, so a slow site
+  // never loses the whole page to one slow step.
+  const deadline = hooks.deadline ?? Date.now() + 150_000;
+  const stepBudget = (want: number, reserve: number) => Math.max(0, Math.min(want, deadline - Date.now() - reserve));
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
   // Marketing/deep pages need deeper scroll even on hosted fast clones.
   const fastScroll = IS_FAST && !deepMedia;
@@ -1107,7 +1114,14 @@ export async function capturePage(
   if (!serverHtml && mainDocumentHtml) serverHtml = mainDocumentHtml;
 
   // Wait for web fonts so the HTML snapshot reflects the real rendered state
-  await page.evaluate(() => document.fonts.ready).catch(() => {});
+  // document.fonts.ready never settles while a font request hangs (slow CDNs): cap it,
+  // or the whole page sits here until the crawler's timeout throws everything away.
+  const navDoneAt = Date.now();
+  await Promise.race([
+    page.evaluate(() => document.fonts.ready.then(() => true)).catch(() => false),
+    page.waitForTimeout(8_000),
+  ]);
+  logger.debug(`  [STAGE] fonts ready/skip after ${Date.now() - navDoneAt}ms`);
 
   // Reference picture of the live page (top viewport, before any capture freezes):
   // used after capture to pick the preview mode that actually looks closer.
@@ -1148,6 +1162,7 @@ export async function capturePage(
   }, fastScroll).catch((err) => {
     logger.debug(`  [SCROLL WARN] ${(err as Error).message}`);
   });
+  logger.debug(`  [STAGE] lazy scroll done ${Date.now() - navDoneAt}ms after load`);
 
   // Section-aware pass: mount lazy sections that continuous scroll can miss.
   await page.evaluate(async (fast: boolean) => {
@@ -1212,7 +1227,9 @@ export async function capturePage(
       if (!value) return;
       const trimmed = value.trim();
       if (/^\s*\[/.test(trimmed) && !/https?:/i.test(trimmed)) return;
-      for (const part of trimmed.split(',')) {
+      // Candidates end at ", " or after a w/x descriptor — commas inside URLs
+      // (Cloudflare /cdn-cgi/image/width=640,f=auto/…) are part of the URL.
+      for (const part of trimmed.split(/,\s+|(?<=\s[\d.]+[wxh]),/)) {
         const url = part.trim().split(/\s+/)[0];
         push(url);
       }
@@ -1659,13 +1676,18 @@ export async function capturePage(
   // reveal-on-scroll classes) before anything below freezes the page's state.
   let scrollTimeline: ScrollTimelineData | null = null;
   try {
-    scrollTimeline = await Promise.race([
-      recordScrollTimeline(page, { fast: IS_FAST }),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), IS_FAST ? 25_000 : 50_000)),
-    ]);
-    if (scrollTimeline) {
-      logger.debug(`  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s)`);
+    // The recorder stops at its budget and returns what it has; the race is only a safety net.
+    const budget = stepBudget(IS_FAST ? 25_000 : 50_000, 75_000);
+    const startedAt = Date.now();
+    if (budget >= 8_000) {
+      scrollTimeline = await Promise.race([
+        recordScrollTimeline(page, { fast: IS_FAST, budgetMs: budget }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), budget + 15_000)),
+      ]);
     }
+    logger.debug(scrollTimeline
+      ? `  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s) in ${Date.now() - startedAt}ms`
+      : `  [SCROLL TIMELINE] none recorded (budget ${budget}ms, took ${Date.now() - startedAt}ms)`);
   } catch (err) {
     logger.debug(`  [SCROLL TIMELINE WARN] ${(err as Error).message}`);
   }
@@ -1693,16 +1715,17 @@ export async function capturePage(
 
       for (const canvasId of canvasIds) {
         try {
-          const { frames, frameMs } = await captureCanvasFrames(page, canvasId, {
+          const { frames, frameMs, ext } = await captureCanvasFrames(page, canvasId, {
             maxFrames: IS_FAST ? 10 : 24,
             intervalMs: 90,
             maxBytes: Math.min(maxAssetBytes * 4, 6_000_000),
+            budgetMs: stepBudget(IS_FAST ? 10_000 : 20_000, 60_000),
           });
           if (!frames.length) continue;
           const webPaths: string[] = [];
           for (const buf of frames) {
             if (buf.length > maxAssetBytes) continue;
-            const filename = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.png`;
+            const filename = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.${ext}`;
             const localPath = join(assetsDir, filename);
             const webPath = `/_assets/${filename}`;
             if (!existsSync(localPath)) {
@@ -1715,42 +1738,17 @@ export async function capturePage(
             webPaths.push(webPath);
           }
           if (!webPaths.length) continue;
-          await page.evaluate(({ canvasId, webPaths, frameMs }) => {
-            const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`) as HTMLCanvasElement | null;
+          const imgHtml = await canvasImageHtml(page, canvasId, webPaths, frameMs);
+          if (!imgHtml) continue;
+          // Swap deferred to the serialized HTML (replacing a framework-owned canvas live crashes React).
+          await page.evaluate(({ canvasId, imgHtml }) => {
+            const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`);
             if (!canvas) return;
-            const cs = window.getComputedStyle(canvas);
-            const img = document.createElement('img');
-            img.src = webPaths[0];
-            img.width = canvas.width;
-            img.height = canvas.height;
-            img.alt = '';
-            img.setAttribute('data-clonyfy-canvas-capture', '1');
-            if (webPaths.length > 1) {
-              img.setAttribute('data-clonyfy-canvas-frames', JSON.stringify(webPaths));
-              img.setAttribute('data-clonyfy-frame-ms', String(frameMs));
-            }
-            // Keep the site's CSS hooks so `.x canvas`-style layout still lands the same.
-            if (canvas.className) img.className = canvas.className;
-            const layered = cs.position === 'absolute' || cs.position === 'fixed';
-            // Fills its parent → stay fluid; overflows it (full-bleed bands) → keep exact size.
-            const parentWidth = canvas.parentElement?.getBoundingClientRect().width || 0;
-            const ownWidth = canvas.getBoundingClientRect().width;
-            const fillsParent = parentWidth > 0 && Math.abs(ownWidth - parentWidth) <= 2;
-            img.style.cssText = [
-              (canvas.getAttribute('style') || '').replace(/;?\s*$/, ''),
-              'display:block',
-              fillsParent ? 'width:100%' : `width:${cs.width}`,
-              `height:${cs.height}`,
-              fillsParent ? 'max-width:100%' : 'max-width:none',
-              'object-fit:fill',
-              layered ? `position:${cs.position};top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : '',
-              layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
-            ].filter(Boolean).join(';');
             const w = window as unknown as { __clonyfyDeferred?: Record<string, { mode: string; html: string }> };
             w.__clonyfyDeferred = w.__clonyfyDeferred || {};
-            w.__clonyfyDeferred[canvasId] = { mode: 'replace', html: img.outerHTML };
+            w.__clonyfyDeferred[canvasId] = { mode: 'replace', html: imgHtml };
             canvas.setAttribute('data-clonyfy-defer', canvasId);
-          }, { canvasId, webPaths, frameMs });
+          }, { canvasId, imgHtml });
           logger.debug(`  [CANVAS CAPTURE] ${canvasId}: ${webPaths.length} frame(s)${frameMs ? ` @ ${frameMs}ms` : ''}`);
         } catch (err) {
           logger.debug(`  [CANVAS CAPTURE WARN] ${(err as Error).message}`);
@@ -1766,7 +1764,7 @@ export async function capturePage(
   await page.evaluate(() => {
     const pickSrcFromSrcset = (srcset: string | null, fallback?: string | null): string | null => {
       if (!srcset) return fallback || null;
-      const parts = srcset.split(',').map((p) => p.trim()).filter(Boolean);
+      const parts = srcset.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((p) => p.trim()).filter(Boolean);
       const pick =
         parts.find((p) => /\b1920w\b/.test(p))
         || parts.find((p) => /\b1080w\b/.test(p))
@@ -2361,9 +2359,12 @@ export async function capturePage(
   });
 
   // Record how nav menus open so the clone can replay them without site JS.
-  const interactionsScript = await Promise.race([
-    recordNavInteractions(page, pageUrl),
-    new Promise<string>((resolve) => setTimeout(() => resolve(''), IS_FAST ? 12_000 : 22_000)),
+  // The recorder stops hovering at its budget and still returns the menus it recorded;
+  // the race only guards against a hung page (it must outlast the recorder's own wrap-up).
+  const ixBudget = stepBudget(IS_FAST ? 12_000 : 28_000, 30_000);
+  const interactionsScript = ixBudget < 4_000 ? '' : await Promise.race([
+    recordNavInteractions(page, pageUrl, ixBudget),
+    new Promise<string>((resolve) => setTimeout(() => resolve(''), ixBudget + 30_000)),
   ]).catch(() => '');
 
   if (!(await restoreRequestedUrl(page, pageUrl, 'after nav interaction recording'))) {

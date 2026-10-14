@@ -1029,8 +1029,10 @@ var PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="320" heigh
 </svg>`;
 var PLACEHOLDER_IMAGE_BODY = Buffer.from(PLACEHOLDER_SVG, "utf8");
 var FALLBACK_FONT_CSS = `
-html, body {
+@layer clonyfy-fallback {
+html {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
 }
 `.trim();
 function ensurePlaceholderAsset(assetsDir) {
@@ -1373,7 +1375,7 @@ var MAX_TRIGGERS = IS_FAST_CLONE ? 14 : 28;
 var HOVER_WAIT_MS = IS_FAST_CLONE ? 260 : 340;
 var CLICK_WAIT_MS = IS_FAST_CLONE ? 300 : 400;
 var SETTLE_MS = IS_FAST_CLONE ? 120 : 160;
-var TIME_BUDGET_MS = IS_FAST_CLONE ? 1e4 : 28e3;
+var DEFAULT_TIME_BUDGET_MS = IS_FAST_CLONE ? 1e4 : 28e3;
 var MAX_ADD_HTML = 25e4;
 var MAX_TOTAL_JSON = 12e5;
 var CACHE_TTL_MS = 60 * 60 * 1e3;
@@ -1582,7 +1584,7 @@ async function setupRecorder(page, maxTriggers, maxAddHtml) {
         for (const a of ["srcset", "data-srcset"]) {
           const v = el.getAttribute(a);
           if (!v || v.includes("data:")) continue;
-          el.setAttribute(a, v.split(",").map((part) => {
+          el.setAttribute(a, v.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
             const s = part.trim();
             if (!s) return s;
             const sp = s.search(/\s/);
@@ -1863,8 +1865,9 @@ async function resolveItems(page, items) {
     return out;
   }, items);
 }
-async function recordNavInteractions(page, pageUrl) {
+async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDGET_MS) {
   const started = Date.now();
+  const TIME_BUDGET_MS = Math.min(budgetMs, DEFAULT_TIME_BUDGET_MS);
   const startUrl = page.url();
   let keep = [];
   try {
@@ -2130,8 +2133,8 @@ async function recordNavInteractions(page, pageUrl) {
 
 // src/canvasFrames.ts
 import { createHash as createHash2 } from "crypto";
-async function readCanvasPixels(page, id) {
-  return page.evaluate((canvasId) => {
+async function readCanvasPixels(page, id, large) {
+  return page.evaluate(({ canvasId, large: large2 }) => {
     const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`);
     if (!canvas || !canvas.width || !canvas.height) return { dataUrl: "", blank: true };
     try {
@@ -2145,13 +2148,21 @@ async function readCanvasPixels(page, id) {
       let painted = 0;
       for (let i = 3; i < data.length; i += 4) if (data[i] > 8) painted++;
       if (painted < 3) return { dataUrl: "", blank: true };
-      return { dataUrl: canvas.toDataURL("image/png"), blank: false };
+      if (!large2) return { dataUrl: canvas.toDataURL("image/png"), blank: false };
+      const scale = Math.min(1, 1400 / Math.max(canvas.width, canvas.height));
+      const out = document.createElement("canvas");
+      out.width = Math.max(1, Math.round(canvas.width * scale));
+      out.height = Math.max(1, Math.round(canvas.height * scale));
+      const g = out.getContext("2d");
+      if (!g) return { dataUrl: "", blank: true };
+      g.drawImage(canvas, 0, 0, out.width, out.height);
+      return { dataUrl: out.toDataURL("image/webp", 0.86), blank: false };
     } catch {
       return { dataUrl: "", blank: true };
     }
-  }, id);
+  }, { canvasId: id, large });
 }
-async function screenshotCanvas(page, id) {
+async function screenshotCanvas(page, id, jpeg) {
   const loc = page.locator(`canvas[data-clonyfy-canvas-id="${id}"]`).first();
   if (!await loc.count()) return null;
   await page.evaluate((canvasId) => {
@@ -2171,7 +2182,7 @@ async function screenshotCanvas(page, id) {
     }
   }, id);
   try {
-    return await loc.screenshot({ type: "png", timeout: 4e3, animations: "allow" });
+    return await loc.screenshot(jpeg ? { type: "jpeg", quality: 82, timeout: 12e3, animations: "allow" } : { type: "png", timeout: 12e3, animations: "allow" });
   } catch {
     return null;
   } finally {
@@ -2188,28 +2199,38 @@ async function screenshotCanvas(page, id) {
   }
 }
 async function captureCanvasFrames(page, id, opts) {
+  const budgetMs = opts.budgetMs ?? 2e4;
   const frames = [];
   const hashes = /* @__PURE__ */ new Set();
   let lastHash = "";
   let repeats = 0;
   let bytes = 0;
   let useScreenshot = false;
+  let pixelFormat = "png";
   const started = Date.now();
+  const jpeg = await page.evaluate((canvasId) => {
+    const c = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`);
+    if (!c) return false;
+    const r = c.getBoundingClientRect();
+    return r.width * r.height > 9e5;
+  }, id).catch(() => false);
   await page.locator(`canvas[data-clonyfy-canvas-id="${id}"]`).first().scrollIntoViewIfNeeded({ timeout: 3e3 }).catch(() => {
   });
   await page.waitForTimeout(300);
   for (let i = 0; i < opts.maxFrames; i++) {
+    if (i > 1 && Date.now() - started > budgetMs) break;
     let buf = null;
     if (!useScreenshot) {
-      const read = await readCanvasPixels(page, id).catch(() => ({ dataUrl: "", blank: true }));
+      const read = await readCanvasPixels(page, id, jpeg).catch(() => ({ dataUrl: "", blank: true }));
       if (!read.blank && read.dataUrl) {
-        buf = Buffer.from(read.dataUrl.replace(/^data:image\/png;base64,/, ""), "base64");
+        if (i === 0 && jpeg) pixelFormat = /^data:image\/webp/.test(read.dataUrl) ? "webp" : "png";
+        buf = Buffer.from(read.dataUrl.replace(/^data:image\/[a-z]+;base64,/, ""), "base64");
       } else if (i === 0) {
         useScreenshot = true;
       }
     }
     if (useScreenshot) {
-      buf = await screenshotCanvas(page, id);
+      buf = await screenshotCanvas(page, id, jpeg);
       if (!buf || buf.length < 800) break;
     }
     if (!buf) break;
@@ -2230,8 +2251,41 @@ async function captureCanvasFrames(page, id, opts) {
     await page.waitForTimeout(useScreenshot ? Math.max(0, opts.intervalMs - 120) : opts.intervalMs);
   }
   const elapsed = Date.now() - started - 300;
-  const frameMs = frames.length > 1 ? Math.max(40, Math.min(500, Math.round(elapsed / Math.max(1, frames.length)))) : 0;
-  return { frames, frameMs };
+  const frameMs = frames.length > 1 ? Math.max(40, Math.min(6e3, Math.round(elapsed / Math.max(1, frames.length)))) : 0;
+  return { frames, frameMs, ext: useScreenshot ? jpeg ? "jpg" : "png" : pixelFormat };
+}
+async function canvasImageHtml(page, id, webPaths, frameMs) {
+  return page.evaluate(({ canvasId, webPaths: webPaths2, frameMs: frameMs2 }) => {
+    const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`);
+    if (!canvas) return null;
+    const cs = window.getComputedStyle(canvas);
+    const img = document.createElement("img");
+    img.src = webPaths2[0];
+    img.width = canvas.width;
+    img.height = canvas.height;
+    img.alt = "";
+    img.setAttribute("data-clonyfy-canvas-capture", "1");
+    if (webPaths2.length > 1) {
+      img.setAttribute("data-clonyfy-canvas-frames", JSON.stringify(webPaths2));
+      img.setAttribute("data-clonyfy-frame-ms", String(frameMs2));
+    }
+    if (canvas.className) img.className = canvas.className;
+    const layered = cs.position === "absolute" || cs.position === "fixed";
+    const parentWidth = canvas.parentElement?.getBoundingClientRect().width || 0;
+    const ownWidth = canvas.getBoundingClientRect().width;
+    const fillsParent = parentWidth > 0 && Math.abs(ownWidth - parentWidth) <= 2;
+    img.style.cssText = [
+      (canvas.getAttribute("style") || "").replace(/;?\s*$/, ""),
+      "display:block",
+      fillsParent ? "width:100%" : `width:${cs.width}`,
+      `height:${cs.height}`,
+      fillsParent ? "max-width:100%" : "max-width:none",
+      "object-fit:fill",
+      layered ? `position:${cs.position};top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : "",
+      layered && cs.zIndex !== "auto" ? `z-index:${cs.zIndex}` : ""
+    ].filter(Boolean).join(";");
+    return img.outerHTML;
+  }, { canvasId: id, webPaths, frameMs });
 }
 
 // src/botProtection.ts
@@ -10308,6 +10362,8 @@ function applyDeferredDomEdits(html, edits) {
 // src/scrollTimeline.ts
 var SCROLL_TIMELINE_SCRIPT_ID = "__clonyfy_scroll_timeline__";
 async function recordInPage(opts) {
+  const deadline = Date.now() + opts.budgetMs;
+  const timeLeft = () => deadline - Date.now();
   const IGNORE_ATTR = /^(src|srcset|href|id|value|loading|decoding|sizes|data-clonyfy-.*|data-nimg|aria-(?!hidden).*|tabindex|title|alt|autocomplete)$/i;
   const SKIP_INSIDE = "canvas,iframe,video,audio,script,style,noscript,[data-clonyfy-ui]";
   const raf = () => new Promise((r) => requestAnimationFrame(() => r()));
@@ -10366,6 +10422,7 @@ async function recordInPage(opts) {
   const total = Math.min(opts.maxSteps, Math.ceil((docH - vh) / opts.step) + 1);
   const stride = (docH - vh) / Math.max(1, total - 1);
   for (let i = 0; i < total; i++) {
+    if (i > 0 && timeLeft() < opts.budgetMs * 0.4) break;
     stepIndex = i;
     const y = Math.round(i * stride);
     window.scrollTo(0, y);
@@ -10376,7 +10433,7 @@ async function recordInPage(opts) {
     sample();
   }
   await wait(900);
-  stepIndex = total - 1;
+  stepIndex = ys.length - 1;
   sample();
   const before = /* @__PURE__ */ new Map();
   for (const t of tracks.values()) before.set(t, t.el.getAttribute(t.name));
@@ -10408,7 +10465,7 @@ async function recordInPage(opts) {
     const full = () => r.el.innerHTML.replace(/\sdata-clonyfy-[a-z-]+="[^"]*"/g, "");
     let prev = full();
     let stableFor = 0;
-    for (let t = 0; t < 2500 && stableFor < 300; t += 100) {
+    for (let t = 0; t < 2500 && stableFor < 300 && timeLeft() > 3e3; t += 100) {
       await wait(100);
       const now = full();
       if (now === prev) stableFor += 100;
@@ -10488,6 +10545,7 @@ async function recordInPage(opts) {
       regionMo.observe(r.el, { attributes: true, subtree: true, attributeOldValue: true });
     }
     for (let i = 0; i < ys.length; i++) {
+      if (timeLeft() < 2500) break;
       pass2Step = i;
       window.scrollTo(0, ys[i]);
       await raf();
@@ -10635,6 +10693,7 @@ async function recordInPage(opts) {
 }
 async function recordScrollTimeline(page, opts) {
   return page.evaluate(recordInPage, {
+    budgetMs: opts.budgetMs ?? (opts.fast ? 25e3 : 5e4),
     step: opts.fast ? 60 : 36,
     maxSteps: opts.fast ? 160 : 280,
     settleMs: opts.fast ? 0 : 12,
@@ -11214,6 +11273,8 @@ function findScriptBuiltContainers(serverHtml) {
 }
 async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
   ensurePlaceholderAsset(assetsDir);
+  const deadline = hooks.deadline ?? Date.now() + 15e4;
+  const stepBudget = (want, reserve) => Math.max(0, Math.min(want, deadline - Date.now() - reserve));
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
   const fastScroll = IS_FAST && !deepMedia;
   const domAssetCap = deepMedia ? IS_FAST ? SHOPIFY_DOM_ASSET_CAP : 900 : IS_FAST ? SERVERLESS_DOM_ASSET_CAP : Infinity;
@@ -11661,8 +11722,12 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       logger.debug(`  [NAV WARN] ${msg}`);
     }
     if (!serverHtml && mainDocumentHtml) serverHtml = mainDocumentHtml;
-    await page.evaluate(() => document.fonts.ready).catch(() => {
-    });
+    const navDoneAt = Date.now();
+    await Promise.race([
+      page.evaluate(() => document.fonts.ready.then(() => true)).catch(() => false),
+      page.waitForTimeout(8e3)
+    ]);
+    logger.debug(`  [STAGE] fonts ready/skip after ${Date.now() - navDoneAt}ms`);
     let liveScreenshot = null;
     try {
       await page.waitForTimeout(1500);
@@ -11696,6 +11761,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }, fastScroll).catch((err) => {
       logger.debug(`  [SCROLL WARN] ${err.message}`);
     });
+    logger.debug(`  [STAGE] lazy scroll done ${Date.now() - navDoneAt}ms after load`);
     await page.evaluate(async (fast) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const blocks = Array.from(document.querySelectorAll(
@@ -11753,7 +11819,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         if (!value) return;
         const trimmed = value.trim();
         if (/^\s*\[/.test(trimmed) && !/https?:/i.test(trimmed)) return;
-        for (const part of trimmed.split(",")) {
+        for (const part of trimmed.split(/,\s+|(?<=\s[\d.]+[wxh]),/)) {
           const url = part.trim().split(/\s+/)[0];
           push(url);
         }
@@ -12164,13 +12230,15 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }
     let scrollTimeline = null;
     try {
-      scrollTimeline = await Promise.race([
-        recordScrollTimeline(page, { fast: IS_FAST }),
-        new Promise((resolve3) => setTimeout(() => resolve3(null), IS_FAST ? 25e3 : 5e4))
-      ]);
-      if (scrollTimeline) {
-        logger.debug(`  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s)`);
+      const budget = stepBudget(IS_FAST ? 25e3 : 5e4, 75e3);
+      const startedAt = Date.now();
+      if (budget >= 8e3) {
+        scrollTimeline = await Promise.race([
+          recordScrollTimeline(page, { fast: IS_FAST, budgetMs: budget }),
+          new Promise((resolve3) => setTimeout(() => resolve3(null), budget + 15e3))
+        ]);
       }
+      logger.debug(scrollTimeline ? `  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s) in ${Date.now() - startedAt}ms` : `  [SCROLL TIMELINE] none recorded (budget ${budget}ms, took ${Date.now() - startedAt}ms)`);
     } catch (err) {
       logger.debug(`  [SCROLL TIMELINE WARN] ${err.message}`);
     }
@@ -12193,16 +12261,17 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         }, IS_FAST ? 4 : 10);
         for (const canvasId of canvasIds) {
           try {
-            const { frames, frameMs } = await captureCanvasFrames(page, canvasId, {
+            const { frames, frameMs, ext } = await captureCanvasFrames(page, canvasId, {
               maxFrames: IS_FAST ? 10 : 24,
               intervalMs: 90,
-              maxBytes: Math.min(maxAssetBytes * 4, 6e6)
+              maxBytes: Math.min(maxAssetBytes * 4, 6e6),
+              budgetMs: stepBudget(IS_FAST ? 1e4 : 2e4, 6e4)
             });
             if (!frames.length) continue;
             const webPaths = [];
             for (const buf of frames) {
               if (buf.length > maxAssetBytes) continue;
-              const filename = `canvas_${createHash3("sha1").update(buf).digest("hex").slice(0, 16)}.png`;
+              const filename = `canvas_${createHash3("sha1").update(buf).digest("hex").slice(0, 16)}.${ext}`;
               const localPath = join3(assetsDir, filename);
               const webPath = `/_assets/${filename}`;
               if (!existsSync2(localPath)) {
@@ -12215,40 +12284,16 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
               webPaths.push(webPath);
             }
             if (!webPaths.length) continue;
-            await page.evaluate(({ canvasId: canvasId2, webPaths: webPaths2, frameMs: frameMs2 }) => {
+            const imgHtml = await canvasImageHtml(page, canvasId, webPaths, frameMs);
+            if (!imgHtml) continue;
+            await page.evaluate(({ canvasId: canvasId2, imgHtml: imgHtml2 }) => {
               const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId2}"]`);
               if (!canvas) return;
-              const cs = window.getComputedStyle(canvas);
-              const img = document.createElement("img");
-              img.src = webPaths2[0];
-              img.width = canvas.width;
-              img.height = canvas.height;
-              img.alt = "";
-              img.setAttribute("data-clonyfy-canvas-capture", "1");
-              if (webPaths2.length > 1) {
-                img.setAttribute("data-clonyfy-canvas-frames", JSON.stringify(webPaths2));
-                img.setAttribute("data-clonyfy-frame-ms", String(frameMs2));
-              }
-              if (canvas.className) img.className = canvas.className;
-              const layered = cs.position === "absolute" || cs.position === "fixed";
-              const parentWidth = canvas.parentElement?.getBoundingClientRect().width || 0;
-              const ownWidth = canvas.getBoundingClientRect().width;
-              const fillsParent = parentWidth > 0 && Math.abs(ownWidth - parentWidth) <= 2;
-              img.style.cssText = [
-                (canvas.getAttribute("style") || "").replace(/;?\s*$/, ""),
-                "display:block",
-                fillsParent ? "width:100%" : `width:${cs.width}`,
-                `height:${cs.height}`,
-                fillsParent ? "max-width:100%" : "max-width:none",
-                "object-fit:fill",
-                layered ? `position:${cs.position};top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : "",
-                layered && cs.zIndex !== "auto" ? `z-index:${cs.zIndex}` : ""
-              ].filter(Boolean).join(";");
               const w = window;
               w.__clonyfyDeferred = w.__clonyfyDeferred || {};
-              w.__clonyfyDeferred[canvasId2] = { mode: "replace", html: img.outerHTML };
+              w.__clonyfyDeferred[canvasId2] = { mode: "replace", html: imgHtml2 };
               canvas.setAttribute("data-clonyfy-defer", canvasId2);
-            }, { canvasId, webPaths, frameMs });
+            }, { canvasId, imgHtml });
             logger.debug(`  [CANVAS CAPTURE] ${canvasId}: ${webPaths.length} frame(s)${frameMs ? ` @ ${frameMs}ms` : ""}`);
           } catch (err) {
             logger.debug(`  [CANVAS CAPTURE WARN] ${err.message}`);
@@ -12261,7 +12306,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     await page.evaluate(() => {
       const pickSrcFromSrcset = (srcset, fallback) => {
         if (!srcset) return fallback || null;
-        const parts = srcset.split(",").map((p) => p.trim()).filter(Boolean);
+        const parts = srcset.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((p) => p.trim()).filter(Boolean);
         const pick = parts.find((p) => /\b1920w\b/.test(p)) || parts.find((p) => /\b1080w\b/.test(p)) || parts.find((p) => /\b828w\b/.test(p)) || parts[parts.length - 1];
         return pick ? pick.split(/\s+/)[0] : fallback || null;
       };
@@ -12807,9 +12852,10 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     await page.evaluate(normalizeAllMotionStacksInDocument).catch((err) => {
       logger.debug(`  [CAROUSEL NORMALIZE WARN] ${err.message}`);
     });
-    const interactionsScript = await Promise.race([
-      recordNavInteractions(page, pageUrl),
-      new Promise((resolve3) => setTimeout(() => resolve3(""), IS_FAST ? 12e3 : 22e3))
+    const ixBudget = stepBudget(IS_FAST ? 12e3 : 28e3, 3e4);
+    const interactionsScript = ixBudget < 4e3 ? "" : await Promise.race([
+      recordNavInteractions(page, pageUrl, ixBudget),
+      new Promise((resolve3) => setTimeout(() => resolve3(""), ixBudget + 3e4))
     ]).catch(() => "");
     if (!await restoreRequestedUrl(page, pageUrl, "after nav interaction recording")) {
       throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
@@ -13866,7 +13912,7 @@ function extractLinksFromHtml(html, pageUrl, origin) {
 }
 function pushSrcsetUrls(value, out) {
   if (!value) return;
-  for (const part of value.split(",")) {
+  for (const part of value.split(/,\s+|(?<=\s[\d.]+[wxh]),/)) {
     const candidate = part.trim().split(/\s+/)[0];
     if (candidate) out.add(candidate);
   }
@@ -14151,6 +14197,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   const MAX_FALLBACK_ATTEMPTS = 6;
   let fallbackQueue = null;
   let fallbackAttempts = 0;
+  const landingUrls = /* @__PURE__ */ new Set();
   const pumpFallback = () => {
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
@@ -14159,6 +14206,8 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
       enqueue(next, 1, true);
       if (visited.size > before) {
         fallbackAttempts++;
+        const norm = normalizePageUrl(next);
+        if (norm) landingUrls.add(norm);
         logger.info(`  [FALLBACK PAGE] Start URL not captured \u2014 trying ${next}`);
         return;
       }
@@ -14268,10 +14317,10 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
         });
         logger.info(`  [${records.length + 1}/${opts.maxPages}] ${clean}`);
         const isStartUrl = !!startNorm && clean === startNorm;
-        const captureTimeout = isStartUrl ? START_URL_CAPTURE_TIMEOUT : opts.fullSite ? FULL_SITE_PAGE_CAPTURE_TIMEOUT : PAGE_CAPTURE_TIMEOUT;
+        const captureTimeout = isStartUrl || landingUrls.has(clean) ? START_URL_CAPTURE_TIMEOUT : opts.fullSite ? FULL_SITE_PAGE_CAPTURE_TIMEOUT : PAGE_CAPTURE_TIMEOUT;
         let timeoutHandle;
         let timedOut = false;
-        const capturePromise = capturePage(context, clean, assetsDir, hooks);
+        const capturePromise = capturePage(context, clean, assetsDir, { ...hooks, deadline: Date.now() + captureTimeout });
         const timeoutPromise = new Promise((_, reject) => {
           timeoutHandle = setTimeout(() => {
             timedOut = true;
@@ -14392,7 +14441,8 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
 // src/livePreviewCheck.ts
 import { join as join5 } from "path";
 import { existsSync as existsSync4 } from "fs";
-var OFFLINE_MARGIN = 5;
+var OFFLINE_MARGIN = 15;
+var MIN_CONTENT_RATIO = 0.6;
 var MAX_PAGES = 8;
 var SETTLE_MS2 = 6e3;
 var VIEWPORT = { width: 1440, height: 900 };
@@ -14427,8 +14477,10 @@ async function choosePreviewModes(pages, assets, publicDir) {
         const offline = await render(browser, page, files, false);
         const liveScore = live.errorScreen ? 0 : await similarity(scorer, page.liveScreenshot, live.png);
         const offlineScore = await similarity(scorer, page.liveScreenshot, offline.png);
-        const useOffline = offlineScore > liveScore + OFFLINE_MARGIN;
-        logger.info(`  [PREVIEW MODE] ${page.url}: interactive ${liveScore}% vs offline ${offlineScore}% match with the live page${live.errorScreen ? " (error screen)" : ""} \u2192 ${useOffline ? "offline" : "interactive"}`);
+        const contentRatio = offline.content ? live.content / offline.content : 1;
+        const broken = live.errorScreen || live.skeletons >= 6 || contentRatio < MIN_CONTENT_RATIO && offlineScore > liveScore + OFFLINE_MARGIN;
+        const useOffline = broken;
+        logger.info(`  [PREVIEW MODE] ${page.url}: interactive ${liveScore}% vs offline ${offlineScore}% match with the live page, content ${Math.round(contentRatio * 100)}% of the snapshot${live.errorScreen ? " (error screen)" : ""}${live.skeletons >= 6 ? ` (${live.skeletons} loading skeletons)` : ""} \u2192 ${useOffline ? "offline" : "interactive"}`);
         if (useOffline) result[page.filename] = "offline";
       } catch (err) {
         logger.debug(`  [PREVIEW MODE] ${page.url}: check failed, keeping interactive: ${err.message}`);
@@ -14470,8 +14522,22 @@ async function render(browser, page, files, withScripts) {
       const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
       return document.documentElement.id === "__next_error__" || /Application error: a (client|server)-side exception|This page couldn.t load/i.test(text) && text.length < 800;
     }).catch(() => false);
+    const { content, skeletons } = withScripts ? await tab.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        return r.width > 4 && r.height > 4 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) > 0.05;
+      };
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim().length;
+      const media = Array.from(document.querySelectorAll("img,video,svg,canvas")).filter(visible).length;
+      const skeletons2 = Array.from(document.querySelectorAll('[class*="skeleton" i],[class*="shimmer" i],[class*="placeholder" i][aria-busy],[aria-busy="true"]')).filter(visible).length;
+      return { content: text + media * 40, skeletons: skeletons2 };
+    }).catch(() => ({ content: 0, skeletons: 0 })) : await tab.evaluate(() => {
+      const text = (document.body?.textContent || "").replace(/\s+/g, " ").trim().length;
+      return { content: text + document.querySelectorAll("img,video,svg,canvas").length * 40, skeletons: 0 };
+    }).catch(() => ({ content: 0, skeletons: 0 }));
     const png = await tab.screenshot({ type: "png", timeout: 1e4 });
-    return { png, errorScreen };
+    return { png, errorScreen, content, skeletons };
   } finally {
     await context.close().catch(() => {
     });
@@ -14735,7 +14801,7 @@ function isMetaImageContent(el) {
 function rewriteAttrValue(name, value, assetMap, baseUrl) {
   if (!value) return value;
   if (name === "srcset" || name === "imagesrcset") {
-    return value.split(",").map((part) => {
+    return value.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
       const trimmed = part.trim();
       const spaceIdx = trimmed.search(/\s/);
       if (spaceIdx === -1) return rewriteUrl(trimmed, assetMap, baseUrl);
@@ -15214,6 +15280,7 @@ Next steps:`);
 }
 
 // src/motionBackfill.ts
+import { createHash as createHash6 } from "crypto";
 var VIEWPORT2 = { width: 1440, height: 900 };
 function matchInPage(args) {
   const SKIP = "script,style,link,meta,noscript,template,base,title,[data-clonyfy-ui]";
@@ -15295,7 +15362,30 @@ function matchInPage(args) {
     const t = find(live);
     if (!t || !mark(t, "data-clonyfy-sr", id)) dropRegions.push(id);
   }
-  return { marks: Array.from(out.values()), dropAnchors, dropRegions };
+  const canvases = [];
+  for (const live of Array.from(document.querySelectorAll("canvas[data-clonyfy-bf-canvas]"))) {
+    const t = find(live);
+    if (!t || t.tagName !== "CANVAS") continue;
+    const path = realPath(t);
+    if (path) canvases.push({ id: live.getAttribute("data-clonyfy-bf-canvas"), path });
+  }
+  return { marks: Array.from(out.values()), dropAnchors, dropRegions, canvases };
+}
+function replaceElements(html, swaps) {
+  const doc = parse(html, { sourceCodeLocationInfo: true });
+  const root = doc.childNodes?.find((n) => n.tagName === "html");
+  const edits = [];
+  for (const sw of swaps) {
+    let x = root;
+    for (const i of sw.path) x = x?.childNodes?.filter((c) => !!c.tagName)[i];
+    const loc = x?.sourceCodeLocation;
+    if (!loc?.startTag) continue;
+    edits.push({ start: loc.startTag.startOffset, end: loc.endTag?.endOffset ?? loc.startTag.endOffset, text: sw.html });
+  }
+  edits.sort((a, b) => b.start - a.start);
+  let out = html;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return { html: out, replaced: edits.length };
 }
 function applyMarks(html, marks) {
   const doc = parse(html, { sourceCodeLocationInfo: true });
@@ -15337,7 +15427,13 @@ function pruneTimeline(tl, applied) {
   return regions.length ? { ...tl, tracks, regions } : { v: 1, anchors: tl.anchors, tracks };
 }
 async function backfillScrollTimeline(previewUrl, snapshotHtml, opts = {}) {
-  if (/id=["']__clonyfy_scroll_timeline__["']/.test(snapshotHtml)) return { html: null, tracks: 0, regions: 0, reason: "already recorded" };
+  return backfillPageMedia(previewUrl, snapshotHtml, { ...opts, timeline: true, canvases: false });
+}
+async function backfillPageMedia(previewUrl, snapshotHtml, opts) {
+  const none = (reason) => ({ html: null, tracks: 0, regions: 0, canvases: 0, files: [], reason });
+  const wantTimeline = opts.timeline && !/id=["']__clonyfy_scroll_timeline__["']/.test(snapshotHtml);
+  const wantCanvases = opts.canvases && /<canvas\b[^>]*data-clonyfy-canvas-id/i.test(snapshotHtml);
+  if (!wantTimeline && !wantCanvases) return none("nothing to record");
   let browser;
   const deadline = Date.now() + (opts.timeoutMs ?? 6e4);
   try {
@@ -15353,21 +15449,84 @@ async function backfillScrollTimeline(previewUrl, snapshotHtml, opts = {}) {
     await page.waitForLoadState("networkidle", { timeout: 4e3 }).catch(() => {
     });
     await page.waitForTimeout(1500);
-    const left = deadline - Date.now();
-    if (left < 5e3) return { html: null, tracks: 0, regions: 0, reason: "timeout" };
-    const tl = await Promise.race([
-      recordScrollTimeline(page, { fast: true }),
-      new Promise((r) => setTimeout(() => r(null), left))
-    ]);
-    if (!tl) return { html: null, tracks: 0, regions: 0, reason: "no scroll animation" };
-    const match = await page.evaluate(matchInPage, { html: snapshotHtml });
-    const { html, applied } = applyMarks(snapshotHtml, match.marks);
-    const pruned = pruneTimeline(tl, applied);
-    if (!pruned) return { html: null, tracks: 0, regions: 0, reason: "animated elements not found in the snapshot" };
-    return { html: injectScrollTimeline(html, pruned), tracks: pruned.tracks.length, regions: pruned.regions?.length || 0 };
+    let html = snapshotHtml;
+    const files = [];
+    let canvases = 0;
+    let canvasNote = "";
+    if (wantCanvases) {
+      const liveCount = await page.evaluate(() => {
+        let n = 0;
+        for (const el of Array.from(document.querySelectorAll("canvas"))) {
+          const c = el;
+          const r = c.getBoundingClientRect();
+          const cs = getComputedStyle(c);
+          if (r.width < 80 || r.height < 40 || !c.width || !c.height) continue;
+          if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) continue;
+          const id = `bf-canvas-${n++}`;
+          c.setAttribute("data-clonyfy-bf-canvas", id);
+          c.setAttribute("data-clonyfy-canvas-id", id);
+        }
+        return n;
+      });
+      const { canvases: pairs } = await page.evaluate(matchInPage, { html });
+      const swaps = [];
+      for (const pair of pairs.slice(0, 6)) {
+        const left = deadline - Date.now() - (wantTimeline ? 3e4 : 5e3);
+        if (left < 6e3) break;
+        const { frames, frameMs, ext } = await captureCanvasFrames(page, pair.id, {
+          maxFrames: 16,
+          intervalMs: 90,
+          maxBytes: 6e6,
+          budgetMs: Math.min(2e4, left)
+        });
+        canvasNote += ` ${pair.id}:${frames.length}f`;
+        if (!frames.length) continue;
+        const webPaths = frames.map((buf) => {
+          const name = `canvas_${createHash6("sha1").update(buf).digest("hex").slice(0, 16)}.${ext}`;
+          if (!files.some((f) => f.name === name)) files.push({ name, data: buf });
+          return `/_assets/${name}`;
+        });
+        const imgHtml = await canvasImageHtml(page, pair.id, webPaths, frameMs);
+        if (imgHtml) swaps.push({ path: pair.path, html: imgHtml });
+      }
+      canvasNote = `canvases live ${liveCount}, matched ${pairs.length}${canvasNote}`;
+      if (swaps.length) {
+        const res = replaceElements(html, swaps);
+        html = res.html;
+        canvases = res.replaced;
+      }
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(400);
+    }
+    let tracks = 0;
+    let regions = 0;
+    let reason = "";
+    if (wantTimeline) {
+      const left = deadline - Date.now();
+      const tl = left < 5e3 ? null : await Promise.race([
+        // Stops at its budget with what it recorded; the race only guards a hung page.
+        recordScrollTimeline(page, { fast: true, budgetMs: Math.min(5e4, left - 4e3) }),
+        new Promise((r) => setTimeout(() => r(null), left))
+      ]);
+      if (!tl) reason = left < 5e3 ? "timeout" : "no scroll animation";
+      else {
+        const match = await page.evaluate(matchInPage, { html });
+        const marked = applyMarks(html, match.marks);
+        const pruned = pruneTimeline(tl, marked.applied);
+        if (!pruned) reason = "animated elements not found in the snapshot";
+        else {
+          html = injectScrollTimeline(marked.html, pruned);
+          tracks = pruned.tracks.length;
+          regions = pruned.regions?.length || 0;
+        }
+      }
+    }
+    if (canvasNote) reason = reason ? `${reason}; ${canvasNote}` : canvasNote;
+    if (!canvases && !tracks && !regions) return none(reason || "nothing recorded");
+    return { html, tracks, regions, canvases, files, ...reason ? { reason } : {} };
   } catch (err) {
     logger.debug(`  [MOTION BACKFILL] ${err.message.split("\n")[0]}`);
-    return { html: null, tracks: 0, regions: 0, reason: err.message.split("\n")[0] };
+    return none(err.message.split("\n")[0]);
   } finally {
     await browser?.close().catch(() => {
     });
@@ -15678,7 +15837,8 @@ async function regenerateCloneProject(outDir) {
 export {
   logger,
   backfillScrollTimeline,
+  backfillPageMedia,
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-AEBR6C2K.js.map
+//# sourceMappingURL=chunk-GONBSHB5.js.map

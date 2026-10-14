@@ -26,7 +26,11 @@ export interface ScrollTimelineData {
 /** Runs in the browser — must stay self-contained (no outer references). */
 async function recordInPage(opts: {
   step: number; maxSteps: number; settleMs: number; maxTracks: number; maxRegions: number; maxRegionBytes: number;
+  budgetMs: number;
 }): Promise<ScrollTimelineData | null> {
+  // Out of time → stop scrolling and keep what was recorded (never all-or-nothing).
+  const deadline = Date.now() + opts.budgetMs;
+  const timeLeft = () => deadline - Date.now();
   const IGNORE_ATTR = /^(src|srcset|href|id|value|loading|decoding|sizes|data-clonyfy-.*|data-nimg|aria-(?!hidden).*|tabindex|title|alt|autocomplete)$/i;
   const SKIP_INSIDE = 'canvas,iframe,video,audio,script,style,noscript,[data-clonyfy-ui]';
   const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -95,6 +99,8 @@ async function recordInPage(opts: {
   const total = Math.min(opts.maxSteps, Math.ceil((docH - vh) / opts.step) + 1);
   const stride = (docH - vh) / Math.max(1, total - 1);
   for (let i = 0; i < total; i++) {
+    // Leave ~40% of the budget for settling, regions and the wrap-up.
+    if (i > 0 && timeLeft() < opts.budgetMs * 0.4) break;
     stepIndex = i;
     const y = Math.round(i * stride);
     window.scrollTo(0, y);
@@ -109,7 +115,7 @@ async function recordInPage(opts: {
   // and record where they land, then treat anything STILL changing as time-driven
   // (marquee, ticker, autoplay loops) rather than scroll-linked, and drop it.
   await wait(900);
-  stepIndex = total - 1;
+  stepIndex = ys.length - 1; // the last step actually scrolled (the loop may stop early)
   sample();
   const before = new Map<Track, string | null>();
   for (const t of tracks.values()) before.set(t, t.el.getAttribute(t.name));
@@ -155,7 +161,7 @@ async function recordInPage(opts: {
     const full = () => r.el.innerHTML.replace(/\sdata-clonyfy-[a-z-]+="[^"]*"/g, '');
     let prev = full();
     let stableFor = 0;
-    for (let t = 0; t < 2500 && stableFor < 300; t += 100) {
+    for (let t = 0; t < 2500 && stableFor < 300 && timeLeft() > 3000; t += 100) {
       await wait(100);
       const now = full();
       if (now === prev) stableFor += 100;
@@ -232,6 +238,7 @@ async function recordInPage(opts: {
       regionMo.observe(r.el, { attributes: true, subtree: true, attributeOldValue: true });
     }
     for (let i = 0; i < ys.length; i++) {
+      if (timeLeft() < 2500) break;
       pass2Step = i;
       window.scrollTo(0, ys[i]);
       await raf();
@@ -372,8 +379,9 @@ async function recordInPage(opts: {
   return regionOut.length ? { v: 1, anchors, tracks: out, regions: regionOut, html } : { v: 1, anchors, tracks: out };
 }
 
-export async function recordScrollTimeline(page: Page, opts: { fast: boolean }): Promise<ScrollTimelineData | null> {
+export async function recordScrollTimeline(page: Page, opts: { fast: boolean; budgetMs?: number }): Promise<ScrollTimelineData | null> {
   return page.evaluate(recordInPage, {
+    budgetMs: opts.budgetMs ?? (opts.fast ? 25_000 : 50_000),
     step: opts.fast ? 60 : 36,
     maxSteps: opts.fast ? 160 : 280,
     settleMs: opts.fast ? 0 : 12,

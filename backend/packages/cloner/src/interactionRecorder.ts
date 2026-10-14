@@ -34,7 +34,7 @@ const MAX_TRIGGERS = IS_FAST_CLONE ? 14 : 28;
 const HOVER_WAIT_MS = IS_FAST_CLONE ? 260 : 340;
 const CLICK_WAIT_MS = IS_FAST_CLONE ? 300 : 400;
 const SETTLE_MS = IS_FAST_CLONE ? 120 : 160;
-const TIME_BUDGET_MS = IS_FAST_CLONE ? 10_000 : 28_000;
+const DEFAULT_TIME_BUDGET_MS = IS_FAST_CLONE ? 10_000 : 28_000;
 const MAX_ADD_HTML = 250_000;
 const MAX_TOTAL_JSON = 1_200_000;
 
@@ -254,7 +254,7 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
         for (const a of ['srcset', 'data-srcset']) {
           const v = el.getAttribute(a);
           if (!v || v.includes('data:')) continue;
-          el.setAttribute(a, v.split(',').map((part) => {
+          el.setAttribute(a, v.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
             const s = part.trim();
             if (!s) return s;
             const sp = s.search(/\s/);
@@ -546,8 +546,9 @@ async function resolveItems(page: Page, items: RawItem[]): Promise<FinalItem[]> 
  * captured HTML ('' when nothing interactive was found). Leaves the DOM in its
  * closed state so the snapshot matches the original page.
  */
-export async function recordNavInteractions(page: Page, pageUrl: string): Promise<string> {
+export async function recordNavInteractions(page: Page, pageUrl: string, budgetMs = DEFAULT_TIME_BUDGET_MS): Promise<string> {
   const started = Date.now();
+  const TIME_BUDGET_MS = Math.min(budgetMs, DEFAULT_TIME_BUDGET_MS);
   const startUrl = page.url();
   let keep: number[] = [];
   try {

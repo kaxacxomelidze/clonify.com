@@ -244,7 +244,9 @@ function rewriteAttrValue(
   if (!value) return value;
 
   if (name === 'srcset' || name === 'imagesrcset') {
-    return value.split(',').map((part) => {
+    // Candidates end at ", " or after a w/x descriptor; commas inside URLs
+    // (Cloudflare /cdn-cgi/image/width=640,f=auto/…) belong to the URL.
+    return value.split(/,\s+|(?<=\s[\d.]+[wxh]),/).map((part) => {
       const trimmed = part.trim();
       const spaceIdx = trimmed.search(/\s/);
       if (spaceIdx === -1) return rewriteUrl(trimmed, assetMap, baseUrl);

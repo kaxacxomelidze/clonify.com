@@ -12,9 +12,18 @@ const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="320" hei
 
 export const PLACEHOLDER_IMAGE_BODY = Buffer.from(PLACEHOLDER_SVG, 'utf8');
 
+/**
+ * Only a fallback for pages that set no font at all. It lives in its own cascade layer,
+ * declared first, so it loses to every site rule — including Tailwind v4's @layer base
+ * (unlayered CSS beats layered CSS regardless of order, which used to override the site font).
+ * It targets <html> only: a rule on <body> would beat the font body inherits from the site's
+ * html rule.
+ */
 export const FALLBACK_FONT_CSS = `
-html, body {
+@layer clonyfy-fallback {
+html {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
 }
 `.trim();
 

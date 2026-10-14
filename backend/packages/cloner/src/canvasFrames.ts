@@ -11,6 +11,8 @@ export interface CanvasFrameCapture {
   frames: Buffer[];
   /** Average wall-clock gap between captured frames — playback speed. */
   frameMs: number;
+  /** Image format of the frames (large canvases: WebP; screenshot fallback: JPEG). */
+  ext: 'png' | 'jpg' | 'webp';
 }
 
 interface FrameRead {
@@ -18,8 +20,8 @@ interface FrameRead {
   blank: boolean;
 }
 
-async function readCanvasPixels(page: Page, id: string): Promise<FrameRead> {
-  return page.evaluate((canvasId: string) => {
+async function readCanvasPixels(page: Page, id: string, large: boolean): Promise<FrameRead> {
+  return page.evaluate(({ canvasId, large }: { canvasId: string; large: boolean }) => {
     const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`) as HTMLCanvasElement | null;
     if (!canvas || !canvas.width || !canvas.height) return { dataUrl: '', blank: true };
     try {
@@ -34,14 +36,26 @@ async function readCanvasPixels(page: Page, id: string): Promise<FrameRead> {
       let painted = 0;
       for (let i = 3; i < data.length; i += 4) if (data[i] > 8) painted++;
       if (painted < 3) return { dataUrl: '', blank: true };
-      return { dataUrl: canvas.toDataURL('image/png'), blank: false };
+      if (!large) return { dataUrl: canvas.toDataURL('image/png'), blank: false };
+      // Screen-sized canvases (WebGL gradient backgrounds): the canvas's own pixels,
+      // downscaled, as WebP — keeps transparency, ~100KB instead of several MB of PNG,
+      // and maps exactly onto the canvas box (a page screenshot can't reach the parts of
+      // an oversized canvas outside the page, and bakes in whatever is drawn over it).
+      const scale = Math.min(1, 1400 / Math.max(canvas.width, canvas.height));
+      const out = document.createElement('canvas');
+      out.width = Math.max(1, Math.round(canvas.width * scale));
+      out.height = Math.max(1, Math.round(canvas.height * scale));
+      const g = out.getContext('2d');
+      if (!g) return { dataUrl: '', blank: true };
+      g.drawImage(canvas, 0, 0, out.width, out.height);
+      return { dataUrl: out.toDataURL('image/webp', 0.86), blank: false };
     } catch {
       return { dataUrl: '', blank: true }; // tainted by cross-origin images
     }
-  }, id);
+  }, { canvasId: id, large });
 }
 
-async function screenshotCanvas(page: Page, id: string): Promise<Buffer | null> {
+async function screenshotCanvas(page: Page, id: string, jpeg: boolean): Promise<Buffer | null> {
   const loc = page.locator(`canvas[data-clonyfy-canvas-id="${id}"]`).first();
   if (!(await loc.count())) return null;
   // Hide text/UI painted over the canvas so it isn't baked into the frame
@@ -63,7 +77,10 @@ async function screenshotCanvas(page: Page, id: string): Promise<Buffer | null> 
     }
   }, id);
   try {
-    return await loc.screenshot({ type: 'png', timeout: 4000, animations: 'allow' });
+    // Screen-sized WebGL backgrounds take seconds per shot (and megabytes as PNG).
+    return await loc.screenshot(jpeg
+      ? { type: 'jpeg', quality: 82, timeout: 12_000, animations: 'allow' }
+      : { type: 'png', timeout: 12_000, animations: 'allow' });
   } catch {
     return null;
   } finally {
@@ -86,32 +103,43 @@ async function screenshotCanvas(page: Page, id: string): Promise<Buffer | null> 
 export async function captureCanvasFrames(
   page: Page,
   id: string,
-  opts: { maxFrames: number; intervalMs: number; maxBytes: number },
+  opts: { maxFrames: number; intervalMs: number; maxBytes: number; budgetMs?: number },
 ): Promise<CanvasFrameCapture> {
+  const budgetMs = opts.budgetMs ?? 20_000;
   const frames: Buffer[] = [];
   const hashes = new Set<string>();
   let lastHash = '';
   let repeats = 0;
   let bytes = 0;
   let useScreenshot = false;
+  let pixelFormat: 'png' | 'webp' = 'png';
   const started = Date.now();
+  // Large canvases (full-bleed backgrounds) → JPEG: a PNG frame is 1–2MB each.
+  const jpeg = await page.evaluate((canvasId: string) => {
+    const c = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`);
+    if (!c) return false;
+    const r = c.getBoundingClientRect();
+    return r.width * r.height > 900_000;
+  }, id).catch(() => false);
 
   await page.locator(`canvas[data-clonyfy-canvas-id="${id}"]`).first()
     .scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
   await page.waitForTimeout(300); // let IO-gated animations resume after scrolling in
 
   for (let i = 0; i < opts.maxFrames; i++) {
+    if (i > 1 && Date.now() - started > budgetMs) break;
     let buf: Buffer | null = null;
     if (!useScreenshot) {
-      const read = await readCanvasPixels(page, id).catch(() => ({ dataUrl: '', blank: true }));
+      const read = await readCanvasPixels(page, id, jpeg).catch(() => ({ dataUrl: '', blank: true }));
       if (!read.blank && read.dataUrl) {
-        buf = Buffer.from(read.dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64');
+        if (i === 0 && jpeg) pixelFormat = /^data:image\/webp/.test(read.dataUrl) ? 'webp' : 'png';
+        buf = Buffer.from(read.dataUrl.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64');
       } else if (i === 0) {
         useScreenshot = true; // WebGL / tainted — switch to element screenshots
       }
     }
     if (useScreenshot) {
-      buf = await screenshotCanvas(page, id);
+      buf = await screenshotCanvas(page, id, jpeg);
       if (!buf || buf.length < 800) break;
     }
     if (!buf) break;
@@ -135,6 +163,48 @@ export async function captureCanvasFrames(
   }
 
   const elapsed = Date.now() - started - 300;
-  const frameMs = frames.length > 1 ? Math.max(40, Math.min(500, Math.round(elapsed / Math.max(1, frames.length)))) : 0;
-  return { frames, frameMs };
+  // Real-time gap between frames: slow captures (big WebGL shots) play back at the same
+  // pace and crossfade, so a drifting gradient keeps drifting instead of racing.
+  const frameMs = frames.length > 1 ? Math.max(40, Math.min(6000, Math.round(elapsed / Math.max(1, frames.length)))) : 0;
+  return { frames, frameMs, ext: useScreenshot ? (jpeg ? 'jpg' : 'png') : pixelFormat };
+}
+
+/**
+ * The <img> that stands in for a live <canvas> in the clone: same classes and box, the
+ * first frame as src, and the whole loop for the preview runtime to play.
+ */
+export async function canvasImageHtml(page: Page, id: string, webPaths: string[], frameMs: number): Promise<string | null> {
+  return page.evaluate(({ canvasId, webPaths, frameMs }) => {
+    const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${canvasId}"]`) as HTMLCanvasElement | null;
+    if (!canvas) return null;
+    const cs = window.getComputedStyle(canvas);
+    const img = document.createElement('img');
+    img.src = webPaths[0]!;
+    img.width = canvas.width;
+    img.height = canvas.height;
+    img.alt = '';
+    img.setAttribute('data-clonyfy-canvas-capture', '1');
+    if (webPaths.length > 1) {
+      img.setAttribute('data-clonyfy-canvas-frames', JSON.stringify(webPaths));
+      img.setAttribute('data-clonyfy-frame-ms', String(frameMs));
+    }
+    // Keep the site's CSS hooks so `.x canvas`-style layout still lands the same.
+    if (canvas.className) img.className = canvas.className;
+    const layered = cs.position === 'absolute' || cs.position === 'fixed';
+    // Fills its parent → stay fluid; overflows it (full-bleed bands) → keep exact size.
+    const parentWidth = canvas.parentElement?.getBoundingClientRect().width || 0;
+    const ownWidth = canvas.getBoundingClientRect().width;
+    const fillsParent = parentWidth > 0 && Math.abs(ownWidth - parentWidth) <= 2;
+    img.style.cssText = [
+      (canvas.getAttribute('style') || '').replace(/;?\s*$/, ''),
+      'display:block',
+      fillsParent ? 'width:100%' : `width:${cs.width}`,
+      `height:${cs.height}`,
+      fillsParent ? 'max-width:100%' : 'max-width:none',
+      'object-fit:fill',
+      layered ? `position:${cs.position};top:${cs.top};right:${cs.right};bottom:${cs.bottom};left:${cs.left}` : '',
+      layered && cs.zIndex !== 'auto' ? `z-index:${cs.zIndex}` : '',
+    ].filter(Boolean).join(';');
+    return img.outerHTML;
+  }, { canvasId: id, webPaths, frameMs });
 }
