@@ -418,7 +418,7 @@ function extractLinksFromHtml(html: string, pageUrl: string, origin: string): st
 
 function pushSrcsetUrls(value: string | null | undefined, out: Set<string>): void {
   if (!value) return;
-  for (const part of value.split(',')) {
+  for (const part of value.split(/,\s+|(?<=\s[\d.]+[wxh]),/)) { // commas inside URLs stay
     const candidate = part.trim().split(/\s+/)[0];
     if (candidate) out.add(candidate);
   }
@@ -780,6 +780,8 @@ export async function crawl(
   const MAX_FALLBACK_ATTEMPTS = 6;
   let fallbackQueue: string[] | null = null;
   let fallbackAttempts = 0;
+  // A fallback entry page stands in for the start URL, so it gets the start URL's time.
+  const landingUrls = new Set<string>();
   const pumpFallback = () => {
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
@@ -788,6 +790,8 @@ export async function crawl(
       enqueue(next, 1, true);
       if (visited.size > before) {
         fallbackAttempts++;
+        const norm = normalizePageUrl(next);
+        if (norm) landingUrls.add(norm);
         logger.info(`  [FALLBACK PAGE] Start URL not captured — trying ${next}`);
         return;
       }
@@ -906,12 +910,13 @@ export async function crawl(
 
         logger.info(`  [${records.length + 1}/${opts.maxPages}] ${clean}`);
         const isStartUrl = !!startNorm && clean === startNorm;
-        const captureTimeout = isStartUrl
+        const captureTimeout = isStartUrl || landingUrls.has(clean)
           ? START_URL_CAPTURE_TIMEOUT
           : (opts.fullSite ? FULL_SITE_PAGE_CAPTURE_TIMEOUT : PAGE_CAPTURE_TIMEOUT);
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         let timedOut = false;
-        const capturePromise = capturePage(context, clean, assetsDir, hooks);
+        // The capture sizes its optional steps (animations, menus) to the time it has left.
+        const capturePromise = capturePage(context, clean, assetsDir, { ...hooks, deadline: Date.now() + captureTimeout });
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             timedOut = true;

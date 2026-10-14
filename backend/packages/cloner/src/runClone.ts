@@ -372,4 +372,4 @@ export async function regenerateCloneProject(outDir: string): Promise<void> {
   await generateNextApp(outDir, fullManifest, apiRoutes);
 }
 
-export { backfillScrollTimeline, type MotionBackfillResult } from "./motionBackfill.js";
+export { backfillScrollTimeline, backfillPageMedia, type MotionBackfillResult } from "./motionBackfill.js";

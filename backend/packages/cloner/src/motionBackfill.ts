@@ -11,12 +11,14 @@
 import { parse } from 'parse5';
 import { logger } from './logger.js';
 import { getChromiumLaunchOptions } from './crawler.js';
+import { createHash } from 'crypto';
 import { recordScrollTimeline, injectScrollTimeline, type ScrollTimelineData } from './scrollTimeline.js';
+import { captureCanvasFrames, canvasImageHtml } from './canvasFrames.js';
 
 const VIEWPORT = { width: 1440, height: 900 };
 
 type Mark = { path: number[]; attrs: Record<string, string> };
-type MatchResult = { marks: Mark[]; dropAnchors: number[]; dropRegions: string[] };
+type MatchResult = { marks: Mark[]; dropAnchors: number[]; dropRegions: string[]; canvases: Array<{ id: string; path: number[] }> };
 
 /** Runs in the browser — self-contained. Matches marked live elements to the snapshot. */
 function matchInPage(args: { html: string }): MatchResult {
@@ -97,7 +99,15 @@ function matchInPage(args: { html: string }): MatchResult {
     const t = find(live);
     if (!t || !mark(t, 'data-clonyfy-sr', id)) dropRegions.push(id);
   }
-  return { marks: Array.from(out.values()), dropAnchors, dropRegions };
+  // Live canvases → the snapshot's still-empty <canvas> at the same place.
+  const canvases: Array<{ id: string; path: number[] }> = [];
+  for (const live of Array.from(document.querySelectorAll('canvas[data-clonyfy-bf-canvas]'))) {
+    const t = find(live);
+    if (!t || t.tagName !== 'CANVAS') continue;
+    const path = realPath(t);
+    if (path) canvases.push({ id: live.getAttribute('data-clonyfy-bf-canvas')!, path });
+  }
+  return { marks: Array.from(out.values()), dropAnchors, dropRegions, canvases };
 }
 
 type P5Node = {
@@ -107,6 +117,24 @@ type P5Node = {
   attrs?: Array<{ name: string; value: string }>;
   sourceCodeLocation?: { startTag?: { startOffset: number; endOffset: number } } | null;
 };
+
+/** Replace elements addressed by element-index path with new HTML, editing the source text in place. */
+function replaceElements(html: string, swaps: Array<{ path: number[]; html: string }>): { html: string; replaced: number } {
+  const doc = parse(html, { sourceCodeLocationInfo: true }) as unknown as P5Node;
+  const root = doc.childNodes?.find((n) => n.tagName === 'html');
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const sw of swaps) {
+    let x: P5Node | undefined = root;
+    for (const i of sw.path) x = x?.childNodes?.filter((c) => !!c.tagName)[i];
+    const loc = x?.sourceCodeLocation as { startTag?: { startOffset: number; endOffset: number }; endTag?: { endOffset: number } } | null | undefined;
+    if (!loc?.startTag) continue;
+    edits.push({ start: loc.startTag.startOffset, end: loc.endTag?.endOffset ?? loc.startTag.endOffset, text: sw.html });
+  }
+  edits.sort((a, b) => b.start - a.start);
+  let out = html;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return { html: out, replaced: edits.length };
+}
 
 /** Add attributes to elements addressed by element-index path from <html>, editing the source text in place. */
 function applyMarks(html: string, marks: Mark[]): { html: string; applied: Set<string> } {
@@ -158,15 +186,34 @@ export interface MotionBackfillResult {
   html: string | null;
   tracks: number;
   regions: number;
+  /** Canvases (WebGL/2D visuals) replaced by recorded frame loops. */
+  canvases: number;
+  /** Frame images to save under public/_assets/<name>. */
+  files: Array<{ name: string; data: Buffer }>;
   reason?: string;
 }
 
-/**
- * @param previewUrl interactive preview of the page (site JS running, served by this API)
- * @param snapshotHtml the saved snapshot to add the timeline to
- */
+/** Scroll animations only (kept for callers of the original API). */
 export async function backfillScrollTimeline(previewUrl: string, snapshotHtml: string, opts: { timeoutMs?: number } = {}): Promise<MotionBackfillResult> {
-  if (/id=["']__clonyfy_scroll_timeline__["']/.test(snapshotHtml)) return { html: null, tracks: 0, regions: 0, reason: 'already recorded' };
+  return backfillPageMedia(previewUrl, snapshotHtml, { ...opts, timeline: true, canvases: false });
+}
+
+/**
+ * Record what only the site's JS draws, from its interactive preview, into the saved
+ * snapshot: scroll animations (timeline) and canvas visuals (frame loops — e.g. a WebGL
+ * gradient background the capture couldn't shoot).
+ * @param previewUrl interactive preview of the page (site JS running, served by this API)
+ * @param snapshotHtml the saved snapshot to add them to
+ */
+export async function backfillPageMedia(
+  previewUrl: string,
+  snapshotHtml: string,
+  opts: { timeoutMs?: number; timeline: boolean; canvases: boolean },
+): Promise<MotionBackfillResult> {
+  const none = (reason: string): MotionBackfillResult => ({ html: null, tracks: 0, regions: 0, canvases: 0, files: [], reason });
+  const wantTimeline = opts.timeline && !/id=["']__clonyfy_scroll_timeline__["']/.test(snapshotHtml);
+  const wantCanvases = opts.canvases && /<canvas\b[^>]*data-clonyfy-canvas-id/i.test(snapshotHtml);
+  if (!wantTimeline && !wantCanvases) return none('nothing to record');
   let browser: any;
   const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
   try {
@@ -180,21 +227,85 @@ export async function backfillScrollTimeline(previewUrl: string, snapshotHtml: s
     await page.waitForLoadState('load', { timeout: 10_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
     await page.waitForTimeout(1500);
-    const left = deadline - Date.now();
-    if (left < 5_000) return { html: null, tracks: 0, regions: 0, reason: 'timeout' };
-    const tl = await Promise.race([
-      recordScrollTimeline(page, { fast: true }),
-      new Promise<null>((r) => setTimeout(() => r(null), left)),
-    ]);
-    if (!tl) return { html: null, tracks: 0, regions: 0, reason: 'no scroll animation' };
-    const match: MatchResult = await page.evaluate(matchInPage, { html: snapshotHtml });
-    const { html, applied } = applyMarks(snapshotHtml, match.marks);
-    const pruned = pruneTimeline(tl, applied);
-    if (!pruned) return { html: null, tracks: 0, regions: 0, reason: 'animated elements not found in the snapshot' };
-    return { html: injectScrollTimeline(html, pruned), tracks: pruned.tracks.length, regions: pruned.regions?.length || 0 };
+
+    let html = snapshotHtml;
+    const files: MotionBackfillResult['files'] = [];
+    let canvases = 0;
+    let canvasNote = '';
+    if (wantCanvases) {
+      // Tag the live canvases worth keeping (same rule as the capture), then find their
+      // empty twins in the snapshot and shoot a frame loop for each.
+      const liveCount = await page.evaluate(() => {
+        let n = 0;
+        for (const el of Array.from(document.querySelectorAll('canvas'))) {
+          const c = el as HTMLCanvasElement;
+          const r = c.getBoundingClientRect();
+          const cs = getComputedStyle(c);
+          if (r.width < 80 || r.height < 40 || !c.width || !c.height) continue;
+          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+          const id = `bf-canvas-${n++}`;
+          c.setAttribute('data-clonyfy-bf-canvas', id);
+          c.setAttribute('data-clonyfy-canvas-id', id);
+        }
+        return n;
+      });
+      const { canvases: pairs } = await page.evaluate(matchInPage, { html }) as MatchResult;
+      const swaps: Array<{ path: number[]; html: string }> = [];
+      for (const pair of pairs.slice(0, 6)) {
+        const left = deadline - Date.now() - (wantTimeline ? 30_000 : 5_000);
+        if (left < 6_000) break;
+        const { frames, frameMs, ext } = await captureCanvasFrames(page, pair.id, {
+          maxFrames: 16, intervalMs: 90, maxBytes: 6_000_000, budgetMs: Math.min(20_000, left),
+        });
+        canvasNote += ` ${pair.id}:${frames.length}f`;
+        if (!frames.length) continue;
+        const webPaths = frames.map((buf) => {
+          const name = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.${ext}`;
+          if (!files.some((f) => f.name === name)) files.push({ name, data: buf });
+          return `/_assets/${name}`;
+        });
+        const imgHtml = await canvasImageHtml(page, pair.id, webPaths, frameMs);
+        if (imgHtml) swaps.push({ path: pair.path, html: imgHtml });
+      }
+      canvasNote = `canvases live ${liveCount}, matched ${pairs.length}${canvasNote}`;
+      if (swaps.length) {
+        const res = replaceElements(html, swaps);
+        html = res.html;
+        canvases = res.replaced;
+      }
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.waitForTimeout(400);
+    }
+
+    let tracks = 0;
+    let regions = 0;
+    let reason = '';
+    if (wantTimeline) {
+      const left = deadline - Date.now();
+      const tl = left < 5_000 ? null : await Promise.race([
+        // Stops at its budget with what it recorded; the race only guards a hung page.
+        recordScrollTimeline(page, { fast: true, budgetMs: Math.min(50_000, left - 4_000) }),
+        new Promise<null>((r) => setTimeout(() => r(null), left)),
+      ]);
+      if (!tl) reason = left < 5_000 ? 'timeout' : 'no scroll animation';
+      else {
+        const match: MatchResult = await page.evaluate(matchInPage, { html });
+        const marked = applyMarks(html, match.marks);
+        const pruned = pruneTimeline(tl, marked.applied);
+        if (!pruned) reason = 'animated elements not found in the snapshot';
+        else {
+          html = injectScrollTimeline(marked.html, pruned);
+          tracks = pruned.tracks.length;
+          regions = pruned.regions?.length || 0;
+        }
+      }
+    }
+    if (canvasNote) reason = reason ? `${reason}; ${canvasNote}` : canvasNote;
+    if (!canvases && !tracks && !regions) return none(reason || 'nothing recorded');
+    return { html, tracks, regions, canvases, files, ...(reason ? { reason } : {}) };
   } catch (err) {
     logger.debug(`  [MOTION BACKFILL] ${(err as Error).message.split('\n')[0]}`);
-    return { html: null, tracks: 0, regions: 0, reason: (err as Error).message.split('\n')[0] };
+    return none((err as Error).message.split('\n')[0]);
   } finally {
     await browser?.close().catch(() => {});
   }

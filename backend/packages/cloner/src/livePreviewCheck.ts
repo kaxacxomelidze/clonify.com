@@ -26,8 +26,16 @@ export interface LiveCheckPage {
 
 export type PreviewModeMap = Record<string, 'offline'>;
 
-/** Offline must beat interactive by this many points to win (interactive is richer). */
-const OFFLINE_MARGIN = 5;
+/**
+ * Interactive (the site's own JS) is the default: it is the only mode with the site's
+ * real animations, menus and buttons. Offline wins only when the interactive render is
+ * demonstrably broken — an error screen, or clearly less content than the snapshot
+ * (loading skeletons, "technical issue" banners) AND a much worse picture. A picture
+ * alone is not enough: one frame of an animated page (moving gradients, sliders,
+ * cookie banners) can land on either side by chance.
+ */
+const OFFLINE_MARGIN = 15;
+const MIN_CONTENT_RATIO = 0.6;
 const MAX_PAGES = 8;
 const SETTLE_MS = 6000;
 const VIEWPORT = { width: 1440, height: 900 };
@@ -73,9 +81,14 @@ export async function choosePreviewModes(
         const offline = await render(browser, page, files, false);
         const liveScore = live.errorScreen ? 0 : await similarity(scorer, page.liveScreenshot!, live.png);
         const offlineScore = await similarity(scorer, page.liveScreenshot!, offline.png);
-        const useOffline = offlineScore > liveScore + OFFLINE_MARGIN;
+        const contentRatio = offline.content ? live.content / offline.content : 1;
+        const broken = live.errorScreen || live.skeletons >= 6
+          || (contentRatio < MIN_CONTENT_RATIO && offlineScore > liveScore + OFFLINE_MARGIN);
+        const useOffline = broken;
         logger.info(`  [PREVIEW MODE] ${page.url}: interactive ${liveScore}% vs offline ${offlineScore}% `
-          + `match with the live page${live.errorScreen ? ' (error screen)' : ''} → ${useOffline ? 'offline' : 'interactive'}`);
+          + `match with the live page, content ${Math.round(contentRatio * 100)}% of the snapshot`
+          + `${live.errorScreen ? ' (error screen)' : ''}${live.skeletons >= 6 ? ` (${live.skeletons} loading skeletons)` : ''}`
+          + ` → ${useOffline ? 'offline' : 'interactive'}`);
         if (useOffline) result[page.filename] = 'offline';
       } catch (err) {
         logger.debug(`  [PREVIEW MODE] ${page.url}: check failed, keeping interactive: ${(err as Error).message}`);
@@ -92,7 +105,7 @@ async function render(
   page: LiveCheckPage,
   files: Map<string, string>,
   withScripts: boolean,
-): Promise<{ png: Buffer; errorScreen: boolean }> {
+): Promise<{ png: Buffer; errorScreen: boolean; content: number; skeletons: number }> {
   const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, javaScriptEnabled: withScripts });
   try {
     const tab = await context.newPage();
@@ -118,8 +131,26 @@ async function render(
       return document.documentElement.id === '__next_error__'
         || (/Application error: a (client|server)-side exception|This page couldn.t load/i.test(text) && text.length < 800);
     }).catch(() => false);
+    // How much real content rendered (visible text + media), and loading placeholders.
+    const { content, skeletons } = withScripts
+      ? await tab.evaluate(() => {
+        const visible = (el: Element) => {
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return r.width > 4 && r.height > 4 && cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) > 0.05;
+        };
+        const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().length;
+        const media = Array.from(document.querySelectorAll('img,video,svg,canvas')).filter(visible).length;
+        const skeletons = Array.from(document.querySelectorAll('[class*="skeleton" i],[class*="shimmer" i],[class*="placeholder" i][aria-busy],[aria-busy="true"]')).filter(visible).length;
+        return { content: text + media * 40, skeletons };
+      }).catch(() => ({ content: 0, skeletons: 0 }))
+      : await tab.evaluate(() => {
+        // JS is off here: count what the snapshot holds.
+        const text = (document.body?.textContent || '').replace(/\s+/g, ' ').trim().length;
+        return { content: text + document.querySelectorAll('img,video,svg,canvas').length * 40, skeletons: 0 };
+      }).catch(() => ({ content: 0, skeletons: 0 }));
     const png: Buffer = await tab.screenshot({ type: 'png', timeout: 10_000 });
-    return { png, errorScreen };
+    return { png, errorScreen, content, skeletons };
   } finally {
     await context.close().catch(() => {});
   }

@@ -1357,6 +1357,31 @@ function interactionRuntime() {
       }
     }
 
+    // Cookie / consent banners: Accept, Reject, Save… all close the banner on the real
+    // site (the choice itself only matters to the site's backend). Close it here too.
+    var consentLabel = String(btn.getAttribute('aria-label') || btn.textContent || '').replace(/\s+/g, ' ').trim();
+    var consentBox = btn.closest('[class*="cookie" i],[id*="cookie" i],[class*="consent" i],[id*="consent" i],[class*="gdpr" i],[id*="gdpr" i],[aria-label*="cookie" i],[aria-label*="consent" i],[role="dialog"],[role="alertdialog"],[role="region"],aside,section,div');
+    for (var cb = consentBox; cb && cb !== document.body; cb = cb.parentElement) {
+      var ctext = String(cb.textContent || '');
+      if (ctext.length > 1200) { cb = null; break; }
+      if (/cookie|consent|gdpr|privacy/i.test(ctext) && /accept|reject|decline|allow|agree|deny|refuse|save|confirm|necessary|essential|got it|ok\b|okay|close/i.test(consentLabel)) {
+        var cs = window.getComputedStyle(cb);
+        // The banner itself: the nearest fixed/sticky ancestor, else this box.
+        var box = cb;
+        for (var up = cb; up && up !== document.body; up = up.parentElement) {
+          var ps = window.getComputedStyle(up).position;
+          if (ps === 'fixed' || ps === 'sticky') { box = up; break; }
+        }
+        if (cs) {
+          e.preventDefault();
+          markHandled(e);
+          box.style.setProperty('display', 'none', 'important');
+          box.setAttribute('data-clonyfy-consent-closed', '1');
+          return;
+        }
+      }
+    }
+
     // Common "back / return" controls are JS-only on SPAs — use preview history.
     var backLabel = String(btn.getAttribute('aria-label') || btn.textContent || '')
       .replace(/\s+/g, ' ').trim();
@@ -1830,10 +1855,43 @@ function animationRuntime() {
         var idx = 0;
         var visible = true;
         var timer = null;
+        // Slow sequences (big WebGL backgrounds shot a few seconds apart) crossfade so a
+        // drifting gradient flows instead of jumping between frames.
+        var fade = null;
+        if (ms >= 600 && img.parentElement) {
+          fade = img.cloneNode(false);
+          fade.removeAttribute('data-clonyfy-canvas-frames');
+          fade.removeAttribute('data-clonyfy-frames-playing');
+          fade.removeAttribute('id');
+          fade.setAttribute('aria-hidden', 'true');
+          fade.setAttribute('data-clonyfy-ui', '');
+          var cs = getComputedStyle(img);
+          if (cs.position !== 'absolute' && cs.position !== 'fixed') {
+            fade.style.position = 'absolute';
+            fade.style.left = img.offsetLeft + 'px';
+            fade.style.top = img.offsetTop + 'px';
+            fade.style.width = img.offsetWidth + 'px';
+            fade.style.height = img.offsetHeight + 'px';
+            if (getComputedStyle(img.parentElement).position === 'static') img.parentElement.style.position = 'relative';
+          }
+          fade.style.opacity = '0';
+          fade.style.pointerEvents = 'none';
+          fade.style.transition = 'opacity ' + Math.round(ms * 0.9) + 'ms linear';
+          img.parentElement.insertBefore(fade, img.nextSibling);
+        }
         function tick() {
           if (!visible) return;
           idx = (idx + 1) % urls.length;
-          img.src = urls[idx];
+          if (!fade) { img.src = urls[idx]; return; }
+          // Fade the next frame in over the current one, then make it the base.
+          fade.style.transition = 'none';
+          fade.style.opacity = '0';
+          fade.src = urls[idx];
+          void fade.offsetWidth;
+          fade.style.transition = 'opacity ' + Math.round(ms * 0.9) + 'ms linear';
+          fade.style.opacity = '1';
+          var next = urls[idx];
+          setTimeout(function () { img.src = next; }, Math.round(ms * 0.92));
         }
         function start() { if (!timer) timer = setInterval(tick, ms); }
         function stop() { if (timer) { clearInterval(timer); timer = null; } }
