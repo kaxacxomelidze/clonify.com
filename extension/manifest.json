@@ -3,7 +3,7 @@
   "name": "Clonyfy Helper",
   "short_name": "Clonyfy Helper",
   "version": "1.0.0",
-  "description": "Clone protected websites with Clonyfy: captures the public page you are viewing, in your own browser. Never your cookies, logins or personal data.",
+  "description": "Clone protected sites with Clonyfy from your own browser. Copies only the public page, never cookies, logins or personal data.",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon16.png",
