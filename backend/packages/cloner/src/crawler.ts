@@ -1,4 +1,5 @@
 import PQueue from 'p-queue';
+import { CLONYFY_USER_AGENT } from './userAgent.js';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { extname, join } from 'path';
@@ -21,7 +22,7 @@ import {
 } from './serverlessBudget.js';
 import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, PageRecord } from './types.js';
 import { isThinSpaShell } from './captureQuality.js';
-import { BotProtectionError, noteBotProtection } from './botProtection.js';
+import { BotProtectionError, noteBotProtection, noteRefusal } from './botProtection.js';
 
 export { isLocaleOnlyPath, isLocalePrefixedPath, shouldSkipLocaleVariant } from './localePaths.js';
 export { isFastCloneProfile, isServerlessRuntime } from './serverlessBudget.js';
@@ -51,7 +52,8 @@ const FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
   PAGE_CAPTURE_TIMEOUT,
   parseInt(process.env.CLONYFY_FULL_SITE_PAGE_TIMEOUT_MS || '210000', 10) || 210_000,
 );
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// Server-side fetches identify as Clonyfy; the capture browser keeps its own user agent.
+const USER_AGENT = CLONYFY_USER_AGENT;
 const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
 const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 10_000 : 10_000;
 const STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 15_000 : 15_000;
@@ -117,7 +119,6 @@ export async function getChromiumLaunchOptions(chromium: ChromiumLauncher) {
     channel,
     args: [
       ...(sparticuzChromium ? sparticuzChromium.args : []),
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
     ],
@@ -300,7 +301,7 @@ async function fetchSitemap(origin: string): Promise<string[]> {
   return [...new Set(found)];
 }
 
-function routeForUrl(url: string): string {
+export function routeForUrl(url: string): string {
   try {
     const pathname = new URL(url).pathname || '/';
     return pathname === '/index.html' ? '/' : pathname;
@@ -780,9 +781,14 @@ export async function crawl(
   const MAX_FALLBACK_ATTEMPTS = 6;
   let fallbackQueue: string[] | null = null;
   let fallbackAttempts = 0;
+  // The page the user asked for is behind bot protection: clone THAT page through the
+  // Clonyfy Helper — never quietly substitute another page of the site (e.g. a mortgage
+  // form instead of the home page) and report it as done.
+  let startProtected = false;
   // A fallback entry page stands in for the start URL, so it gets the start URL's time.
   const landingUrls = new Set<string>();
   const pumpFallback = () => {
+    if (startProtected) return;
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
       const next = fallbackQueue.shift()!;
@@ -804,7 +810,7 @@ export async function crawl(
   let sitemapFallbacksAdded = false;
   /** Named entry pages start right away; sitemap pages join whenever the sitemap arrives. */
   const startFallbacks = () => {
-    if (records.length > 0) return;
+    if (records.length > 0 || startProtected) return;
     if (!fallbackQueue) fallbackQueue = FALLBACK_LANDING_PATHS.map((p) => new URL(p, origin).href);
     if (sitemapFetchDone && !sitemapFallbacksAdded) {
       sitemapFallbacksAdded = true;
@@ -815,6 +821,7 @@ export async function crawl(
 
   const maybeEnqueueSitemap = () => {
     if (sitemapEnqueued || !startUrlFinished || !sitemapFetchDone) return;
+    if (startProtected && records.length === 0) return;
     if (records.length === 0) startFallbacks();
     sitemapEnqueued = true;
     const remaining = Math.max(0, opts.maxPages - budgetUsed());
@@ -865,7 +872,6 @@ export async function crawl(
       try {
         await ensureBrowser();
         context = await browser.newContext({
-          userAgent: USER_AGENT,
           viewport: { width: 1440, height: 900 },
           ignoreHTTPSErrors: true,
           serviceWorkers: 'block',
@@ -966,8 +972,16 @@ export async function crawl(
         // Remember a bot-protection block so the final error can explain it, but keep
         // the original fallback + retry path: a challenge on one attempt doesn't mean
         // every attempt is refused.
-        if (err instanceof BotProtectionError) noteBotProtection(clean, err.vendor);
-        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
+        if (err instanceof BotProtectionError) {
+          noteBotProtection(clean, err.vendor);
+          if (isStartUrl) startProtected = true;
+        } else {
+          const refused = /^HTTP (\d{3})$/.exec(errMsg);
+          if (refused) noteRefusal(clean, Number(refused[1]));
+        }
+        // Behind bot protection a plain fetch only yields an unrendered shell — the page is
+        // cloned properly through the Clonyfy Helper instead (in the user's own browser).
+        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite) && !(err instanceof BotProtectionError)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -991,7 +1005,6 @@ export async function crawl(
                 context = null;
                 await new Promise((r) => setTimeout(r, 800));
                 context = await browser.newContext({
-                  userAgent: USER_AGENT,
                   viewport: { width: 1440, height: 900 },
                   ignoreHTTPSErrors: true,
                   serviceWorkers: 'block',

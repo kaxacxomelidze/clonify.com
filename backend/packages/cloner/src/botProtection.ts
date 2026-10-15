@@ -52,6 +52,18 @@ export function noteBotProtection(url: string, vendor: string) {
   try { findings.set(new URL(url).origin, vendor); } catch { /* ignore */ }
 }
 
+/**
+ * A plain refusal of the server (401/403/429/503) with no recognizable vendor page: the
+ * site still blocks automated access, so the Clonyfy Helper is the way to clone it.
+ */
+export function noteRefusal(url: string, status: number) {
+  if (![401, 403, 429, 503].includes(status)) return;
+  try {
+    const origin = new URL(url).origin;
+    if (!findings.has(origin)) findings.set(origin, status === 429 ? 'rate limiting (HTTP 429)' : `access rules (HTTP ${status})`);
+  } catch { /* ignore */ }
+}
+
 export function takeBotProtection(url: string): string | null {
   try {
     const origin = new URL(url).origin;
@@ -66,7 +78,7 @@ export function takeBotProtection(url: string): string | null {
 export function botProtectionMessage(url: string, vendor: string) {
   let host = url;
   try { host = new URL(url).hostname; } catch { /* keep raw */ }
-  return `${host} is protected by ${vendor}, which blocks automated browsers — so it can't be cloned. `
-    + 'This is the site owner\'s security setting, not a temporary error: retrying or changing the robots.txt option won\'t help. '
-    + 'If you own this site, clone it from a staging or preview URL that isn\'t behind the bot check, or allow-list the cloning server in your protection settings.';
+  return `${host} is protected by ${vendor}, which blocks automated browsers, so Clonyfy's servers can't open it. `
+    + 'Clone it with the Clonyfy Helper: it captures the page from your own browser, where you already see the site '
+    + '(only the public page — never your cookies, logins or personal data).';
 }

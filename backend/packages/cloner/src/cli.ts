@@ -46,6 +46,11 @@ program
       verbose: options.verbose,
       fullSite,
     });
+    // The clone is written. A request the site never answers (a huge sitemap, a stalled
+    // salvage fetch) must not keep this process alive — the server would see a "stalled"
+    // clone for minutes after it finished. (Short wait: cloner.log finishes flushing.)
+    await new Promise((r) => setTimeout(r, 500));
+    process.exit(0);
   });
 
 program

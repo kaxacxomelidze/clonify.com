@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Clonyfy Helper — allow</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <main class="card">
+    <header class="brand"><img src="icons/icon32.png" alt="" width="20" height="20"> Clonyfy Helper</header>
+    <h1>Clone <span id="site">this site</span>?</h1>
+    <p class="lead">This site blocks automated browsers, so Clonyfy will copy the page from <strong>your</strong> browser, where you already see it.</p>
+    <ul class="facts">
+      <li class="yes">The public page: layout, styles, scripts, images, fonts</li>
+      <li class="no">Never your cookies, logins, passwords or personal data</li>
+      <li class="yes">Runs only when you click Clone — nothing in the background</li>
+    </ul>
+    <label class="always"><input type="checkbox" id="always"> Allow on every site I clone (no prompt next time)</label>
+    <div class="actions">
+      <button id="cancel" class="secondary">Cancel</button>
+      <button id="allow" class="primary">Allow &amp; clone</button>
+    </div>
+    <p class="fine">Chrome will ask you to confirm once.</p>
+  </main>
+  <script src="allow.js" type="module"></script>
+</body>
+</html>

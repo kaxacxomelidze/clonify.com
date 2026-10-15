@@ -2,7 +2,7 @@
 import {
   logger,
   runClone
-} from "./chunk-GONBSHB5.js";
+} from "./chunk-CTGYYZL3.js";
 
 // src/cli.ts
 import { program } from "commander";
@@ -352,6 +352,8 @@ program.command("clone <url>").description("Clone a website").option("-o, --out 
     verbose: options.verbose,
     fullSite
   });
+  await new Promise((r) => setTimeout(r, 500));
+  process.exit(0);
 });
 program.command("serve").description("Start the web UI for cloning and editing sites").option("-p, --port <n>", "Port to listen on", "3333").option("-o, --out <dir>", "Base output directory for cloned sites", "./output").action(async (options) => {
   const port = parseInt(options.port, 10);

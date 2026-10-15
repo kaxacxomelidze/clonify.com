@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { CLONYFY_USER_AGENT } from './userAgent.js';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, extname, basename } from 'path';
 import mime from 'mime-types';
@@ -209,7 +210,8 @@ async function restoreRequestedUrl(page: Page, pageUrl: string, reason: string):
   }
 }
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// Server-side asset fetches identify as Clonyfy; the capture browser keeps its own user agent.
+const USER_AGENT = CLONYFY_USER_AGENT;
 const MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024; // Align with hosted persist cap so heroes survive.
 const MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
 const SERVERLESS_DOM_ASSET_CAP = 800; // Save As: harvest more images on hosted.
@@ -583,7 +585,6 @@ export async function capturePage(
     : MAX_ASSET_BYTES;
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
-    'User-Agent': USER_AGENT,
     'Accept-Language': 'en-US,en;q=0.9',
   });
   await page.addInitScript(() => {
