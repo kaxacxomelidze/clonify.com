@@ -39,3 +39,6 @@ coverage/
 
 # Local backup copies
 *.before-*
+
+# Clonyfy Helper build output (node extension/build.mjs)
+extension/dist/

@@ -5,6 +5,8 @@ services:
       context: ./frontend
       args:
         VITE_API_BASE_URL: https://clonyfy.com
+        # Clonyfy Helper store link, once published (empty = offer the zip download).
+        VITE_HELPER_INSTALL_URL: ""
     container_name: clonify-frontend
     restart: unless-stopped
     expose:

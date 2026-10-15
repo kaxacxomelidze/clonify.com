@@ -743,6 +743,8 @@ export async function ensureLocalSchema() {
     -- Retired Affonso/local referral settings (affiliates now run through Whop).
     DELETE FROM settings WHERE key LIKE 'affiliate%';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
+    -- Clonyfy Helper extension installed (the protected-site install card never shows again).
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS helper_installed_at text;
     CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
     CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);
     -- Clone quota is counted from usage_events so deleting a clone can't refund it.

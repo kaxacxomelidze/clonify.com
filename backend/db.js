@@ -68,6 +68,7 @@ export const updateUser = async (id, fields) => {
     'blocked','blocked_reason','cancel_at_period_end','renewal_reminder_sent','usage_alert_sent',
     'google_id','github_id','stripe_customer_id','stripe_subscription_id',
     'whop_membership_id','whop_user_id','whop_affiliate_code','whop_affiliate_at','whop_username',
+    'helper_installed_at',
   ];
   const update = {};
   for (const [k, v] of Object.entries(fields)) {

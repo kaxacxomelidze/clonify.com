@@ -275,6 +275,8 @@ export type AuthUser = {
   /** Where a paid plan comes from; "manual" means granted without a subscription. */
   billingSource?: "whop" | "stripe" | "manual" | null;
   createdAt?: string;
+  /** The Clonyfy Helper browser extension was installed (protected-site card never shows again). */
+  helperInstalled?: boolean;
 };
 
 export type UsageSummary = {
@@ -378,6 +380,8 @@ export type CloneJobResponse = {
   depth?: number;
   ignoreRobots?: boolean;
   fullSite?: boolean;
+  /** status "needs_helper": the site blocks automated browsers; capture it with the Clonyfy Helper. */
+  helper?: { vendor: string; url: string; token: string; expiresAt: number } | null;
 };
 
 export type OutputItem = {
@@ -413,6 +417,13 @@ export async function startClone(input: {
     },
     timeoutMs: 120_000,
     retries: 2,
+  });
+}
+
+/** Remember that the Clonyfy Helper is installed, so the install card never shows again. */
+export async function markHelperInstalled() {
+  return apiFetch<{ ok: boolean; helperInstalled: boolean }>("/api/helper/installed", {
+    method: "POST",
   });
 }
 

@@ -187,8 +187,8 @@ var require_eventemitter3 = __commonJS({
 });
 
 // src/runClone.ts
-import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5, readFileSync as readFileSync3, existsSync as existsSync6 } from "fs";
-import { resolve as resolve2, join as join7 } from "path";
+import { mkdirSync as mkdirSync7, writeFileSync as writeFileSync6, readFileSync as readFileSync3, existsSync as existsSync6 } from "fs";
+import { resolve as resolve3, join as join8 } from "path";
 
 // src/robots.ts
 import { createRequire } from "module";
@@ -333,7 +333,7 @@ function pTimeout(promise, options) {
   } = options;
   let timer;
   let abortHandler;
-  const wrappedPromise = new Promise((resolve3, reject) => {
+  const wrappedPromise = new Promise((resolve4, reject) => {
     if (typeof milliseconds !== "number" || Math.sign(milliseconds) !== 1) {
       throw new TypeError(`Expected \`milliseconds\` to be a positive number, got \`${milliseconds}\``);
     }
@@ -348,14 +348,14 @@ function pTimeout(promise, options) {
       signal.addEventListener("abort", abortHandler, { once: true });
     }
     if (milliseconds === Number.POSITIVE_INFINITY) {
-      promise.then(resolve3, reject);
+      promise.then(resolve4, reject);
       return;
     }
     const timeoutError = new TimeoutError();
     timer = customTimers.setTimeout.call(void 0, () => {
       if (fallback) {
         try {
-          resolve3(fallback());
+          resolve4(fallback());
         } catch (error) {
           reject(error);
         }
@@ -365,7 +365,7 @@ function pTimeout(promise, options) {
         promise.cancel();
       }
       if (message === false) {
-        resolve3();
+        resolve4();
       } else if (message instanceof Error) {
         reject(message);
       } else {
@@ -375,7 +375,7 @@ function pTimeout(promise, options) {
     }, milliseconds);
     (async () => {
       try {
-        resolve3(await promise);
+        resolve4(await promise);
       } catch (error) {
         reject(error);
       }
@@ -654,7 +654,7 @@ var PQueue = class extends import_index.default {
       throwOnTimeout: this.#throwOnTimeout,
       ...options
     };
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       this.#queue.enqueue(async () => {
         this.#pending++;
         try {
@@ -668,11 +668,11 @@ var PQueue = class extends import_index.default {
             operation = Promise.race([operation, this.#throwOnAbort(options.signal)]);
           }
           const result = await operation;
-          resolve3(result);
+          resolve4(result);
           this.emit("completed", result);
         } catch (error) {
           if (error instanceof TimeoutError && !options.throwOnTimeout) {
-            resolve3();
+            resolve4();
             return;
           }
           reject(error);
@@ -747,13 +747,13 @@ var PQueue = class extends import_index.default {
     await this.#onEvent("idle");
   }
   async #onEvent(event, filter) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const listener = () => {
         if (filter && !filter()) {
           return;
         }
         this.off(event, listener);
-        resolve3();
+        resolve4();
       };
       this.on(event, listener);
     });
@@ -785,6 +785,9 @@ var PQueue = class extends import_index.default {
     return this.#isPaused;
   }
 };
+
+// src/userAgent.ts
+var CLONYFY_USER_AGENT = "Mozilla/5.0 (compatible; Clonyfy/1.0; +https://clonyfy.com)";
 
 // src/crawler.ts
 import { createHash as createHash4 } from "crypto";
@@ -2320,6 +2323,14 @@ function noteBotProtection(url, vendor) {
   } catch {
   }
 }
+function noteRefusal(url, status) {
+  if (![401, 403, 429, 503].includes(status)) return;
+  try {
+    const origin = new URL(url).origin;
+    if (!findings.has(origin)) findings.set(origin, status === 429 ? "rate limiting (HTTP 429)" : `access rules (HTTP ${status})`);
+  } catch {
+  }
+}
 function takeBotProtection(url) {
   try {
     const origin = new URL(url).origin;
@@ -2336,7 +2347,7 @@ function botProtectionMessage(url, vendor) {
     host = new URL(url).hostname;
   } catch {
   }
-  return `${host} is protected by ${vendor}, which blocks automated browsers \u2014 so it can't be cloned. This is the site owner's security setting, not a temporary error: retrying or changing the robots.txt option won't help. If you own this site, clone it from a staging or preview URL that isn't behind the bot check, or allow-list the cloning server in your protection settings.`;
+  return `${host} is protected by ${vendor}, which blocks automated browsers, so Clonyfy's servers can't open it. Clone it with the Clonyfy Helper: it captures the page from your own browser, where you already see the site (only the public page \u2014 never your cookies, logins or personal data).`;
 }
 
 // node_modules/parse5/dist/common/unicode.js
@@ -10500,7 +10511,7 @@ async function recordInPage(opts) {
     }
     return p;
   };
-  const resolve3 = (root, p) => {
+  const resolve4 = (root, p) => {
     let x = root;
     for (const i of p) {
       x = x?.children[i];
@@ -10525,7 +10536,7 @@ async function recordInPage(opts) {
   const regionMo = new MutationObserver(onRegionRecords);
   const samplePaths = (step) => {
     for (const t of pathTracks.values()) {
-      const el = resolve3(regions[t.r].el, t.path);
+      const el = resolve4(regions[t.r].el, t.path);
       if (!el) continue;
       const v = el.getAttribute(t.name);
       if (v === t.last) continue;
@@ -11016,7 +11027,7 @@ async function restoreRequestedUrl(page, pageUrl, reason) {
     return false;
   }
 }
-var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+var USER_AGENT2 = CLONYFY_USER_AGENT;
 var MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024;
 var MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
 var SERVERLESS_DOM_ASSET_CAP = 800;
@@ -11281,7 +11292,6 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
   const maxAssetBytes = deepMedia && IS_FAST ? Math.max(MAX_ASSET_BYTES, 8 * 1024 * 1024) : MAX_ASSET_BYTES;
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
-    "User-Agent": USER_AGENT2,
     "Accept-Language": "en-US,en;q=0.9"
   });
   await page.addInitScript(() => {
@@ -12235,7 +12245,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       if (budget >= 8e3) {
         scrollTimeline = await Promise.race([
           recordScrollTimeline(page, { fast: IS_FAST, budgetMs: budget }),
-          new Promise((resolve3) => setTimeout(() => resolve3(null), budget + 15e3))
+          new Promise((resolve4) => setTimeout(() => resolve4(null), budget + 15e3))
         ]);
       }
       logger.debug(scrollTimeline ? `  [SCROLL TIMELINE] ${scrollTimeline.tracks.length} track(s), ${scrollTimeline.regions?.length || 0} region(s), ${scrollTimeline.anchors.length} anchor(s) in ${Date.now() - startedAt}ms` : `  [SCROLL TIMELINE] none recorded (budget ${budget}ms, took ${Date.now() - startedAt}ms)`);
@@ -12480,15 +12490,15 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
                 video.setAttribute("playsinline", "");
                 try {
                   if (video.readyState < 2) {
-                    await new Promise((resolve3) => {
-                      const done = () => resolve3();
+                    await new Promise((resolve4) => {
+                      const done = () => resolve4();
                       video.addEventListener("loadeddata", done, { once: true });
                       setTimeout(done, 1200);
                     });
                   }
                   video.currentTime = Math.min(0.35, Number.isFinite(video.duration) ? video.duration * 0.08 : 0.35);
-                  await new Promise((resolve3) => {
-                    const done = () => resolve3();
+                  await new Promise((resolve4) => {
+                    const done = () => resolve4();
                     video.addEventListener("seeked", done, { once: true });
                     setTimeout(done, 800);
                   });
@@ -12855,7 +12865,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     const ixBudget = stepBudget(IS_FAST ? 12e3 : 28e3, 3e4);
     const interactionsScript = ixBudget < 4e3 ? "" : await Promise.race([
       recordNavInteractions(page, pageUrl, ixBudget),
-      new Promise((resolve3) => setTimeout(() => resolve3(""), ixBudget + 3e4))
+      new Promise((resolve4) => setTimeout(() => resolve4(""), ixBudget + 3e4))
     ]).catch(() => "");
     if (!await restoreRequestedUrl(page, pageUrl, "after nav interaction recording")) {
       throw new Error(`Nav recording navigated away from ${pathnameOfUrl(pageUrl)}`);
@@ -12888,7 +12898,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }
     await Promise.race([
       Promise.allSettled([...pendingNativeSaves]),
-      new Promise((resolve3) => setTimeout(resolve3, 2e4))
+      new Promise((resolve4) => setTimeout(resolve4, 2e4))
     ]);
     let html = await page.content();
     const deferredEdits = await page.evaluate(
@@ -13637,7 +13647,7 @@ var FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
   PAGE_CAPTURE_TIMEOUT,
   parseInt(process.env.CLONYFY_FULL_SITE_PAGE_TIMEOUT_MS || "210000", 10) || 21e4
 );
-var USER_AGENT3 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+var USER_AGENT3 = CLONYFY_USER_AGENT;
 var STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
 var STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 1e4 : 1e4;
 var STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 15e3 : 15e3;
@@ -13684,7 +13694,6 @@ async function getChromiumLaunchOptions(chromium) {
     channel,
     args: [
       ...sparticuzChromium ? sparticuzChromium.args : [],
-      "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-setuid-sandbox"
     ]
@@ -14045,7 +14054,7 @@ async function fetchStaticPage(url, origin, assetsDir, options = {}) {
     } catch (err) {
       lastErr = err;
       if (attempt < (IS_SERVERLESS ? 3 : 1)) {
-        await new Promise((resolve3) => setTimeout(resolve3, 350 * attempt));
+        await new Promise((resolve4) => setTimeout(resolve4, 350 * attempt));
       }
     }
   }
@@ -14197,8 +14206,10 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   const MAX_FALLBACK_ATTEMPTS = 6;
   let fallbackQueue = null;
   let fallbackAttempts = 0;
+  let startProtected = false;
   const landingUrls = /* @__PURE__ */ new Set();
   const pumpFallback = () => {
+    if (startProtected) return;
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
       const next = fallbackQueue.shift();
@@ -14222,7 +14233,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   }).sort((a, b) => new URL(a).pathname.split("/").filter(Boolean).length - new URL(b).pathname.split("/").filter(Boolean).length || a.length - b.length);
   let sitemapFallbacksAdded = false;
   const startFallbacks = () => {
-    if (records.length > 0) return;
+    if (records.length > 0 || startProtected) return;
     if (!fallbackQueue) fallbackQueue = FALLBACK_LANDING_PATHS.map((p) => new URL(p, origin).href);
     if (sitemapFetchDone && !sitemapFallbacksAdded) {
       sitemapFallbacksAdded = true;
@@ -14232,6 +14243,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   };
   const maybeEnqueueSitemap = () => {
     if (sitemapEnqueued || !startUrlFinished || !sitemapFetchDone) return;
+    if (startProtected && records.length === 0) return;
     if (records.length === 0) startFallbacks();
     sitemapEnqueued = true;
     const remaining = Math.max(0, opts.maxPages - budgetUsed());
@@ -14277,7 +14289,6 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
       try {
         await ensureBrowser();
         context = await browser.newContext({
-          userAgent: USER_AGENT3,
           viewport: { width: 1440, height: 900 },
           ignoreHTTPSErrors: true,
           serviceWorkers: "block",
@@ -14337,7 +14348,7 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
           if (timedOut) {
             await Promise.race([
               capturePromise.catch(() => void 0),
-              new Promise((resolve3) => setTimeout(resolve3, 2e3))
+              new Promise((resolve4) => setTimeout(resolve4, 2e3))
             ]);
           }
         }
@@ -14362,8 +14373,14 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
         }
         logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
         const isStartUrl = !!startNorm && clean === startNorm;
-        if (err instanceof BotProtectionError) noteBotProtection(clean, err.vendor);
-        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite)) {
+        if (err instanceof BotProtectionError) {
+          noteBotProtection(clean, err.vendor);
+          if (isStartUrl) startProtected = true;
+        } else {
+          const refused = /^HTTP (\d{3})$/.exec(errMsg);
+          if (refused) noteRefusal(clean, Number(refused[1]));
+        }
+        if (shouldStaticSalvageOnFailure(isStartUrl, !!opts.fullSite) && !(err instanceof BotProtectionError)) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -14386,7 +14403,6 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
                 context = null;
                 await new Promise((r) => setTimeout(r, 800));
                 context = await browser.newContext({
-                  userAgent: USER_AGENT3,
                   viewport: { width: 1440, height: 900 },
                   ignoreHTTPSErrors: true,
                   serviceWorkers: "block",
@@ -15533,14 +15549,312 @@ async function backfillPageMedia(previewUrl, snapshotHtml, opts) {
   }
 }
 
+// src/helperCapture.ts
+import { createHash as createHash7 } from "crypto";
+import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5 } from "fs";
+import { extname as extname4, join as join7, resolve as resolve2 } from "path";
+import mime3 from "mime-types";
+
+// src/helperSanitize.ts
+var SENSITIVE_HEADER = /^(cookie|set-cookie|set-cookie2|authorization|proxy-authorization|www-authenticate|x-(?:csrf|xsrf)-token|x-auth[\w-]*|x-api-key|x-access-token|x-amz-security-token)$/i;
+var SENSITIVE_KEY = /^(?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|auth|authorization|session|session[_-]?id|sessionid|sid|jsessionid|phpsessid|cookie|cookies|set[_-]?cookie|password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|csrf|csrf[_-]?token|xsrf|xsrf[_-]?token|_csrf|authenticity[_-]?token|jwt|bearer|credentials?|localstorage|sessionstorage)$/i;
+var JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+var BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi;
+var REMOVED = "[removed]";
+function scrubText(text) {
+  return text.replace(JWT, REMOVED).replace(BEARER, REMOVED);
+}
+function scrubUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return scrubText(String(raw || ""));
+  }
+  u.username = "";
+  u.password = "";
+  for (const key of [...u.searchParams.keys()]) {
+    if (SENSITIVE_KEY.test(key)) u.searchParams.delete(key);
+  }
+  return scrubText(u.toString());
+}
+function scrubJson(value, depth = 0) {
+  if (depth > 40) return null;
+  if (typeof value === "string") return scrubText(value);
+  if (Array.isArray(value)) return value.map((v) => scrubJson(v, depth + 1));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (SENSITIVE_KEY.test(k) || SENSITIVE_HEADER.test(k)) continue;
+      out[k] = scrubJson(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+function scrubBody(body, contentType) {
+  if (body == null) return null;
+  const text = String(body);
+  if (/json/i.test(contentType) || /^\s*[[{]/.test(text)) {
+    try {
+      return JSON.stringify(scrubJson(JSON.parse(text)));
+    } catch {
+    }
+  }
+  return scrubText(text);
+}
+function scrubHtml(html) {
+  let out = String(html || "");
+  out = out.replace(/<meta\b[^>]*\bname\s*=\s*["']?(?:csrf[-_]?token|csrf[-_]?param|xsrf[-_]?token|_csrf)["']?[^>]*>/gi, "");
+  out = out.replace(/<input\b[^>]*>/gi, (tag) => {
+    const type = (tag.match(/\btype\s*=\s*["']?([\w-]+)/i)?.[1] || "").toLowerCase();
+    const name = tag.match(/\bname\s*=\s*["']?([^"'\s>]+)/i)?.[1] || "";
+    const sensitive = type === "password" || type === "hidden" && (SENSITIVE_KEY.test(name) || /token|csrf|xsrf|session|auth/i.test(name));
+    return sensitive ? tag.replace(/\svalue\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i, "") : tag;
+  });
+  return scrubText(out);
+}
+function sanitizeHelperBundle(input) {
+  const b = input && typeof input === "object" ? input : {};
+  const str = (v) => typeof v === "string" ? v : "";
+  const assets = Array.isArray(b.assets) ? b.assets : [];
+  const network = Array.isArray(b.networkRecord) ? b.networkRecord : [];
+  return {
+    v: 1,
+    url: scrubUrl(str(b.url)),
+    title: str(b.title).slice(0, 300),
+    capturedAt: str(b.capturedAt).slice(0, 40),
+    serverHtml: scrubHtml(str(b.serverHtml)),
+    domSnapshot: scrubHtml(str(b.domSnapshot)),
+    assets: assets.filter((a) => !!a && typeof a === "object" && typeof a.url === "string").map((a) => {
+      const asset = { url: scrubUrl(str(a.url)), contentType: str(a.contentType).slice(0, 120) };
+      if (typeof a.data === "string" && a.data) asset.data = a.data;
+      return asset;
+    }),
+    networkRecord: network.filter((n) => !!n && typeof n === "object" && typeof n.url === "string").filter((n) => String(n.method || "GET").toUpperCase() === "GET").map((n) => {
+      const contentType = str(n.contentType).slice(0, 120);
+      return {
+        method: "GET",
+        url: scrubUrl(str(n.url)),
+        status: Number(n.status) || 0,
+        contentType,
+        body: scrubBody(typeof n.body === "string" ? n.body : null, contentType)
+      };
+    })
+  };
+}
+function findCredentialLeaks(input) {
+  const leaks = [];
+  const walk = (value, path, depth) => {
+    if (depth > 60) return;
+    if (typeof value === "string") {
+      if (new RegExp(JWT.source).test(value)) leaks.push(`${path}: JSON Web Token`);
+      if (new RegExp(BEARER.source, "i").test(value)) leaks.push(`${path}: Bearer token`);
+      if (/^https?:\/\//i.test(value)) {
+        try {
+          for (const key of new URL(value).searchParams.keys()) {
+            if (SENSITIVE_KEY.test(key)) leaks.push(`${path}: query parameter "${key}"`);
+          }
+        } catch {
+        }
+      }
+      if (/^\s*[[{]/.test(value)) {
+        try {
+          walk(JSON.parse(value), `${path}<json>`, depth + 1);
+        } catch {
+        }
+      }
+      if (/<meta\b[^>]*name\s*=\s*["']?csrf/i.test(value)) leaks.push(`${path}: CSRF meta tag`);
+      if (/<input\b[^>]*type\s*=\s*["']?password[^>]*\svalue\s*=\s*["']?[^"'\s>]/i.test(value)) leaks.push(`${path}: password field value`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((v, i) => walk(v, `${path}[${i}]`, depth + 1));
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        if (SENSITIVE_HEADER.test(k) || SENSITIVE_KEY.test(k)) leaks.push(`${path}.${k}: credential field`);
+        if (k === "data" && /assets\[\d+\]$/.test(path)) continue;
+        walk(v, `${path}.${k}`, depth + 1);
+      }
+    }
+  };
+  walk(input, "bundle", 0);
+  return leaks;
+}
+
+// src/helperCapture.ts
+var MAX_ASSET_BYTES2 = 50 * 1024 * 1024;
+var MAX_REMOTE_FETCHES = 400;
+var REMOTE_CONCURRENCY = 8;
+function extFor(url, contentType) {
+  let fromPath = "";
+  try {
+    fromPath = extname4(new URL(url).pathname).toLowerCase();
+  } catch {
+  }
+  if (fromPath && fromPath.length <= 6) return fromPath;
+  const fromMime = mime3.extension(contentType.split(";")[0].trim());
+  return fromMime ? `.${fromMime}` : ".bin";
+}
+async function runHelperCapture(rawBundle, options, events = {}) {
+  const out = resolve2(options.out);
+  setLogSink(events.onLog ? (line) => events.onLog?.(line) : null);
+  initLogger(out, options.verbose);
+  try {
+    const bundle = sanitizeHelperBundle(rawBundle);
+    const leaks = findCredentialLeaks(bundle);
+    if (leaks.length) {
+      throw new Error(`Helper capture refused: credential data in the bundle (${leaks.slice(0, 3).join("; ")})`);
+    }
+    let targetOrigin;
+    try {
+      targetOrigin = new URL(bundle.url).origin;
+    } catch {
+      throw new Error("Helper capture has no valid page URL");
+    }
+    if (!bundle.domSnapshot || bundle.domSnapshot.length < 200) throw new Error("Helper capture contains no page content");
+    logger.info("\nCLONYFY v0.1 \u2014 Clonyfy Helper capture");
+    logger.info(`Target      : ${bundle.url}`);
+    logger.info(`Output      : ${out}`);
+    logger.info(`Captured in : the user's own browser (${bundle.capturedAt || "now"})`);
+    logger.info(`Files       : ${bundle.assets.filter((a) => a.data).length} read in the browser, ${bundle.assets.filter((a) => !a.data).length} to download`);
+    const assetsDir = join7(out, "public", "_assets");
+    const capturedPagesDir = join7(out, "captured-pages");
+    mkdirSync6(assetsDir, { recursive: true });
+    mkdirSync6(capturedPagesDir, { recursive: true });
+    const notifyArtifact = async (event) => {
+      if (!events.onArtifactWritten) return;
+      try {
+        await events.onArtifactWritten(event);
+      } catch (err) {
+        logger.warn(`  [OFFLOAD] ${event.relPath}: ${err.message}`);
+        if (event.kind === "page" || event.kind === "route-map" || event.kind === "manifest") throw err;
+      }
+    };
+    const assets = [];
+    const assetMap = /* @__PURE__ */ new Map();
+    const cssFiles = [];
+    const failed = [];
+    const save = async (url, body, contentType) => {
+      if (body.length > MAX_ASSET_BYTES2) {
+        failed.push(url);
+        return;
+      }
+      const ext = extFor(url, contentType);
+      const filename2 = `${createHash7("sha1").update(body).digest("hex").slice(0, 16)}${ext}`;
+      const localPath = join7(assetsDir, filename2);
+      const webPath = `/_assets/${filename2}`;
+      writeFileSync5(localPath, body);
+      await notifyArtifact({ relPath: `public/_assets/${filename2}`, absPath: localPath, kind: "asset" });
+      assets.push({ originalUrl: url, localPath: webPath });
+      assetMap.set(url, webPath);
+      assetMap.set(url.split("?")[0].split("#")[0], webPath);
+      try {
+        assetMap.set(new URL(url).pathname, webPath);
+      } catch {
+      }
+      if (ext === ".css" || /text\/css/i.test(contentType)) cssFiles.push({ path: localPath, text: body.toString("utf8"), sourceUrl: url });
+    };
+    for (const a of bundle.assets) {
+      if (!a.data) continue;
+      try {
+        await save(a.url, Buffer.from(a.data, "base64"), a.contentType);
+      } catch (err) {
+        logger.debug(`  [HELPER ASSET] ${a.url}: ${err.message}`);
+        failed.push(a.url);
+      }
+    }
+    const remote = new Set(bundle.assets.filter((a) => !a.data).map((a) => a.url));
+    for (const css of cssFiles) {
+      for (const ref of extractCssUrls(css.text)) {
+        try {
+          const abs = new URL(ref, css.sourceUrl).href;
+          if (!assetMap.has(abs) && /^https?:/i.test(abs)) remote.add(abs);
+        } catch {
+        }
+      }
+    }
+    const queue = [...remote].filter((u) => !assetMap.has(u)).slice(0, MAX_REMOTE_FETCHES);
+    let downloaded = 0;
+    const worker = async () => {
+      for (let url = queue.shift(); url; url = queue.shift()) {
+        try {
+          const r = await safeFetch(url, {
+            headers: { "User-Agent": CLONYFY_USER_AGENT, Referer: `${targetOrigin}/` },
+            signal: AbortSignal.timeout(15e3)
+          });
+          if (!r.ok) {
+            failed.push(url);
+            await r.body?.cancel().catch(() => {
+            });
+            continue;
+          }
+          await save(url, Buffer.from(await r.arrayBuffer()), r.headers.get("content-type") || "");
+          downloaded++;
+        } catch {
+          failed.push(url);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: REMOTE_CONCURRENCY }, worker));
+    for (const css of cssFiles) {
+      writeFileSync5(css.path, rewriteCssUrls(css.text, assetMap, css.sourceUrl), "utf8");
+    }
+    logger.info(`  Files saved: ${assets.length} (${downloaded} downloaded by the server), ${failed.length} unavailable`);
+    const network = bundle.networkRecord.map((n) => ({
+      method: n.method,
+      url: n.url,
+      postData: null,
+      status: n.status,
+      contentType: n.contentType,
+      body: n.body
+    }));
+    const route = routeForUrl(bundle.url);
+    const record = {
+      url: bundle.url,
+      route,
+      html: "",
+      serverHtml: bundle.serverHtml || void 0,
+      assets,
+      network,
+      failedAssets: failed
+    };
+    record.html = rewriteHtml({ ...record, html: bundle.domSnapshot }, targetOrigin);
+    const routeMap = {};
+    const pageFilename = (r) => `${safeName(r)}.html`;
+    const filename = pageFilename(route);
+    writeFileSync5(join7(capturedPagesDir, filename), record.html, "utf8");
+    routeMap[route] = filename;
+    logger.info(`  [1/1] \u2713 ${bundle.url}  (assets: ${assets.length}, network: ${network.length})`);
+    const opts = { url: bundle.url, out, maxPages: 1, depth: 1, ignoreRobots: true, concurrency: 1 };
+    return await finishClone(opts, [record], {
+      targetOrigin,
+      capturedPagesDir,
+      routeMap,
+      pageFilename,
+      notifyArtifact,
+      rewriteStats: [{ url: bundle.url, assets: assets.length, network: network.length }]
+    });
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : "Helper capture failed", err);
+    throw err;
+  } finally {
+    logger.close();
+    setLogSink(null);
+  }
+}
+
 // src/runClone.ts
+var NEEDS_HELPER_MARKER = "[NEEDS_HELPER]";
 var IS_SERVERLESS2 = isServerlessRuntime();
 var IS_FAST_CLONE2 = isFastCloneProfile();
 var SKIP_NEXT_GEN = IS_SERVERLESS2 || IS_FAST_CLONE2 || process.env.CLONYFY_SKIP_NEXT === "1" || process.env.CLONYFY_SKIP_NEXT === "true";
 async function runClone(options, events = {}) {
   const opts = {
     ...options,
-    out: resolve2(options.out)
+    out: resolve3(options.out)
   };
   setLogSink(events.onLog ? (line) => events.onLog?.(line) : null);
   initLogger(opts.out, opts.verbose);
@@ -15553,7 +15867,7 @@ CLONYFY v0.1`);
     if (opts.fullSite) {
       logger.info("Full-site mode: crawling all discoverable same-origin pages until the page budget is reached.");
     }
-    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
+    logger.info(`Log file    : ${join8(opts.out, "cloner.log")}`);
     logger.info(`Tip         : run with --verbose (or DEBUG=1) to see per-asset/rewrite detail on the console`);
     let targetOrigin;
     try {
@@ -15573,10 +15887,10 @@ CLONYFY v0.1`);
     } else {
       logger.info("robots.txt check skipped (--ignore-robots)");
     }
-    const assetsDir = join7(opts.out, "public", "_assets");
-    mkdirSync6(assetsDir, { recursive: true });
-    const capturedPagesDir = join7(opts.out, "captured-pages");
-    mkdirSync6(capturedPagesDir, { recursive: true });
+    const assetsDir = join8(opts.out, "public", "_assets");
+    mkdirSync7(assetsDir, { recursive: true });
+    const capturedPagesDir = join8(opts.out, "captured-pages");
+    mkdirSync7(capturedPagesDir, { recursive: true });
     const routeMap = {};
     const pageFilename = (route) => `${safeName(route)}.html`;
     async function notifyArtifact(event) {
@@ -15608,7 +15922,7 @@ CLONYFY v0.1`);
       logger.info(`  [${pagesCompleted}/${opts.maxPages}] \u2713 ${page.url}  (assets: ${page.assets.length}, network: ${page.network.length})`);
       try {
         const filename = pageFilename(page.route);
-        const pagePath = join7(capturedPagesDir, filename);
+        const pagePath = join8(capturedPagesDir, filename);
         if (existsSync6(pagePath)) {
           const existing = readFileSync3(pagePath, "utf8");
           if (!shouldReplaceCapturedHtml(existing, page.html)) {
@@ -15617,10 +15931,10 @@ CLONYFY v0.1`);
             return;
           }
         }
-        writeFileSync5(pagePath, page.html, "utf8");
+        writeFileSync6(pagePath, page.html, "utf8");
         routeMap[page.route] = filename;
-        const routeMapPath = join7(opts.out, "route-map.json");
-        writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
+        const routeMapPath = join8(opts.out, "route-map.json");
+        writeFileSync6(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
         await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
         await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
       } catch (writeErr) {
@@ -15633,6 +15947,7 @@ CLONYFY v0.1`);
 Captured ${records.length} page(s).`);
     const blockedBy = takeBotProtection(opts.url);
     if (records.length === 0 && blockedBy) {
+      logger.info(`${NEEDS_HELPER_MARKER} ${JSON.stringify({ vendor: blockedBy, url: opts.url })}`);
       throw new Error(botProtectionMessage(opts.url, blockedBy));
     }
     if (records.length === 0) {
@@ -15640,155 +15955,14 @@ Captured ${records.length} page(s).`);
         "Clone captured 0 pages. The site timed out, blocked the browser session, or returned no HTML. Try again \u2014 for stubborn sites, uncheck \u201CRespect robots.txt\u201D and retry once."
       );
     }
-    logger.info("\n--- Page Summary ---");
-    for (const s of rewriteStats) {
-      logger.info(`  ${s.url}`);
-      logger.info(`    assets=${s.assets}  network_entries=${s.network}`);
-    }
-    const seenRoutes = /* @__PURE__ */ new Set();
-    const uniqueRecords = records.filter((r) => {
-      if (seenRoutes.has(r.route)) {
-        logger.debug(`  [DEDUP] Skipping duplicate route ${r.route} from ${r.url}`);
-        return false;
-      }
-      seenRoutes.add(r.route);
-      return true;
-    });
-    if (uniqueRecords.length < records.length) {
-      logger.info(`  Deduplicated ${records.length - uniqueRecords.length} duplicate route(s).`);
-    }
-    const completeAssetMap = /* @__PURE__ */ new Map();
-    for (const record of uniqueRecords) {
-      for (const asset of record.assets) {
-        completeAssetMap.set(asset.originalUrl, asset);
-        completeAssetMap.set(asset.originalUrl.split("?")[0].split("#")[0], asset);
-      }
-    }
-    const completeAssets = [...completeAssetMap.values()];
-    const liveCheckPages = [];
-    for (const record of uniqueRecords) {
-      record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
-      try {
-        const filename = pageFilename(record.route);
-        const pagePath = join7(capturedPagesDir, filename);
-        writeFileSync5(pagePath, record.html, "utf8");
-        routeMap[record.route] = filename;
-        await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
-        if (record.serverHtml) {
-          const serverName = filename.replace(/\.html$/i, ".server.html");
-          const serverPath = join7(capturedPagesDir, serverName);
-          const originRe = new RegExp(targetOrigin.replace(/\/$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=/)", "g");
-          const serverHtml = record.serverHtml.replace(
-            /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
-            (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, "")}${quote}`
-          );
-          writeFileSync5(serverPath, serverHtml, "utf8");
-          await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: "page" });
-          liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
-          delete record.serverHtml;
-        }
-        delete record.liveScreenshot;
-      } catch (writeErr) {
-        logger.warn(`  [WRITE ERR] final ${record.url}: ${writeErr.message}`);
-      }
-    }
-    if (liveCheckPages.length && !IS_SERVERLESS2 && !IS_FAST_CLONE2) {
-      try {
-        const modes = await choosePreviewModes(liveCheckPages, completeAssets, join7(opts.out, "public"));
-        const modesPath = join7(opts.out, "preview-mode.json");
-        writeFileSync5(modesPath, JSON.stringify(modes, null, 2), "utf8");
-        await notifyArtifact({ relPath: "preview-mode.json", absPath: modesPath, kind: "route-map" });
-      } catch (modeErr) {
-        logger.debug(`  [PREVIEW MODE] skipped: ${modeErr.message}`);
-      }
-    }
-    for (const r of records) delete r.liveScreenshot;
-    try {
-      const routeMapPath = join7(opts.out, "route-map.json");
-      writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
-      await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
-    } catch (writeErr) {
-      logger.warn(`  [WRITE ERR] route-map.json: ${writeErr.message}`);
-    }
-    const allNetwork = uniqueRecords.flatMap((r) => r.network);
-    logger.info(`
-Total network entries across all pages: ${allNetwork.length}`);
-    const apiRoutes = analyzeTraffic(allNetwork, targetOrigin);
-    logger.info(`Detected ${apiRoutes.length} API route(s).`);
-    if (apiRoutes.length > 0) {
-      logger.info("\n--- API Routes ---");
-      for (const r of apiRoutes) {
-        const tag = r.looksLikeForm ? " [FORM]" : "";
-        logger.info(`  ${r.method.padEnd(6)} ${r.path}${tag}`);
-        logger.debug(`    fixture=${r.fixtureKey}  fields=${r.inferredFields.join(", ")}`);
-        for (const resp of r.responses) {
-          logger.debug(`    response: HTTP ${resp.status}`);
-        }
-      }
-    }
-    const uniqueAssets = new Set(uniqueRecords.flatMap((r) => r.assets.map((a) => a.localPath)));
-    logger.info(`
-Total unique assets saved: ${uniqueAssets.size}`);
-    logger.info("\n--- Captured Routes ---");
-    for (const r of uniqueRecords) {
-      logger.info(`  ${r.route}`);
-    }
-    const allConsoleErrors = uniqueRecords.flatMap(
-      (r) => r.network.filter((n) => n.method === "CONSOLE_ERROR").map((n) => ({ url: r.url, body: n.body }))
-    );
-    if (allConsoleErrors.length > 0) {
-      logger.info("\n--- Console Errors ---");
-      for (const e of allConsoleErrors) {
-        logger.info(`  Page: ${e.url}`);
-        logger.info(`  ${e.body}`);
-      }
-    } else {
-      logger.info("\nNo console errors recorded.");
-    }
-    const manifest = {
+    return await finishClone(opts, records, {
       targetOrigin,
-      capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      pages: uniqueRecords.map((r) => ({
-        url: r.url,
-        route: r.route,
-        html: "",
-        // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
-        // so manifest.json stays under Supabase Free storage limits (~50MB).
-        assets: r.assets,
-        network: IS_SERVERLESS2 || IS_FAST_CLONE2 ? [] : r.network,
-        failedAssets: r.failedAssets,
-        failedAssetReasons: r.failedAssetReasons
-      }))
-    };
-    const manifestPath = join7(opts.out, "manifest.json");
-    const manifestJson = IS_SERVERLESS2 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
-    writeFileSync5(manifestPath, manifestJson, "utf8");
-    await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
-    if (!SKIP_NEXT_GEN) {
-      logger.info("\nGenerating Next.js app...");
-      const fullManifest = { ...manifest, pages: uniqueRecords };
-      await generateNextApp(opts.out, fullManifest, apiRoutes);
-    } else {
-      logger.info("\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).");
-    }
-    logger.info("\n=== DONE ===");
-    logger.info(`Output dir  : ${opts.out}`);
-    logger.info(`Pages       : ${uniqueRecords.length}`);
-    logger.info(`Assets      : ${uniqueAssets.size}`);
-    logger.info(`API routes  : ${apiRoutes.length}`);
-    logger.info(`Log file    : ${join7(opts.out, "cloner.log")}`);
-    logger.info(`
-Next steps:`);
-    logger.info(`  cd "${opts.out}"`);
-    logger.info(`  npm install`);
-    logger.info(`  npm run dev    # -> http://localhost:3000`);
-    return {
-      outDir: opts.out,
-      pages: uniqueRecords.length,
-      assets: uniqueAssets.size,
-      apiRoutes: apiRoutes.length,
-      logFile: join7(opts.out, "cloner.log")
-    };
+      capturedPagesDir,
+      routeMap,
+      pageFilename,
+      notifyArtifact,
+      rewriteStats
+    });
   } catch (err) {
     logger.error(err instanceof Error ? err.message : "Clone failed", err);
     throw err;
@@ -15797,18 +15971,170 @@ Next steps:`);
     setLogSink(null);
   }
 }
+async function finishClone(opts, records, ctx) {
+  const { targetOrigin, capturedPagesDir, routeMap, pageFilename, notifyArtifact, rewriteStats } = ctx;
+  logger.info("\n--- Page Summary ---");
+  for (const s of rewriteStats) {
+    logger.info(`  ${s.url}`);
+    logger.info(`    assets=${s.assets}  network_entries=${s.network}`);
+  }
+  const seenRoutes = /* @__PURE__ */ new Set();
+  const uniqueRecords = records.filter((r) => {
+    if (seenRoutes.has(r.route)) {
+      logger.debug(`  [DEDUP] Skipping duplicate route ${r.route} from ${r.url}`);
+      return false;
+    }
+    seenRoutes.add(r.route);
+    return true;
+  });
+  if (uniqueRecords.length < records.length) {
+    logger.info(`  Deduplicated ${records.length - uniqueRecords.length} duplicate route(s).`);
+  }
+  const completeAssetMap = /* @__PURE__ */ new Map();
+  for (const record of uniqueRecords) {
+    for (const asset of record.assets) {
+      completeAssetMap.set(asset.originalUrl, asset);
+      completeAssetMap.set(asset.originalUrl.split("?")[0].split("#")[0], asset);
+    }
+  }
+  const completeAssets = [...completeAssetMap.values()];
+  const liveCheckPages = [];
+  for (const record of uniqueRecords) {
+    record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
+    try {
+      const filename = pageFilename(record.route);
+      const pagePath = join8(capturedPagesDir, filename);
+      writeFileSync6(pagePath, record.html, "utf8");
+      routeMap[record.route] = filename;
+      await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
+      if (record.serverHtml) {
+        const serverName = filename.replace(/\.html$/i, ".server.html");
+        const serverPath = join8(capturedPagesDir, serverName);
+        const originRe = new RegExp(targetOrigin.replace(/\/$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=/)", "g");
+        const serverHtml = record.serverHtml.replace(
+          /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
+          (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, "")}${quote}`
+        );
+        writeFileSync6(serverPath, serverHtml, "utf8");
+        await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: "page" });
+        liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
+        delete record.serverHtml;
+      }
+      delete record.liveScreenshot;
+    } catch (writeErr) {
+      logger.warn(`  [WRITE ERR] final ${record.url}: ${writeErr.message}`);
+    }
+  }
+  if (liveCheckPages.length && !IS_SERVERLESS2 && !IS_FAST_CLONE2) {
+    try {
+      const modes = await choosePreviewModes(liveCheckPages, completeAssets, join8(opts.out, "public"));
+      const modesPath = join8(opts.out, "preview-mode.json");
+      writeFileSync6(modesPath, JSON.stringify(modes, null, 2), "utf8");
+      await notifyArtifact({ relPath: "preview-mode.json", absPath: modesPath, kind: "route-map" });
+    } catch (modeErr) {
+      logger.debug(`  [PREVIEW MODE] skipped: ${modeErr.message}`);
+    }
+  }
+  for (const r of records) delete r.liveScreenshot;
+  try {
+    const routeMapPath = join8(opts.out, "route-map.json");
+    writeFileSync6(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
+    await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
+  } catch (writeErr) {
+    logger.warn(`  [WRITE ERR] route-map.json: ${writeErr.message}`);
+  }
+  const allNetwork = uniqueRecords.flatMap((r) => r.network);
+  logger.info(`
+Total network entries across all pages: ${allNetwork.length}`);
+  const apiRoutes = analyzeTraffic(allNetwork, targetOrigin);
+  logger.info(`Detected ${apiRoutes.length} API route(s).`);
+  if (apiRoutes.length > 0) {
+    logger.info("\n--- API Routes ---");
+    for (const r of apiRoutes) {
+      const tag = r.looksLikeForm ? " [FORM]" : "";
+      logger.info(`  ${r.method.padEnd(6)} ${r.path}${tag}`);
+      logger.debug(`    fixture=${r.fixtureKey}  fields=${r.inferredFields.join(", ")}`);
+      for (const resp of r.responses) {
+        logger.debug(`    response: HTTP ${resp.status}`);
+      }
+    }
+  }
+  const uniqueAssets = new Set(uniqueRecords.flatMap((r) => r.assets.map((a) => a.localPath)));
+  logger.info(`
+Total unique assets saved: ${uniqueAssets.size}`);
+  logger.info("\n--- Captured Routes ---");
+  for (const r of uniqueRecords) {
+    logger.info(`  ${r.route}`);
+  }
+  const allConsoleErrors = uniqueRecords.flatMap(
+    (r) => r.network.filter((n) => n.method === "CONSOLE_ERROR").map((n) => ({ url: r.url, body: n.body }))
+  );
+  if (allConsoleErrors.length > 0) {
+    logger.info("\n--- Console Errors ---");
+    for (const e of allConsoleErrors) {
+      logger.info(`  Page: ${e.url}`);
+      logger.info(`  ${e.body}`);
+    }
+  } else {
+    logger.info("\nNo console errors recorded.");
+  }
+  const manifest = {
+    targetOrigin,
+    capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    pages: uniqueRecords.map((r) => ({
+      url: r.url,
+      route: r.route,
+      html: "",
+      // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
+      // so manifest.json stays under Supabase Free storage limits (~50MB).
+      assets: r.assets,
+      network: IS_SERVERLESS2 || IS_FAST_CLONE2 ? [] : r.network,
+      failedAssets: r.failedAssets,
+      failedAssetReasons: r.failedAssetReasons
+    }))
+  };
+  const manifestPath = join8(opts.out, "manifest.json");
+  const manifestJson = IS_SERVERLESS2 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
+  writeFileSync6(manifestPath, manifestJson, "utf8");
+  await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
+  if (!SKIP_NEXT_GEN) {
+    logger.info("\nGenerating Next.js app...");
+    const fullManifest = { ...manifest, pages: uniqueRecords };
+    await generateNextApp(opts.out, fullManifest, apiRoutes);
+  } else {
+    logger.info("\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).");
+  }
+  logger.info("\n=== DONE ===");
+  logger.info(`Output dir  : ${opts.out}`);
+  logger.info(`Pages       : ${uniqueRecords.length}`);
+  logger.info(`Assets      : ${uniqueAssets.size}`);
+  logger.info(`API routes  : ${apiRoutes.length}`);
+  logger.info(`Log file    : ${join8(opts.out, "cloner.log")}`);
+  logger.info(`
+Next steps:`);
+  logger.info(`  cd "${opts.out}"`);
+  logger.info(`  npm install`);
+  logger.info(`  npm run dev    # -> http://localhost:3000`);
+  return {
+    outDir: opts.out,
+    pages: uniqueRecords.length,
+    assets: uniqueAssets.size,
+    apiRoutes: apiRoutes.length,
+    logFile: join8(opts.out, "cloner.log")
+  };
+}
 async function regenerateCloneProject(outDir) {
-  const manifestPath = join7(outDir, "manifest.json");
+  const manifestPath = join8(outDir, "manifest.json");
   if (!existsSync6(manifestPath)) {
     throw new Error("manifest.json not found \u2014 cannot regenerate export project");
   }
   const manifest = JSON.parse(readFileSync3(manifestPath, "utf8"));
-  const routeMapPath = join7(outDir, "route-map.json");
+  const routeMapPath = join8(outDir, "route-map.json");
   const routeMap = existsSync6(routeMapPath) ? JSON.parse(readFileSync3(routeMapPath, "utf8")) : {};
-  const capturedPagesDir = join7(outDir, "captured-pages");
+  const capturedPagesDir = join8(outDir, "captured-pages");
   const readPageHtml = (route) => {
     const filename = routeMap[route] || `${safeName(route)}.html`;
-    const htmlPath = join7(capturedPagesDir, filename);
+    const htmlPath = join8(capturedPagesDir, filename);
     return existsSync6(htmlPath) ? readFileSync3(htmlPath, "utf8") : "";
   };
   let pages = (manifest.pages || []).map((page) => ({
@@ -15817,7 +16143,7 @@ async function regenerateCloneProject(outDir) {
   }));
   if (!pages.length && Object.keys(routeMap).length) {
     pages = Object.entries(routeMap).filter(([route]) => !route.endsWith(".html")).map(([route, filename]) => {
-      const htmlPath = join7(capturedPagesDir, filename);
+      const htmlPath = join8(capturedPagesDir, filename);
       return {
         url: `${manifest.targetOrigin}${route}`,
         route,
@@ -15838,7 +16164,12 @@ export {
   logger,
   backfillScrollTimeline,
   backfillPageMedia,
+  sanitizeHelperBundle,
+  findCredentialLeaks,
+  runHelperCapture,
+  NEEDS_HELPER_MARKER,
   runClone,
+  finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-GONBSHB5.js.map
+//# sourceMappingURL=chunk-CTGYYZL3.js.map

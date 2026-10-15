@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import { spawn } from 'child_process';
-import { randomUUID, createHash, createHmac, timingSafeEqual } from 'crypto';
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
 import { resolve, join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync, createReadStream, createWriteStream, copyFileSync, openSync, closeSync, readSync } from 'fs';
@@ -10,7 +10,7 @@ import { lookup as dnsLookup, Resolver as DnsResolver } from 'dns/promises';
 import { createRequire } from 'module';
 import { tmpdir, totalmem } from 'os';
 import 'dotenv/config';
-import { runClone, regenerateCloneProject, backfillPageMedia } from './packages/cloner/dist/runClone.js';
+import { runClone, regenerateCloneProject, backfillPageMedia, runHelperCapture } from './packages/cloner/dist/runClone.js';
 import {
   getUserById, getUserByEmail, getAllUsers, getUsersPage, getClonesByUserIds, insertUser, updateUser, deleteUser,
   getUserByVerifyToken, getUserByResetToken,
@@ -1513,6 +1513,18 @@ function requestHost(req) {
   return String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
 }
 
+/**
+ * The server's own headless browser (editor animation/canvas backfill) opens interactive
+ * previews at http://127.0.0.1:PORT — not the preview host — so it needs the file mirror
+ * there too. Only a direct local connection to a loopback Host qualifies (never via nginx).
+ */
+function isLoopbackRequest(req) {
+  const peer = String(req.socket?.remoteAddress || '');
+  const host = requestHost(req).replace(/:\d+$/, '');
+  return /^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(peer) && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(host)
+    && !req.headers['x-forwarded-for'];
+}
+
 function isPreviewHostRequest(req) {
   const origin = previewOriginUrl();
   if (!origin) return false;
@@ -2228,6 +2240,28 @@ async function readCloneThemeId(outDir) {
 
 function jobStoragePath(id) {
   return `job:${id}`;
+}
+
+/** How long a "clone it with the Clonyfy Helper" offer stays valid. */
+const HELPER_CAPTURE_TTL_MS = 60 * 60 * 1000;
+/** Largest helper bundle accepted (page + its files, base64 inside JSON). */
+const HELPER_BUNDLE_LIMIT_BYTES = 180_000_000;
+
+/** The cloner logs this when a site's bot protection blocked the server's browser. */
+function readNeedsHelper(logs) {
+  for (let i = (logs?.length || 0) - 1; i >= 0; i--) {
+    const line = String(logs[i] || '');
+    const at = line.indexOf('[NEEDS_HELPER]');
+    if (at < 0) continue;
+    try { return JSON.parse(line.slice(at + '[NEEDS_HELPER]'.length).trim()); } catch { return { vendor: 'bot protection' }; }
+  }
+  return null;
+}
+
+/** Same site, ignoring "www." (zillow.com ↔ www.zillow.com). */
+function sameSiteHost(a, b) {
+  const bare = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
+  return !!a && !!b && bare(a) === bare(b);
 }
 
 function jobSnapshot(job) {
@@ -3838,6 +3872,7 @@ function userPublic(u) {
     // Paid plan with no subscription behind it = granted by hand (team, comp, support).
     billingSource: !isPaidPlan(plan) ? null : u.whop_membership_id ? 'whop' : u.stripe_subscription_id ? 'stripe' : 'manual',
     createdAt: u.created_at,
+    helperInstalled: !!u.helper_installed_at,
   };
 }
 
@@ -4710,7 +4745,7 @@ async function handleRequest(req, res) {
   // where the dashboard lives elsewhere), and only for a validly signed preview.
   if ((req.method === 'GET' || req.method === 'HEAD')
     && !/^\/(api|share|_assets)\//.test(url.pathname)
-    && (isPreviewHostRequest(req) || !previewOriginUrl())) {
+    && (isPreviewHostRequest(req) || !previewOriginUrl() || isLoopbackRequest(req))) {
     const mirrorOutDir = previewMirrorTarget(req);
     if (mirrorOutDir) {
       const index = await previewMirrorIndex(mirrorOutDir).catch(() => null);
@@ -5657,6 +5692,69 @@ async function handleRequest(req, res) {
 
   // ── Clone ──────────────────────────────────────────────────────────────────
 
+  // ── Clonyfy Helper ───────────────────────────────────────────────────────────
+  // The browser extension captured a protected page in the user's own tab. Turn that
+  // bundle into the clone of the job that was blocked, through the normal pipeline.
+  if (req.method === 'POST' && url.pathname === '/api/helper/capture') {
+    const job = jobs.get(String(url.searchParams.get('job') || ''));
+    const token = String(req.headers['x-helper-token'] || '');
+    const expected = job?.helper?.token || '';
+    const tokenOk = !!token && !!expected && token.length === expected.length
+      && timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+    if (!job || !tokenOk) return json(res, { error: 'This capture is not valid any more. Start the clone again.' }, 404);
+    if (Date.now() > job.helper.expiresAt) return json(res, { error: 'This capture expired. Start the clone again.' }, 410);
+    if (job.status !== 'needs_helper' || typeof job.finalize !== 'function') {
+      return json(res, { error: 'This clone can no longer receive a capture. Start the clone again.' }, 409);
+    }
+    let bundle;
+    try { bundle = await readJsonBody(req, HELPER_BUNDLE_LIMIT_BYTES); } catch (err) {
+      const tooLarge = err?.message === 'request too large';
+      return json(res, { error: tooLarge ? 'The captured page is too large to upload.' : 'Invalid capture data.' }, tooLarge ? 413 : 400);
+    }
+    let capturedHost = '';
+    try { capturedHost = new URL(String(bundle?.url || '')).hostname; } catch {}
+    if (!sameSiteHost(capturedHost, job.hostname)) {
+      return json(res, { error: `The captured tab shows ${capturedHost || 'another page'}, not ${job.hostname}.` }, 400);
+    }
+    const vendor = job.helper.vendor;
+    job.helper = null; // one capture per offer; a failure below issues a fresh one
+    job.helperVendor = vendor;
+    job.status = 'running';
+    job.logs.push(`[INFO] Received the page from the Clonyfy Helper — building the clone of ${job.hostname}.`);
+    persistJob(job, { force: true });
+    json(res, { ok: true, id: job.id }, 202);
+    void (async () => {
+      try {
+        const result = await runHelperCapture(bundle, { out: job.outDir }, {
+          onLog: (line) => { if (line) job.logs.push(line); persistJob(job); },
+          onArtifactWritten: job.offloadQueue ? (event) => job.offloadQueue.offload(event) : undefined,
+        });
+        if (job.offloadQueue) await job.offloadQueue.flush();
+        job.pages = result.pages;
+        job.assets = result.assets;
+        job.apiRoutes = result.apiRoutes;
+        await job.finalize(0);
+      } catch (err) {
+        job.logs.push(`[ERROR] ${err?.message || err}`);
+        await job.finalize(1).catch(() => {});
+      }
+    })();
+    return;
+  }
+
+  // The extension is installed: remember it, so the install card never shows again.
+  if (req.method === 'POST' && url.pathname === '/api/helper/installed') {
+    const helperUser = await getSessionUser(req);
+    if (!helperUser) return json(res, { error: 'Not authenticated' }, 401);
+    if (!helperUser.helper_installed_at) {
+      await updateUser(helperUser.id, { helper_installed_at: new Date().toISOString() }).catch((err) => {
+        console.warn('[helper] could not save install flag:', err?.message || err);
+      });
+      _invalidateUserSessions(helperUser.id);
+    }
+    return json(res, { ok: true, helperInstalled: true });
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/clone') {
     const cloneUser = await getSessionUser(req);
     if (!cloneUser) return json(res, { error: 'Sign in to clone a website.' }, 401);
@@ -5950,7 +6048,21 @@ async function handleRequest(req, res) {
           }
         }
         persistJob(job, { force: true });
-        if (!cloneSucceeded) {
+        // Blocked by bot protection: offer the Clonyfy Helper instead of a dead end. The user
+        // captures the page in their own browser; the server never tries to get past the check.
+        const needsHelper = !cloneSucceeded && !job.pages ? readNeedsHelper(job.logs) : null;
+        if (needsHelper) {
+          job.status = 'needs_helper';
+          job.helper = {
+            vendor: String(needsHelper.vendor || 'bot protection'),
+            url: job.url,
+            token: randomBytes(24).toString('base64url'),
+            expiresAt: Date.now() + HELPER_CAPTURE_TTL_MS,
+          };
+          job.logs.push(`[INFO] ${job.hostname} is protected by ${job.helper.vendor}. Clone it with the Clonyfy Helper: it captures the page in your own browser.`);
+          persistJob(job, { force: true });
+        }
+        if (!cloneSucceeded && !needsHelper) {
           try {
             const errorLines = job.logs.filter(l => l.startsWith('[ERROR]') || l.toLowerCase().includes('error'));
             await insertError({
@@ -5980,6 +6092,9 @@ async function handleRequest(req, res) {
           }
         }
       };
+
+      // A helper capture (protected site) finishes through this exact same step.
+      job.finalize = finalizeCloneJob;
 
       if (USE_INLINE_CLONE) {
         // Never block the HTTP response on the crawl — Frontend needs job.id immediately to poll.

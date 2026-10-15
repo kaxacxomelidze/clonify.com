@@ -9,6 +9,9 @@ COPY . .
 
 ARG VITE_API_BASE_URL=https://clonyfy.com
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+# Chrome Web Store / Edge Add-ons link of the Clonyfy Helper (empty = offer the zip download).
+ARG VITE_HELPER_INSTALL_URL=
+ENV VITE_HELPER_INSTALL_URL=${VITE_HELPER_INSTALL_URL}
 
 RUN npm run build
 

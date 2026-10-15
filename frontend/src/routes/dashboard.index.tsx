@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Check, Download, Figma, Github, Globe, Pencil, Play, RotateCcw } from "lucide-react";
 import { CapturePipeline } from "@/components/dashboard/pipeline";
@@ -7,7 +7,14 @@ import { ExportFigmaDialog } from "@/components/dashboard/export-figma-dialog";
 import { GitHubPushDialog } from "@/components/dashboard/github-push-dialog";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import type { CloneJob } from "@/components/dashboard/data";
-import { ApiError, downloadZipBlob, triggerBrowserDownload } from "@/lib/api";
+import {
+  ApiError,
+  downloadZipBlob,
+  triggerBrowserDownload,
+  type CloneJobResponse,
+} from "@/lib/api";
+import { ProtectedSiteCard } from "@/components/dashboard/protected-site";
+import { HelperOnboarding } from "@/components/dashboard/helper-onboarding";
 import { useInteractivePreview } from "@/hooks/use-interactive-preview";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -91,7 +98,11 @@ function ClonePage() {
   const [depth, setDepth] = useState(2);
   const [respectRobots, setRespectRobots] = useState(true);
   const [maxMode, setMaxMode] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [phase, setPhase] = useState<"idle" | "running" | "protected" | "done" | "error">("idle");
+  /** Protected site: the offer to capture it with the Clonyfy Helper (from the job status). */
+  const [helperOffer, setHelperOffer] = useState<NonNullable<CloneJobResponse["helper"]> | null>(
+    null,
+  );
   const [progress, setProgress] = useState(0);
   const [run, setRun] = useState<Run | null>(null);
   const [error, setError] = useState("");
@@ -125,7 +136,7 @@ function ClonePage() {
   }, [fullSiteAllowed, maxMode]);
 
   useEffect(() => {
-    if (phase !== "running" || !run?.id) return;
+    if ((phase !== "running" && phase !== "protected") || !run?.id) return;
     const jobId = run.id;
     const fullSiteRun = !!run.fullSite;
     const targetPages = Math.max(1, fullSiteRun ? 50 : run.pages || maxPages);
@@ -190,7 +201,15 @@ function ClonePage() {
           setNotice("Capture complete. Use Edit, ZIP, Figma, or GitHub below.");
           return;
         }
+        // Bot-protected site: offer the Clonyfy Helper instead of a dead end.
+        if (status === "needs_helper" && job.helper) {
+          const offer = job.helper;
+          setHelperOffer((current) => (current?.token === offer.token ? current : offer));
+          setPhase("protected");
+          return;
+        }
         if (status === "error") {
+          setHelperOffer(null);
           setPhase("error");
           setError(cloneFailureReason(allLogs));
           addJob({
@@ -226,6 +245,14 @@ function ClonePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, run?.id, run?.domain, run?.pages, run?.fullSite, maxPages, addJob, refreshJobs]);
 
+  const onHelperUploaded = useCallback(() => {
+    setHelperOffer(null);
+    setProgress(50);
+    setRun((current) => (current ? { ...current, status: "running" } : current));
+    setNotice("Page captured in your browser — Clonyfy is building the clone.");
+    setPhase("running");
+  }, []);
+
   async function start(source = url) {
     if (busy) return;
     setError("");
@@ -256,6 +283,7 @@ function ClonePage() {
         return;
       }
       setUrl(parsed.href);
+      setHelperOffer(null);
       const { startClone } = await import("@/lib/api");
       const job = await startClone({
         url: parsed.href,
@@ -332,6 +360,7 @@ function ClonePage() {
           the clone.
         </p>
       </header>
+      <HelperOnboarding />
       <form
         className="surface rounded-3xl p-5 md:p-8"
         onSubmit={(event) => {
@@ -459,7 +488,18 @@ function ClonePage() {
       </form>
 
       {phase === "idle" && <CapturePipeline />}
-      {run && phase !== "idle" && (
+      {run && phase === "protected" && helperOffer && (
+        <ProtectedSiteCard
+          key={helperOffer.token}
+          site={run.domain.replace(/^www\./, "")}
+          vendor={helperOffer.vendor}
+          url={helperOffer.url}
+          jobId={run.id}
+          token={helperOffer.token}
+          onUploaded={onHelperUploaded}
+        />
+      )}
+      {run && phase !== "idle" && phase !== "protected" && (
         <section className="space-y-6" aria-label="Cloning progress">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>

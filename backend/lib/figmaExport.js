@@ -91,7 +91,6 @@ async function getLaunchOptions(chromiumLauncher) {
   const playwrightPath = IS_SERVERLESS ? '' : chromiumLauncher.executablePath();
   const useBundled = shouldUseBundledChromium(playwrightPath);
   const baseArgs = [
-    '--disable-blink-features=AutomationControlled',
     '--no-sandbox',
     '--disable-setuid-sandbox',
     ...(IS_CONSTRAINED ? [

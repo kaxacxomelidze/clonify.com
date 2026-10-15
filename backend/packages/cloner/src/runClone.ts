@@ -9,7 +9,10 @@ import { rewriteHtml } from './rewriter.js';
 import { analyzeTraffic } from './analyzer.js';
 import { generateNextApp, safeName } from './generator.js';
 import { initLogger, logger, setLogSink } from './logger.js';
-import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, Manifest } from './types.js';
+import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, Manifest, PageRecord } from './types.js';
+
+/** Log line prefix the server reads to offer the Clonyfy Helper for a protected site. */
+export const NEEDS_HELPER_MARKER = '[NEEDS_HELPER]';
 
 const IS_SERVERLESS = isServerlessRuntime();
 const IS_FAST_CLONE = isFastCloneProfile();
@@ -137,6 +140,9 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     logger.info(`\nCaptured ${records.length} page(s).`);
     const blockedBy = takeBotProtection(opts.url);
     if (records.length === 0 && blockedBy) {
+      // Read by the server: the user can clone it with the Clonyfy Helper extension,
+      // which captures the page in their own browser (no bypass attempted here).
+      logger.info(`${NEEDS_HELPER_MARKER} ${JSON.stringify({ vendor: blockedBy, url: opts.url })}`);
       throw new Error(botProtectionMessage(opts.url, blockedBy));
     }
     if (records.length === 0) {
@@ -145,179 +151,9 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
       );
     }
 
-    logger.info('\n--- Page Summary ---');
-    for (const s of rewriteStats) {
-      logger.info(`  ${s.url}`);
-      logger.info(`    assets=${s.assets}  network_entries=${s.network}`);
-    }
-
-    const seenRoutes = new Set<string>();
-    const uniqueRecords = records.filter((r) => {
-      if (seenRoutes.has(r.route)) {
-        logger.debug(`  [DEDUP] Skipping duplicate route ${r.route} from ${r.url}`);
-        return false;
-      }
-      seenRoutes.add(r.route);
-      return true;
+    return await finishClone(opts, records, {
+      targetOrigin, capturedPagesDir, routeMap, pageFilename, notifyArtifact, rewriteStats,
     });
-    if (uniqueRecords.length < records.length) {
-      logger.info(`  Deduplicated ${records.length - uniqueRecords.length} duplicate route(s).`);
-    }
-
-    const completeAssetMap = new Map<string, AssetEntry>();
-    for (const record of uniqueRecords) {
-      for (const asset of record.assets) {
-        completeAssetMap.set(asset.originalUrl, asset);
-        completeAssetMap.set(asset.originalUrl.split('?')[0].split('#')[0], asset);
-      }
-    }
-    const completeAssets = [...completeAssetMap.values()];
-    const liveCheckPages: LiveCheckPage[] = [];
-    for (const record of uniqueRecords) {
-      record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
-      // Re-write final HTML so serverless offload / persist get the complete asset rewrite.
-      try {
-        const filename = pageFilename(record.route);
-        const pagePath = join(capturedPagesDir, filename);
-        writeFileSync(pagePath, record.html, 'utf8');
-        routeMap[record.route] = filename;
-        await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: 'page' });
-        // Original server HTML for the interactive preview, where the site's own JS runs
-        // and must hydrate the exact markup it was built for. Asset URLs keep their
-        // ORIGINAL paths (bundler runtimes such as Turbopack match chunks by URL); the
-        // preview origin serves captured files at those paths. Same-origin absolute URLs
-        // become root-relative so they hit the preview origin instead of the live site.
-        if (record.serverHtml) {
-          const serverName = filename.replace(/\.html$/i, '.server.html');
-          const serverPath = join(capturedPagesDir, serverName);
-          // Attributes only: inline scripts must stay byte-identical — Next.js flight data
-          // ("self.__next_f") contains length-prefixed text rows that break if edited.
-          const originRe = new RegExp(targetOrigin.replace(/\/$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=/)', 'g');
-          const serverHtml = record.serverHtml.replace(
-            /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
-            (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, '')}${quote}`,
-          );
-          writeFileSync(serverPath, serverHtml, 'utf8');
-          await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: 'page' });
-          liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
-          delete record.serverHtml; // keep manifest.json lean
-        }
-        delete record.liveScreenshot; // in-memory only — never written to manifest.json
-      } catch (writeErr) {
-        logger.warn(`  [WRITE ERR] final ${record.url}: ${(writeErr as Error).message}`);
-      }
-    }
-
-    // Pages whose own JS can't render without the original backend (loading skeletons,
-    // error banners) preview better offline — measure once and record the choice.
-    if (liveCheckPages.length && !IS_SERVERLESS && !IS_FAST_CLONE) {
-      try {
-        const modes = await choosePreviewModes(liveCheckPages, completeAssets, join(opts.out, 'public'));
-        const modesPath = join(opts.out, 'preview-mode.json');
-        writeFileSync(modesPath, JSON.stringify(modes, null, 2), 'utf8');
-        await notifyArtifact({ relPath: 'preview-mode.json', absPath: modesPath, kind: 'route-map' });
-      } catch (modeErr) {
-        logger.debug(`  [PREVIEW MODE] skipped: ${(modeErr as Error).message}`);
-      }
-    }
-    // Screenshots are in-memory only: never let one reach manifest.json.
-    for (const r of records) delete r.liveScreenshot;
-    try {
-      const routeMapPath = join(opts.out, 'route-map.json');
-      writeFileSync(routeMapPath, JSON.stringify(routeMap, null, 2), 'utf8');
-      await notifyArtifact({ relPath: 'route-map.json', absPath: routeMapPath, kind: 'route-map' });
-    } catch (writeErr) {
-      logger.warn(`  [WRITE ERR] route-map.json: ${(writeErr as Error).message}`);
-    }
-
-    const allNetwork = uniqueRecords.flatMap((r) => r.network);
-    logger.info(`\nTotal network entries across all pages: ${allNetwork.length}`);
-
-    const apiRoutes = analyzeTraffic(allNetwork, targetOrigin);
-    logger.info(`Detected ${apiRoutes.length} API route(s).`);
-
-    if (apiRoutes.length > 0) {
-      logger.info('\n--- API Routes ---');
-      for (const r of apiRoutes) {
-        const tag = r.looksLikeForm ? ' [FORM]' : '';
-        logger.info(`  ${r.method.padEnd(6)} ${r.path}${tag}`);
-        logger.debug(`    fixture=${r.fixtureKey}  fields=${r.inferredFields.join(', ')}`);
-        for (const resp of r.responses) {
-          logger.debug(`    response: HTTP ${resp.status}`);
-        }
-      }
-    }
-
-    const uniqueAssets = new Set(uniqueRecords.flatMap((r) => r.assets.map((a) => a.localPath)));
-    logger.info(`\nTotal unique assets saved: ${uniqueAssets.size}`);
-
-    logger.info('\n--- Captured Routes ---');
-    for (const r of uniqueRecords) {
-      logger.info(`  ${r.route}`);
-    }
-
-    const allConsoleErrors = uniqueRecords.flatMap((r) =>
-      r.network.filter((n) => n.method === 'CONSOLE_ERROR').map((n) => ({ url: r.url, body: n.body }))
-    );
-    if (allConsoleErrors.length > 0) {
-      logger.info('\n--- Console Errors ---');
-      for (const e of allConsoleErrors) {
-        logger.info(`  Page: ${e.url}`);
-        logger.info(`  ${e.body}`);
-      }
-    } else {
-      logger.info('\nNo console errors recorded.');
-    }
-
-    const manifest: Manifest = {
-      targetOrigin,
-      capturedAt: new Date().toISOString(),
-      pages: uniqueRecords.map((r) => ({
-        url: r.url,
-        route: r.route,
-        html: '',
-        // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
-        // so manifest.json stays under Supabase Free storage limits (~50MB).
-        assets: r.assets,
-        network: (IS_SERVERLESS || IS_FAST_CLONE) ? [] : r.network,
-        failedAssets: r.failedAssets,
-        failedAssetReasons: r.failedAssetReasons,
-      })),
-    };
-    const manifestPath = join(opts.out, 'manifest.json');
-    // Compact JSON on hosted — pretty-print balloons Shopify-sized manifests.
-    const manifestJson = (IS_SERVERLESS || IS_FAST_CLONE)
-      ? JSON.stringify(manifest)
-      : JSON.stringify(manifest, null, 2);
-    writeFileSync(manifestPath, manifestJson, 'utf8');
-    await notifyArtifact({ relPath: 'manifest.json', absPath: manifestPath, kind: 'manifest' });
-
-    if (!SKIP_NEXT_GEN) {
-      logger.info('\nGenerating Next.js app...');
-      const fullManifest: Manifest = { ...manifest, pages: uniqueRecords };
-      await generateNextApp(opts.out, fullManifest, apiRoutes);
-    } else {
-      logger.info('\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).');
-    }
-
-    logger.info('\n=== DONE ===');
-    logger.info(`Output dir  : ${opts.out}`);
-    logger.info(`Pages       : ${uniqueRecords.length}`);
-    logger.info(`Assets      : ${uniqueAssets.size}`);
-    logger.info(`API routes  : ${apiRoutes.length}`);
-    logger.info(`Log file    : ${join(opts.out, 'cloner.log')}`);
-    logger.info(`\nNext steps:`);
-    logger.info(`  cd "${opts.out}"`);
-    logger.info(`  npm install`);
-    logger.info(`  npm run dev    # -> http://localhost:3000`);
-
-    return {
-      outDir: opts.out,
-      pages: uniqueRecords.length,
-      assets: uniqueAssets.size,
-      apiRoutes: apiRoutes.length,
-      logFile: join(opts.out, 'cloner.log'),
-    };
   } catch (err) {
     logger.error(err instanceof Error ? err.message : 'Clone failed', err);
     throw err;
@@ -325,6 +161,198 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     logger.close();
     setLogSink(null);
   }
+}
+
+export interface FinishContext {
+  targetOrigin: string;
+  capturedPagesDir: string;
+  routeMap: Record<string, string>;
+  pageFilename: (route: string) => string;
+  notifyArtifact: (event: ArtifactWrittenEvent) => Promise<void>;
+  rewriteStats: Array<{ url: string; assets: number; network: number }>;
+}
+
+/**
+ * Turn captured page records into a clone: final asset rewrite, server HTML for the
+ * interactive preview, preview-mode choice, route map, manifest, API fixtures and the
+ * Next.js app. Shared by the crawler path (runClone) and the Clonyfy Helper path
+ * (runHelperCapture), so both produce exactly the same output.
+ */
+export async function finishClone(opts: ClonerOptions, records: PageRecord[], ctx: FinishContext): Promise<CloneRunResult> {
+  const { targetOrigin, capturedPagesDir, routeMap, pageFilename, notifyArtifact, rewriteStats } = ctx;
+  logger.info('\n--- Page Summary ---');
+  for (const s of rewriteStats) {
+    logger.info(`  ${s.url}`);
+    logger.info(`    assets=${s.assets}  network_entries=${s.network}`);
+  }
+
+  const seenRoutes = new Set<string>();
+  const uniqueRecords = records.filter((r) => {
+    if (seenRoutes.has(r.route)) {
+      logger.debug(`  [DEDUP] Skipping duplicate route ${r.route} from ${r.url}`);
+      return false;
+    }
+    seenRoutes.add(r.route);
+    return true;
+  });
+  if (uniqueRecords.length < records.length) {
+    logger.info(`  Deduplicated ${records.length - uniqueRecords.length} duplicate route(s).`);
+  }
+
+  const completeAssetMap = new Map<string, AssetEntry>();
+  for (const record of uniqueRecords) {
+    for (const asset of record.assets) {
+      completeAssetMap.set(asset.originalUrl, asset);
+      completeAssetMap.set(asset.originalUrl.split('?')[0].split('#')[0], asset);
+    }
+  }
+  const completeAssets = [...completeAssetMap.values()];
+  const liveCheckPages: LiveCheckPage[] = [];
+  for (const record of uniqueRecords) {
+    record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
+    // Re-write final HTML so serverless offload / persist get the complete asset rewrite.
+    try {
+      const filename = pageFilename(record.route);
+      const pagePath = join(capturedPagesDir, filename);
+      writeFileSync(pagePath, record.html, 'utf8');
+      routeMap[record.route] = filename;
+      await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: 'page' });
+      // Original server HTML for the interactive preview, where the site's own JS runs
+      // and must hydrate the exact markup it was built for. Asset URLs keep their
+      // ORIGINAL paths (bundler runtimes such as Turbopack match chunks by URL); the
+      // preview origin serves captured files at those paths. Same-origin absolute URLs
+      // become root-relative so they hit the preview origin instead of the live site.
+      if (record.serverHtml) {
+        const serverName = filename.replace(/\.html$/i, '.server.html');
+        const serverPath = join(capturedPagesDir, serverName);
+        // Attributes only: inline scripts must stay byte-identical — Next.js flight data
+        // ("self.__next_f") contains length-prefixed text rows that break if edited.
+        const originRe = new RegExp(targetOrigin.replace(/\/$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=/)', 'g');
+        const serverHtml = record.serverHtml.replace(
+          /(\s(?:src|href|srcset|imagesrcset|poster|action|data-src|data-srcset)\s*=\s*)(["'])([^"']*)\2/gi,
+          (_m, pre, quote, value) => `${pre}${quote}${value.replace(originRe, '')}${quote}`,
+        );
+        writeFileSync(serverPath, serverHtml, 'utf8');
+        await notifyArtifact({ relPath: `captured-pages/${serverName}`, absPath: serverPath, kind: 'page' });
+        liveCheckPages.push({ url: record.url, filename, serverHtml, snapshotHtml: record.html, liveScreenshot: record.liveScreenshot });
+        delete record.serverHtml; // keep manifest.json lean
+      }
+      delete record.liveScreenshot; // in-memory only — never written to manifest.json
+    } catch (writeErr) {
+      logger.warn(`  [WRITE ERR] final ${record.url}: ${(writeErr as Error).message}`);
+    }
+  }
+
+  // Pages whose own JS can't render without the original backend (loading skeletons,
+  // error banners) preview better offline — measure once and record the choice.
+  if (liveCheckPages.length && !IS_SERVERLESS && !IS_FAST_CLONE) {
+    try {
+      const modes = await choosePreviewModes(liveCheckPages, completeAssets, join(opts.out, 'public'));
+      const modesPath = join(opts.out, 'preview-mode.json');
+      writeFileSync(modesPath, JSON.stringify(modes, null, 2), 'utf8');
+      await notifyArtifact({ relPath: 'preview-mode.json', absPath: modesPath, kind: 'route-map' });
+    } catch (modeErr) {
+      logger.debug(`  [PREVIEW MODE] skipped: ${(modeErr as Error).message}`);
+    }
+  }
+  // Screenshots are in-memory only: never let one reach manifest.json.
+  for (const r of records) delete r.liveScreenshot;
+  try {
+    const routeMapPath = join(opts.out, 'route-map.json');
+    writeFileSync(routeMapPath, JSON.stringify(routeMap, null, 2), 'utf8');
+    await notifyArtifact({ relPath: 'route-map.json', absPath: routeMapPath, kind: 'route-map' });
+  } catch (writeErr) {
+    logger.warn(`  [WRITE ERR] route-map.json: ${(writeErr as Error).message}`);
+  }
+
+  const allNetwork = uniqueRecords.flatMap((r) => r.network);
+  logger.info(`\nTotal network entries across all pages: ${allNetwork.length}`);
+
+  const apiRoutes = analyzeTraffic(allNetwork, targetOrigin);
+  logger.info(`Detected ${apiRoutes.length} API route(s).`);
+
+  if (apiRoutes.length > 0) {
+    logger.info('\n--- API Routes ---');
+    for (const r of apiRoutes) {
+      const tag = r.looksLikeForm ? ' [FORM]' : '';
+      logger.info(`  ${r.method.padEnd(6)} ${r.path}${tag}`);
+      logger.debug(`    fixture=${r.fixtureKey}  fields=${r.inferredFields.join(', ')}`);
+      for (const resp of r.responses) {
+        logger.debug(`    response: HTTP ${resp.status}`);
+      }
+    }
+  }
+
+  const uniqueAssets = new Set(uniqueRecords.flatMap((r) => r.assets.map((a) => a.localPath)));
+  logger.info(`\nTotal unique assets saved: ${uniqueAssets.size}`);
+
+  logger.info('\n--- Captured Routes ---');
+  for (const r of uniqueRecords) {
+    logger.info(`  ${r.route}`);
+  }
+
+  const allConsoleErrors = uniqueRecords.flatMap((r) =>
+    r.network.filter((n) => n.method === 'CONSOLE_ERROR').map((n) => ({ url: r.url, body: n.body }))
+  );
+  if (allConsoleErrors.length > 0) {
+    logger.info('\n--- Console Errors ---');
+    for (const e of allConsoleErrors) {
+      logger.info(`  Page: ${e.url}`);
+      logger.info(`  ${e.body}`);
+    }
+  } else {
+    logger.info('\nNo console errors recorded.');
+  }
+
+  const manifest: Manifest = {
+    targetOrigin,
+    capturedAt: new Date().toISOString(),
+    pages: uniqueRecords.map((r) => ({
+      url: r.url,
+      route: r.route,
+      html: '',
+      // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
+      // so manifest.json stays under Supabase Free storage limits (~50MB).
+      assets: r.assets,
+      network: (IS_SERVERLESS || IS_FAST_CLONE) ? [] : r.network,
+      failedAssets: r.failedAssets,
+      failedAssetReasons: r.failedAssetReasons,
+    })),
+  };
+  const manifestPath = join(opts.out, 'manifest.json');
+  // Compact JSON on hosted — pretty-print balloons Shopify-sized manifests.
+  const manifestJson = (IS_SERVERLESS || IS_FAST_CLONE)
+    ? JSON.stringify(manifest)
+    : JSON.stringify(manifest, null, 2);
+  writeFileSync(manifestPath, manifestJson, 'utf8');
+  await notifyArtifact({ relPath: 'manifest.json', absPath: manifestPath, kind: 'manifest' });
+
+  if (!SKIP_NEXT_GEN) {
+    logger.info('\nGenerating Next.js app...');
+    const fullManifest: Manifest = { ...manifest, pages: uniqueRecords };
+    await generateNextApp(opts.out, fullManifest, apiRoutes);
+  } else {
+    logger.info('\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).');
+  }
+
+  logger.info('\n=== DONE ===');
+  logger.info(`Output dir  : ${opts.out}`);
+  logger.info(`Pages       : ${uniqueRecords.length}`);
+  logger.info(`Assets      : ${uniqueAssets.size}`);
+  logger.info(`API routes  : ${apiRoutes.length}`);
+  logger.info(`Log file    : ${join(opts.out, 'cloner.log')}`);
+  logger.info(`\nNext steps:`);
+  logger.info(`  cd "${opts.out}"`);
+  logger.info(`  npm install`);
+  logger.info(`  npm run dev    # -> http://localhost:3000`);
+
+  return {
+    outDir: opts.out,
+    pages: uniqueRecords.length,
+    assets: uniqueAssets.size,
+    apiRoutes: apiRoutes.length,
+    logFile: join(opts.out, 'cloner.log'),
+  };
 }
 
 /** Rebuild the Next.js project from persisted manifest + captured HTML (for exports after blob storage). */
@@ -373,3 +401,5 @@ export async function regenerateCloneProject(outDir: string): Promise<void> {
 }
 
 export { backfillScrollTimeline, backfillPageMedia, type MotionBackfillResult } from "./motionBackfill.js";
+export { runHelperCapture, type HelperCaptureOptions } from "./helperCapture.js";
+export { sanitizeHelperBundle, findCredentialLeaks, type HelperBundle } from "./helperSanitize.js";
