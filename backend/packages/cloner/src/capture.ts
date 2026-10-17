@@ -2404,6 +2404,29 @@ export async function capturePage(
     Promise.allSettled([...pendingNativeSaves]),
     new Promise((resolve) => setTimeout(resolve, 20_000)),
   ]);
+  // CSS-in-JS libraries (styled-components, emotion…) insert rules straight into the
+  // browser's style engine; their <style> tags stay empty in the HTML, so the snapshot
+  // lost every style (zillow.com rendered as a bare list). Write the live rules into the
+  // tags — and JS-created stylesheets into a new one — right before serializing. The
+  // capture is finished with this page, so changing its style tags here is harmless.
+  await page.evaluate(() => {
+    const rulesOf = (sheet: CSSStyleSheet) => {
+      try { return Array.from(sheet.cssRules, (r) => r.cssText).join('\n'); } catch { return null; }
+    };
+    for (const el of Array.from(document.querySelectorAll('style'))) {
+      const rules = el.sheet ? rulesOf(el.sheet as CSSStyleSheet) : null;
+      if (rules == null || rules.length <= (el.textContent || '').trim().length) continue;
+      el.textContent = rules;
+      el.setAttribute('data-clonyfy-cssom', '');
+    }
+    const adopted = (document.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join('\n');
+    if (adopted) {
+      const tag = document.createElement('style');
+      tag.setAttribute('data-clonyfy-adopted', '');
+      tag.textContent = adopted;
+      (document.head || document.documentElement).appendChild(tag);
+    }
+  }).catch((err) => logger.debug(`  [CSSOM BAKE WARN] ${(err as Error).message}`));
   let html = await page.content();
   const deferredEdits = await page.evaluate(
     () => (window as unknown as { __clonyfyDeferred?: DeferredDomEdits }).__clonyfyDeferred || {},

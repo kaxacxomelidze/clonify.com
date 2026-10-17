@@ -47,9 +47,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const report = (stage, extra = {}) => {
       chrome.tabs.sendMessage(appTab, { type: 'progress', requestId: msg.requestId, stage, ...extra }).catch(() => {});
     };
+    const release = keepAlive();
     runCapture(msg, report)
       .then((result) => report('done', result))
-      .catch((err) => report('error', { message: String(err?.message || err) }));
+      .catch((err) => report('error', { message: String(err?.message || err) }))
+      .finally(release);
     sendResponse({ ok: true });
     return false;
   }
@@ -116,9 +118,20 @@ async function openSiteTab(url) {
   return tab.id;
 }
 
-async function inTab(tabId, func, args = []) {
-  const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
-  return res?.result;
+async function inTab(tabId, func, args = [], timeoutMs = 90_000) {
+  const run = chrome.scripting.executeScript({ target: { tabId }, func, args }).then(([res]) => res?.result);
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('The page did not respond in time')), timeoutMs));
+  return Promise.race([run, timeout]);
+}
+
+/**
+ * Chrome stops an idle extension worker after ~30s, which would kill a capture mid-way
+ * (heavy pages take longer to load and read). A cheap API call every 20s keeps it alive
+ * while — and only while — a capture the user started is running.
+ */
+function keepAlive() {
+  const timer = setInterval(() => { chrome.runtime.getPlatformInfo().catch(() => {}); }, 20_000);
+  return () => clearInterval(timer);
 }
 
 async function runCapture(msg, report) {
@@ -133,22 +146,25 @@ async function runCapture(msg, report) {
 
   report('opening');
   const tabId = await openSiteTab(url);
-  await waitForTabComplete(tabId);
+  // Heavy pages (ads, trackers) may never report "complete" — continue after 25s anyway.
+  await waitForTabComplete(tabId, 25_000);
 
   // The page must be the real page: if the site shows its human check, the user does it
   // in that tab (they are the human it asks for) and the capture continues afterwards.
   const started = Date.now();
-  let state = await inTab(tabId, pageState);
+  let state = await inTab(tabId, pageState, [], 20_000).catch(() => {
+    throw new Error('Could not read the opened tab. Keep it open and try again.');
+  });
   while (state?.challenge) {
     if (Date.now() - started > CHALLENGE_WAIT_MS) throw new Error('The site check was not completed in the opened tab');
     report('challenge', { site: new URL(url).hostname });
     await new Promise((r) => setTimeout(r, 2000));
     await waitForTabComplete(tabId, 15_000);
-    state = await inTab(tabId, pageState).catch(() => ({ challenge: true }));
+    state = await inTab(tabId, pageState, [], 20_000).catch(() => ({ challenge: true }));
   }
 
   report('html');
-  const page = await inTab(tabId, readPage);
+  const page = await inTab(tabId, readPage, [], 120_000);
   if (!page?.domSnapshot) throw new Error('Could not read the page');
 
   // Files, read in the page in batches (the page's own cache and session; nothing new is requested from accounts).
@@ -278,12 +294,40 @@ async function readPage() {
     } catch { /* skip */ }
   }
 
+  // CSS-in-JS libraries (styled-components, emotion…) insert their rules straight into the
+  // browser's style engine, so <style> tags stay empty in the HTML — copying outerHTML
+  // alone loses every style. Write each tag's live rules into a COPY of the page, plus
+  // stylesheets created in JS (adoptedStyleSheets). The live page is never modified.
+  const rulesOf = (sheet) => {
+    try { return Array.from(sheet.cssRules, (r) => r.cssText).join('\n'); } catch { return null; }
+  };
+  const liveStyles = Array.from(document.querySelectorAll('style'));
+  const liveText = liveStyles.map((el) => {
+    const rules = el.sheet ? rulesOf(el.sheet) : null;
+    return rules != null && rules.length > (el.textContent || '').trim().length ? rules : null;
+  });
+  const copy = document.documentElement.cloneNode(true);
+  const copyStyles = copy.querySelectorAll('style');
+  if (copyStyles.length === liveStyles.length) {
+    copyStyles.forEach((el, i) => {
+      if (liveText[i] == null) return;
+      el.textContent = liveText[i];
+      el.setAttribute('data-clonyfy-cssom', '');
+    });
+  }
+  const adopted = (document.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join('\n');
+  if (adopted) {
+    const tag = document.createElement('style');
+    tag.setAttribute('data-clonyfy-adopted', '');
+    tag.textContent = adopted;
+    (copy.querySelector('head') || copy).appendChild(tag);
+  }
   const doctype = document.doctype ? `<!DOCTYPE ${document.doctype.name}>` : '<!DOCTYPE html>';
   return {
     url: location.href,
     title: document.title,
     serverHtml,
-    domSnapshot: `${doctype}\n${document.documentElement.outerHTML}`,
+    domSnapshot: `${doctype}\n${copy.outerHTML}`,
     files: [...files].map(([url, kind]) => ({ url, kind })),
     network,
   };
