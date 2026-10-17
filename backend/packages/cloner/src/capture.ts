@@ -2426,6 +2426,49 @@ export async function capturePage(
       tag.textContent = adopted;
       (document.head || document.documentElement).appendChild(tag);
     }
+    // Shadow DOM (web components, micro-frontends) is not part of the serialized HTML:
+    // copy each open shadow root in as declarative shadow DOM, which the browser turns
+    // back into the same shadow root when the clone loads.
+    const copyShadow = (root: ShadowRoot, depth: number): string => {
+      const holder = document.createElement('div');
+      root.childNodes.forEach((n) => holder.appendChild(n.cloneNode(true)));
+      const liveStyles = Array.from(root.querySelectorAll('style'));
+      const copyStyles = Array.from(holder.querySelectorAll('style'));
+      if (liveStyles.length === copyStyles.length) {
+        liveStyles.forEach((el, i) => {
+          const rules = el.sheet ? rulesOf(el.sheet as CSSStyleSheet) : null;
+          if (rules != null && rules.length > (el.textContent || '').trim().length) copyStyles[i]!.textContent = rules;
+        });
+      }
+      if (depth < 12) {
+        const liveEls = Array.from(root.querySelectorAll('*'));
+        const copyEls = Array.from(holder.querySelectorAll('*'));
+        if (liveEls.length === copyEls.length) {
+          liveEls.forEach((el, i) => {
+            if (!el.shadowRoot) return;
+            const tpl = document.createElement('template');
+            tpl.setAttribute('shadowrootmode', 'open');
+            tpl.innerHTML = copyShadow(el.shadowRoot, depth + 1);
+            copyEls[i]!.prepend(tpl);
+          });
+        }
+      }
+      // JS-created stylesheets last, so the element lists above line up.
+      const rootAdopted = (root.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join('\n');
+      if (rootAdopted) {
+        const tag = document.createElement('style');
+        tag.textContent = rootAdopted;
+        holder.appendChild(tag);
+      }
+      return holder.innerHTML;
+    };
+    for (const host of Array.from(document.querySelectorAll('*'))) {
+      if (!host.shadowRoot || host.querySelector(':scope > template[shadowrootmode]')) continue;
+      const tpl = document.createElement('template');
+      tpl.setAttribute('shadowrootmode', 'open');
+      tpl.innerHTML = copyShadow(host.shadowRoot, 0);
+      host.prepend(tpl);
+    }
   }).catch((err) => logger.debug(`  [CSSOM BAKE WARN] ${(err as Error).message}`));
   let html = await page.content();
   const deferredEdits = await page.evaluate(

@@ -12921,6 +12921,45 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         tag.textContent = adopted;
         (document.head || document.documentElement).appendChild(tag);
       }
+      const copyShadow = (root, depth) => {
+        const holder = document.createElement("div");
+        root.childNodes.forEach((n) => holder.appendChild(n.cloneNode(true)));
+        const liveStyles = Array.from(root.querySelectorAll("style"));
+        const copyStyles = Array.from(holder.querySelectorAll("style"));
+        if (liveStyles.length === copyStyles.length) {
+          liveStyles.forEach((el, i) => {
+            const rules = el.sheet ? rulesOf(el.sheet) : null;
+            if (rules != null && rules.length > (el.textContent || "").trim().length) copyStyles[i].textContent = rules;
+          });
+        }
+        if (depth < 12) {
+          const liveEls = Array.from(root.querySelectorAll("*"));
+          const copyEls = Array.from(holder.querySelectorAll("*"));
+          if (liveEls.length === copyEls.length) {
+            liveEls.forEach((el, i) => {
+              if (!el.shadowRoot) return;
+              const tpl2 = document.createElement("template");
+              tpl2.setAttribute("shadowrootmode", "open");
+              tpl2.innerHTML = copyShadow(el.shadowRoot, depth + 1);
+              copyEls[i].prepend(tpl2);
+            });
+          }
+        }
+        const rootAdopted = (root.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join("\n");
+        if (rootAdopted) {
+          const tag = document.createElement("style");
+          tag.textContent = rootAdopted;
+          holder.appendChild(tag);
+        }
+        return holder.innerHTML;
+      };
+      for (const host of Array.from(document.querySelectorAll("*"))) {
+        if (!host.shadowRoot || host.querySelector(":scope > template[shadowrootmode]")) continue;
+        const tpl2 = document.createElement("template");
+        tpl2.setAttribute("shadowrootmode", "open");
+        tpl2.innerHTML = copyShadow(host.shadowRoot, 0);
+        host.prepend(tpl2);
+      }
     }).catch((err) => logger.debug(`  [CSSOM BAKE WARN] ${err.message}`));
     let html = await page.content();
     const deferredEdits = await page.evaluate(
@@ -14989,6 +15028,12 @@ function walkNode(node, assetMap, origin, baseUrl, stats, failedAssets) {
       walkNode(child, assetMap, origin, baseUrl, stats, failedAssets);
     }
   }
+  const content = el.content;
+  if (el.nodeName === "template" && content?.childNodes) {
+    for (const child of content.childNodes) {
+      walkNode(child, assetMap, origin, baseUrl, stats, failedAssets);
+    }
+  }
 }
 function preprocessHtml(html) {
   html = html.replace(/<base\s[^>]*\/?>/gi, "").replace(/<base\s*\/>/gi, "").replace(/<base>/gi, "");
@@ -16194,4 +16239,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-LVQ4WEDD.js.map
+//# sourceMappingURL=chunk-PIZM54TF.js.map

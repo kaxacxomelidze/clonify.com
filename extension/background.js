@@ -222,15 +222,31 @@ function pageState() {
 /** Rendered page, its server HTML, its file list and the public data it rendered from. */
 async function readPage() {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  // Settle: scroll through the page so lazy images/sections load, then back to the top.
+  // Wait until the page is quiet: no new requests and no DOM changes for `quietMs`.
+  const settle = async (quietMs, maxMs) => {
+    let last = Date.now();
+    const mo = new MutationObserver(() => { last = Date.now(); });
+    mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    let requests = performance.getEntriesByType('resource').length;
+    const started = Date.now();
+    while (Date.now() - started < maxMs) {
+      await wait(250);
+      const now = performance.getEntriesByType('resource').length;
+      if (now !== requests) { requests = now; last = Date.now(); }
+      if (Date.now() - last >= quietMs) break;
+    }
+    mo.disconnect();
+  };
+  // Scroll through the page, pausing on each screen: widgets that render when they come
+  // into view (and then fetch their data) get the time to do it.
   const step = Math.max(300, Math.floor(innerHeight * 0.8));
   const start = Date.now();
-  for (let y = 0; y < document.documentElement.scrollHeight && Date.now() - start < 12_000; y += step) {
+  for (let y = 0; y < document.documentElement.scrollHeight && Date.now() - start < 30_000; y += step) {
     scrollTo(0, y);
-    await wait(160);
+    await settle(400, 1800);
   }
   scrollTo(0, 0);
-  await wait(1200);
+  await settle(1200, 8000);
 
   const sameOrigin = (u) => { try { return new URL(u, location.href).origin === location.origin; } catch { return false; } };
   const abs = (u) => { try { return new URL(u, location.href).href; } catch { return ''; } };
@@ -298,30 +314,71 @@ async function readPage() {
   // browser's style engine, so <style> tags stay empty in the HTML — copying outerHTML
   // alone loses every style. Write each tag's live rules into a COPY of the page, plus
   // stylesheets created in JS (adoptedStyleSheets). The live page is never modified.
+  // Shadow DOM (web components, micro-frontends) isn't part of outerHTML either: copy each
+  // shadow root as declarative shadow DOM (<template shadowrootmode>), which the browser
+  // turns back into the same shadow root when the clone loads. Closed roots are reachable
+  // from the extension (chrome.dom). Same-origin frames are copied into srcdoc.
+  const shadowOf = (el) => {
+    if (el.shadowRoot) return el.shadowRoot;
+    try { return globalThis.chrome?.dom?.openOrClosedShadowRoot?.(el) || null; } catch { return null; }
+  };
+  // `live` is a document or shadow root; `copyRoot` its copy (an element holding the copied nodes).
+  const bake = (live, copyRoot, depth) => {
+    const liveStyles = Array.from(live.querySelectorAll('style'));
+    const copyStyles = Array.from(copyRoot.querySelectorAll('style'));
+    if (liveStyles.length === copyStyles.length) {
+      liveStyles.forEach((el, i) => {
+        const rules = el.sheet ? rulesOf(el.sheet) : null;
+        if (rules == null || rules.length <= (el.textContent || '').trim().length) return;
+        copyStyles[i].textContent = rules;
+        copyStyles[i].setAttribute('data-clonyfy-cssom', '');
+      });
+    }
+    // JS-created stylesheets are added last, so the element lists below still line up.
+    const addAdopted = () => {
+      const adopted = (live.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join('\n');
+      if (!adopted) return;
+      const tag = document.createElement('style');
+      tag.setAttribute('data-clonyfy-adopted', '');
+      tag.textContent = adopted;
+      (copyRoot.querySelector('head') || copyRoot).appendChild(tag);
+    };
+    if (depth > 12) { addAdopted(); return; }
+    const liveEls = Array.from((live.documentElement || live).querySelectorAll('*'));
+    const copyEls = Array.from(copyRoot.querySelectorAll('*'));
+    if (liveEls.length !== copyEls.length) { addAdopted(); return; }
+    liveEls.forEach((el, i) => {
+      const target = copyEls[i];
+      const root = shadowOf(el);
+      if (root) {
+        const holder = document.createElement('div');
+        root.childNodes.forEach((n) => holder.appendChild(n.cloneNode(true)));
+        bake(root, holder, depth + 1);
+        const tpl = document.createElement('template');
+        tpl.setAttribute('shadowrootmode', root.mode === 'closed' ? 'closed' : 'open');
+        if (root.delegatesFocus) tpl.setAttribute('shadowrootdelegatesfocus', '');
+        tpl.innerHTML = holder.innerHTML;
+        target.prepend(tpl);
+      }
+      if (el.tagName === 'IFRAME') {
+        try {
+          const doc = el.contentDocument;
+          if (doc?.documentElement && doc.location.href !== 'about:blank' && !target.hasAttribute('srcdoc')) {
+            const inner = doc.documentElement.cloneNode(true);
+            bake(doc, inner, depth + 1);
+            target.setAttribute('srcdoc', `<!DOCTYPE html>${inner.outerHTML}`);
+            target.setAttribute('data-clonyfy-frame', el.getAttribute('src') || '');
+          }
+        } catch { /* cross-origin frame: kept as a link to its source */ }
+      }
+    });
+    addAdopted();
+  };
   const rulesOf = (sheet) => {
     try { return Array.from(sheet.cssRules, (r) => r.cssText).join('\n'); } catch { return null; }
   };
-  const liveStyles = Array.from(document.querySelectorAll('style'));
-  const liveText = liveStyles.map((el) => {
-    const rules = el.sheet ? rulesOf(el.sheet) : null;
-    return rules != null && rules.length > (el.textContent || '').trim().length ? rules : null;
-  });
   const copy = document.documentElement.cloneNode(true);
-  const copyStyles = copy.querySelectorAll('style');
-  if (copyStyles.length === liveStyles.length) {
-    copyStyles.forEach((el, i) => {
-      if (liveText[i] == null) return;
-      el.textContent = liveText[i];
-      el.setAttribute('data-clonyfy-cssom', '');
-    });
-  }
-  const adopted = (document.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join('\n');
-  if (adopted) {
-    const tag = document.createElement('style');
-    tag.setAttribute('data-clonyfy-adopted', '');
-    tag.textContent = adopted;
-    (copy.querySelector('head') || copy).appendChild(tag);
-  }
+  bake(document, copy, 0);
   const doctype = document.doctype ? `<!DOCTYPE ${document.doctype.name}>` : '<!DOCTYPE html>';
   return {
     url: location.href,
