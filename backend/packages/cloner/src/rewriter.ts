@@ -440,6 +440,14 @@ function walkNode(
       walkNode(child, assetMap, origin, baseUrl, stats, failedAssets);
     }
   }
+  // <template> keeps its markup in `content` — including captured shadow DOM
+  // (<template shadowrootmode>), whose images/styles must be localized too.
+  const content = (el as { content?: { childNodes?: parse5.DefaultTreeAdapterMap['childNode'][] } }).content;
+  if (el.nodeName === 'template' && content?.childNodes) {
+    for (const child of content.childNodes) {
+      walkNode(child, assetMap, origin, baseUrl, stats, failedAssets);
+    }
+  }
 }
 
 function preprocessHtml(html: string): string {
