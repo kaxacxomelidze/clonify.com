@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Clonyfy Helper",
   "short_name": "Clonyfy Helper",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Clone protected sites with Clonyfy from your own browser. Copies only the public page, never cookies, logins or personal data.",
   "minimum_chrome_version": "116",
   "icons": {

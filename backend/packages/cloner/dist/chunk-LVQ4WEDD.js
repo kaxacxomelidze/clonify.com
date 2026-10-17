@@ -12900,6 +12900,28 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       Promise.allSettled([...pendingNativeSaves]),
       new Promise((resolve4) => setTimeout(resolve4, 2e4))
     ]);
+    await page.evaluate(() => {
+      const rulesOf = (sheet) => {
+        try {
+          return Array.from(sheet.cssRules, (r) => r.cssText).join("\n");
+        } catch {
+          return null;
+        }
+      };
+      for (const el of Array.from(document.querySelectorAll("style"))) {
+        const rules = el.sheet ? rulesOf(el.sheet) : null;
+        if (rules == null || rules.length <= (el.textContent || "").trim().length) continue;
+        el.textContent = rules;
+        el.setAttribute("data-clonyfy-cssom", "");
+      }
+      const adopted = (document.adoptedStyleSheets || []).map(rulesOf).filter(Boolean).join("\n");
+      if (adopted) {
+        const tag = document.createElement("style");
+        tag.setAttribute("data-clonyfy-adopted", "");
+        tag.textContent = adopted;
+        (document.head || document.documentElement).appendChild(tag);
+      }
+    }).catch((err) => logger.debug(`  [CSSOM BAKE WARN] ${err.message}`));
     let html = await page.content();
     const deferredEdits = await page.evaluate(
       () => window.__clonyfyDeferred || {}
@@ -16172,4 +16194,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-CTGYYZL3.js.map
+//# sourceMappingURL=chunk-LVQ4WEDD.js.map
