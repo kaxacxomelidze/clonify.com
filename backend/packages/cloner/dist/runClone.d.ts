@@ -104,6 +104,14 @@ interface HelperNetworkEntry {
     contentType: string;
     body: string | null;
 }
+/** One captured page (the helper follows links up to the clone's page budget). */
+interface HelperPage {
+    url: string;
+    title?: string;
+    serverHtml: string;
+    domSnapshot: string;
+    networkRecord: HelperNetworkEntry[];
+}
 interface HelperBundle {
     v: 1;
     /** The page as loaded in the tab (after redirects). */
@@ -116,6 +124,8 @@ interface HelperBundle {
     domSnapshot: string;
     assets: HelperAsset[];
     networkRecord: HelperNetworkEntry[];
+    /** Every captured page, the first one being the page above. Files are shared in `assets`. */
+    pages: HelperPage[];
 }
 /**
  * Keep only the fields a bundle may carry, with every credential removed. Unknown

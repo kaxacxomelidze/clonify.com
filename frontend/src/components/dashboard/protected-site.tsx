@@ -22,6 +22,9 @@ type Props = {
   url: string;
   jobId: string;
   token: string;
+  /** Page budget of the clone (Max pages / Depth). */
+  maxPages?: number;
+  depth?: number;
   /** The capture was uploaded: the server is building the clone (job is running again). */
   onUploaded: () => void;
 };
@@ -34,10 +37,18 @@ const STAGE_TEXT: Record<string, (p: HelperProgress) => string> = {
   opening: () => "Opening the page in your browser…",
   challenge: (p) =>
     `${p.site || "The site"} is checking that you're human — complete it in the opened tab, the capture continues by itself.`,
-  html: () => "Reading the rendered page…",
-  files: (p) => `Reading files ${p.done ?? 0}/${p.total ?? 0}…`,
+  html: (p) =>
+    p.pages && p.pages > 1
+      ? `Reading page ${p.page ?? 1} of up to ${p.pages}…`
+      : "Reading the rendered page…",
+  "next-page": (p) => `Opening page ${p.page ?? 2} of up to ${p.pages ?? 2}…`,
+  files: (p) =>
+    `Reading files ${p.done ?? 0}/${p.total ?? 0}${p.pages && p.pages > 1 ? ` for ${p.pages} pages` : ""}…`,
   "files-done": (p) => `Read ${p.total ?? 0} files.`,
-  uploading: () => "Sending the page to Clonyfy…",
+  uploading: (p) =>
+    p.pages && p.pages > 1
+      ? `Sending ${p.pages} pages to Clonyfy…`
+      : "Sending the page to Clonyfy…",
   done: () => "Captured — building your clone.",
 };
 
@@ -45,14 +56,24 @@ const STAGE_PROGRESS: Record<string, number> = {
   permission: 8,
   opening: 18,
   challenge: 22,
-  html: 35,
+  "next-page": 30,
+  html: 30,
   files: 45,
   "files-done": 85,
   uploading: 92,
   done: 100,
 };
 
-export function ProtectedSiteCard({ site, vendor, url, jobId, token, onUploaded }: Props) {
+export function ProtectedSiteCard({
+  site,
+  vendor,
+  url,
+  jobId,
+  token,
+  maxPages = 1,
+  depth = 1,
+  onUploaded,
+}: Props) {
   const { user, refresh } = useAuth();
   const [step, setStep] = useState<Step>("detecting");
   const [progress, setProgress] = useState<HelperProgress | null>(null);
@@ -91,7 +112,7 @@ export function ProtectedSiteCard({ site, vendor, url, jobId, token, onUploaded 
     started.current = true;
     setError("");
     setProgress({ stage: "permission", site });
-    const run = captureWithHelper({ url, jobId, token }, setProgress);
+    const run = captureWithHelper({ url, jobId, token, maxPages, depth }, setProgress);
     run.promise
       .then(() => onUploaded())
       .catch((err: unknown) => {
@@ -99,13 +120,18 @@ export function ProtectedSiteCard({ site, vendor, url, jobId, token, onUploaded 
         setStep("error");
       });
     return () => run.cancel();
-  }, [step, url, jobId, token, site, onUploaded]);
+  }, [step, url, jobId, token, site, maxPages, depth, onUploaded]);
 
   const pct = progress ? (STAGE_PROGRESS[progress.stage] ?? 10) : 4;
+  // Pages fill 18–45%, files 45–85%.
+  const pagePct =
+    (progress?.stage === "html" || progress?.stage === "next-page") && progress.pages
+      ? 18 + Math.round((((progress.page ?? 1) - 1) / progress.pages) * 27)
+      : null;
   const filesPct =
     progress?.stage === "files" && progress.total
       ? 45 + Math.round(((progress.done ?? 0) / progress.total) * 40)
-      : pct;
+      : (pagePct ?? pct);
   const reached = (stage: string) =>
     progress ? (STAGE_PROGRESS[progress.stage] ?? 0) >= STAGE_PROGRESS[stage]! : false;
   const chips: Array<[string, boolean]> = [
@@ -188,7 +214,7 @@ export function ProtectedSiteCard({ site, vendor, url, jobId, token, onUploaded 
             aria-valuenow={filesPct}
           >
             <div
-              className="h-full rounded-full bg-gradient-to-r from-teal-300 to-emerald-400 transition-all duration-500"
+              className="h-full rounded-full bg-primary transition-all duration-500"
               style={{ width: `${filesPct}%` }}
             />
           </div>
@@ -198,7 +224,7 @@ export function ProtectedSiteCard({ site, vendor, url, jobId, token, onUploaded 
                 key={label}
                 className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs ${
                   ok
-                    ? "border-emerald-400/50 text-emerald-300"
+                    ? "border-foreground/40 text-foreground"
                     : "border-border text-muted-foreground"
                 }`}
               >

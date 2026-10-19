@@ -51,9 +51,9 @@ export function HelperOnboarding() {
           Clone protected sites too — install Clonyfy Helper once
         </p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Some sites (Zillow, Lovable…) block automated browsers. The helper clones them from your
-          own browser in one click. It copies only the public page — never cookies, logins or
-          personal data.
+          Some sites (like Zillow) block automated browsers on every page. The helper clones them
+          from your own browser in one click. It copies only the public page — never cookies, logins
+          or personal data.
         </p>
       </div>
       <div className="flex items-center gap-2">

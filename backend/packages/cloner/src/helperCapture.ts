@@ -61,12 +61,13 @@ export async function runHelperCapture(
     }
     let targetOrigin: string;
     try { targetOrigin = new URL(bundle.url).origin; } catch { throw new Error('Helper capture has no valid page URL'); }
-    if (!bundle.domSnapshot || bundle.domSnapshot.length < 200) throw new Error('Helper capture contains no page content');
+    if (!bundle.pages.some((p) => p.domSnapshot && p.domSnapshot.length >= 200)) throw new Error('Helper capture contains no page content');
 
     logger.info('\nCLONYFY v0.1 — Clonyfy Helper capture');
     logger.info(`Target      : ${bundle.url}`);
     logger.info(`Output      : ${out}`);
     logger.info(`Captured in : the user's own browser (${bundle.capturedAt || 'now'})`);
+    logger.info(`Pages       : ${bundle.pages.length} captured in the browser`);
     logger.info(`Files       : ${bundle.assets.filter((a) => a.data).length} read in the browser, ${bundle.assets.filter((a) => !a.data).length} to download`);
 
     const assetsDir = join(out, 'public', '_assets');
@@ -143,37 +144,47 @@ export async function runHelperCapture(
     }
     logger.info(`  Files saved: ${assets.length} (${downloaded} downloaded by the server), ${failed.length} unavailable`);
 
-    // ── The page record — same shape the crawler produces. ──
-    const network: NetworkEntry[] = bundle.networkRecord.map((n) => ({
-      method: n.method, url: n.url, postData: null, status: n.status, contentType: n.contentType, body: n.body,
-    }));
-    const route = routeForUrl(bundle.url);
-    const record: PageRecord = {
-      url: bundle.url,
-      route,
-      html: '',
-      serverHtml: bundle.serverHtml || undefined,
-      assets,
-      network,
-      failedAssets: failed,
-    };
-    record.html = rewriteHtml({ ...record, html: bundle.domSnapshot }, targetOrigin);
-
+    // ── Page records — the same shape the crawler produces, one per captured page. ──
     const routeMap: Record<string, string> = {};
     const pageFilename = (r: string) => `${safeName(r)}.html`;
-    const filename = pageFilename(route);
-    writeFileSync(join(capturedPagesDir, filename), record.html, 'utf8');
-    routeMap[route] = filename;
-    logger.info(`  [1/1] ✓ ${bundle.url}  (assets: ${assets.length}, network: ${network.length})`);
+    const records: PageRecord[] = [];
+    const rewriteStats: Array<{ url: string; assets: number; network: number }> = [];
+    const seenRoutes = new Set<string>();
+    const pages = bundle.pages.filter((p) => p.domSnapshot && p.domSnapshot.length >= 200);
+    for (const [i, page] of pages.entries()) {
+      const route = routeForUrl(page.url);
+      if (seenRoutes.has(route)) continue;
+      seenRoutes.add(route);
+      const network: NetworkEntry[] = page.networkRecord.map((n) => ({
+        method: n.method, url: n.url, postData: null, status: n.status, contentType: n.contentType, body: n.body,
+      }));
+      const record: PageRecord = {
+        url: page.url,
+        route,
+        html: '',
+        serverHtml: page.serverHtml || undefined,
+        assets,
+        network,
+        failedAssets: failed,
+      };
+      record.html = rewriteHtml({ ...record, html: page.domSnapshot }, targetOrigin);
+      const filename = pageFilename(route);
+      writeFileSync(join(capturedPagesDir, filename), record.html, 'utf8');
+      routeMap[route] = filename;
+      records.push(record);
+      rewriteStats.push({ url: page.url, assets: assets.length, network: network.length });
+      logger.info(`  [${i + 1}/${pages.length}] ✓ ${page.url}  (assets: ${assets.length}, network: ${network.length})`);
+    }
+    if (!records.length) throw new Error('Helper capture contains no page content');
 
-    const opts: ClonerOptions = { url: bundle.url, out, maxPages: 1, depth: 1, ignoreRobots: true, concurrency: 1 };
-    return await finishClone(opts, [record], {
+    const opts: ClonerOptions = { url: bundle.url, out, maxPages: records.length, depth: 1, ignoreRobots: true, concurrency: 1 };
+    return await finishClone(opts, records, {
       targetOrigin,
       capturedPagesDir,
       routeMap,
       pageFilename,
       notifyArtifact,
-      rewriteStats: [{ url: bundle.url, assets: assets.length, network: network.length }],
+      rewriteStats,
     });
   } catch (err) {
     logger.error(err instanceof Error ? err.message : 'Helper capture failed', err);

@@ -1263,7 +1263,7 @@ async function countClonePagesBestEffort(outDir) {
   } catch {}
   try {
     const map = (await loadRouteMapAsync(outDir)) || (await inferRouteMapFromCapturedPages(outDir));
-    if (map && Object.keys(map).length) return Object.keys(map).length;
+    if (map && Object.keys(map).length) return new Set(Object.values(map)).size;
   } catch {}
   return 0;
 }
@@ -2516,7 +2516,8 @@ async function verifyCloneReadable(outDir) {
     const page = await readCloneFile(outDir, join('captured-pages', filename));
     if (!page || !page.length) return { ok: false, error: `Captured page missing: ${filename}` };
   }
-  return { ok: true, pages: Object.keys(map).length };
+  // Count page files, not routes: "/about" and its "/about.html" alias are one page.
+  return { ok: true, pages: new Set(Object.values(map)).size };
 }
 
 /**
@@ -2546,7 +2547,7 @@ async function verifyCloneReadableFromStorage(outDir) {
     const page = await tryStorage(capturedPageStorageRel(filename));
     if (!page?.length) return { ok: false, error: `Storage missing page: ${filename}` };
   }
-  return { ok: true, pages: entries.length };
+  return { ok: true, pages: new Set(entries.map(([, f]) => f)).size };
 }
 
 function addAssetMapVariants(map, from, to) {
@@ -5716,6 +5717,14 @@ async function handleRequest(req, res) {
     if (!sameSiteHost(capturedHost, job.hostname)) {
       return json(res, { error: `The captured tab shows ${capturedHost || 'another page'}, not ${job.hostname}.` }, 400);
     }
+    // Every captured page must belong to the site that was blocked.
+    for (const p of Array.isArray(bundle?.pages) ? bundle.pages : []) {
+      let host = '';
+      try { host = new URL(String(p?.url || '')).hostname; } catch {}
+      if (!sameSiteHost(host, job.hostname)) {
+        return json(res, { error: `A captured page is not on ${job.hostname}.` }, 400);
+      }
+    }
     const vendor = job.helper.vendor;
     job.helper = null; // one capture per offer; a failure below issues a fresh one
     job.helperVendor = vendor;
@@ -6058,6 +6067,9 @@ async function handleRequest(req, res) {
             url: job.url,
             token: randomBytes(24).toString('base64url'),
             expiresAt: Date.now() + HELPER_CAPTURE_TTL_MS,
+            // The clone's own page budget: the helper follows links in the user's tab up to it.
+            maxPages: Math.max(1, Math.min(60, parseInt(job.maxPages, 10) || 1)),
+            depth: Math.max(1, Math.min(5, parseInt(job.depth, 10) || 1)),
           };
           job.logs.push(`[INFO] ${job.hostname} is protected by ${job.helper.vendor}. Clone it with the Clonyfy Helper: it captures the page in your own browser.`);
           persistJob(job, { force: true });

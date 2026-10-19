@@ -23,6 +23,15 @@ export interface HelperNetworkEntry {
   body: string | null;
 }
 
+/** One captured page (the helper follows links up to the clone's page budget). */
+export interface HelperPage {
+  url: string;
+  title?: string;
+  serverHtml: string;
+  domSnapshot: string;
+  networkRecord: HelperNetworkEntry[];
+}
+
 export interface HelperBundle {
   v: 1;
   /** The page as loaded in the tab (after redirects). */
@@ -35,6 +44,8 @@ export interface HelperBundle {
   domSnapshot: string;
   assets: HelperAsset[];
   networkRecord: HelperNetworkEntry[];
+  /** Every captured page, the first one being the page above. Files are shared in `assets`. */
+  pages: HelperPage[];
 }
 
 /** Header names that carry credentials or session state. */
@@ -114,6 +125,7 @@ export function sanitizeHelperBundle(input: unknown): HelperBundle {
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
   const assets = Array.isArray(b.assets) ? b.assets : [];
   const network = Array.isArray(b.networkRecord) ? b.networkRecord : [];
+  const pages = scrubPages(Array.isArray(b.pages) ? b.pages : []);
   return {
     v: 1,
     url: scrubUrl(str(b.url)),
@@ -128,21 +140,49 @@ export function sanitizeHelperBundle(input: unknown): HelperBundle {
         if (typeof a.data === 'string' && a.data) asset.data = a.data;
         return asset;
       }),
-    networkRecord: network
-      .filter((n): n is Record<string, unknown> => !!n && typeof n === 'object' && typeof (n as { url?: unknown }).url === 'string')
-      // Only what the page READ: request bodies (form posts, logins) never leave the browser.
-      .filter((n) => String(n.method || 'GET').toUpperCase() === 'GET')
-      .map((n) => {
-        const contentType = str(n.contentType).slice(0, 120);
-        return {
-          method: 'GET',
-          url: scrubUrl(str(n.url)),
-          status: Number(n.status) || 0,
-          contentType,
-          body: scrubBody(typeof n.body === 'string' ? n.body : null, contentType),
-        };
-      }),
+    networkRecord: scrubNetwork(network),
+    pages: pages.length ? pages : (b.domSnapshot ? [{
+      url: scrubUrl(str(b.url)),
+      title: str(b.title).slice(0, 300),
+      serverHtml: scrubHtml(str(b.serverHtml)),
+      domSnapshot: scrubHtml(str(b.domSnapshot)),
+      networkRecord: scrubNetwork(network),
+    }] : []),
   };
+}
+
+const MAX_PAGES = 60;
+
+function scrubNetwork(list: unknown[]): HelperNetworkEntry[] {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '');
+  return list
+    .filter((n): n is Record<string, unknown> => !!n && typeof n === 'object' && typeof (n as { url?: unknown }).url === 'string')
+    // Only what the page READ: request bodies (form posts, logins) never leave the browser.
+    .filter((n) => String(n.method || 'GET').toUpperCase() === 'GET')
+    .map((n) => {
+      const contentType = str(n.contentType).slice(0, 120);
+      return {
+        method: 'GET',
+        url: scrubUrl(str(n.url)),
+        status: Number(n.status) || 0,
+        contentType,
+        body: scrubBody(typeof n.body === 'string' ? n.body : null, contentType),
+      };
+    });
+}
+
+function scrubPages(list: unknown[]): HelperPage[] {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '');
+  return list
+    .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object' && typeof (p as { url?: unknown }).url === 'string')
+    .slice(0, MAX_PAGES)
+    .map((p) => ({
+      url: scrubUrl(str(p.url)),
+      title: str(p.title).slice(0, 300),
+      serverHtml: scrubHtml(str(p.serverHtml)),
+      domSnapshot: scrubHtml(str(p.domSnapshot)),
+      networkRecord: scrubNetwork(Array.isArray(p.networkRecord) ? p.networkRecord : []),
+    }));
 }
 
 /**

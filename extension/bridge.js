@@ -28,6 +28,8 @@
         jobId: String(msg.jobId || ''),
         token: String(msg.token || ''),
         apiBase: String(msg.apiBase || ''),
+        maxPages: Number(msg.maxPages) || 1,
+        depth: Number(msg.depth) || 1,
       }).catch((err) => toApp({ type: 'progress', requestId: msg.requestId, stage: 'error', message: String(err?.message || err) }));
     }
   });

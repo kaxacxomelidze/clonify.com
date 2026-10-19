@@ -46,6 +46,13 @@ const NON_PAGE_EXTS = new Set([
 const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
 /** Entry pages tried (in order) when the start URL itself can't be captured. */
 const FALLBACK_LANDING_PATHS = ['/home', '/index', '/en', '/en-us', '/main', '/welcome', '/product', '/features', '/about', '/pricing'];
+/**
+ * When the start page is behind bot protection, only these stand-ins for the home page
+ * are tried (lovable.dev: "/" is blocked, "/home" is not → cloned on the server, as before).
+ * If none of them open either (zillow.com), the site is cloned with the Clonyfy Helper —
+ * never by quietly substituting an unrelated page (pricing, a mortgage form…).
+ */
+const PROTECTED_HOME_FALLBACK_PATHS = ['/home', '/index', '/en', '/en-us', '/main', '/welcome'];
 const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 150_000;
 /** Scale Max / full-site: give non-home pages more time before static salvage. */
 const FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
@@ -781,14 +788,13 @@ export async function crawl(
   const MAX_FALLBACK_ATTEMPTS = 6;
   let fallbackQueue: string[] | null = null;
   let fallbackAttempts = 0;
-  // The page the user asked for is behind bot protection: clone THAT page through the
-  // Clonyfy Helper — never quietly substitute another page of the site (e.g. a mortgage
-  // form instead of the home page) and report it as done.
+  // The page the user asked for is behind bot protection: try its home-page stand-ins
+  // (PROTECTED_HOME_FALLBACK_PATHS) on the server first; if those are blocked too, the
+  // clone goes to the Clonyfy Helper. Unrelated pages are never substituted.
   let startProtected = false;
   // A fallback entry page stands in for the start URL, so it gets the start URL's time.
   const landingUrls = new Set<string>();
   const pumpFallback = () => {
-    if (startProtected) return;
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
       const next = fallbackQueue.shift()!;
@@ -810,9 +816,11 @@ export async function crawl(
   let sitemapFallbacksAdded = false;
   /** Named entry pages start right away; sitemap pages join whenever the sitemap arrives. */
   const startFallbacks = () => {
-    if (records.length > 0 || startProtected) return;
-    if (!fallbackQueue) fallbackQueue = FALLBACK_LANDING_PATHS.map((p) => new URL(p, origin).href);
-    if (sitemapFetchDone && !sitemapFallbacksAdded) {
+    if (records.length > 0) return;
+    if (!fallbackQueue) {
+      fallbackQueue = (startProtected ? PROTECTED_HOME_FALLBACK_PATHS : FALLBACK_LANDING_PATHS).map((p) => new URL(p, origin).href);
+    }
+    if (sitemapFetchDone && !sitemapFallbacksAdded && !startProtected) {
       sitemapFallbacksAdded = true;
       fallbackQueue = [...new Set([...fallbackQueue, ...sitemapFallbacks()])];
     }
@@ -821,7 +829,8 @@ export async function crawl(
 
   const maybeEnqueueSitemap = () => {
     if (sitemapEnqueued || !startUrlFinished || !sitemapFetchDone) return;
-    if (startProtected && records.length === 0) return;
+    // Protected start page, no stand-in captured yet: sitemap pages must not become the clone.
+    if (startProtected && records.length === 0) { startFallbacks(); return; }
     if (records.length === 0) startFallbacks();
     sitemapEnqueued = true;
     const remaining = Math.max(0, opts.maxPages - budgetUsed());

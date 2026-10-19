@@ -134,14 +134,41 @@ function keepAlive() {
   return () => clearInterval(timer);
 }
 
+/** Same page, ignoring "www.", the hash and a trailing slash. */
+function pageKey(u) {
+  try {
+    const x = new URL(u);
+    return `${x.hostname.replace(/^www\./, '')}${x.pathname.replace(/\/+$/, '') || '/'}${x.search}`;
+  } catch { return String(u); }
+}
+
+/** Wait until the tab shows the real page: if the site asks for its human check, the user does it there. */
+async function waitForRealPage(tabId, site, report) {
+  const started = Date.now();
+  let state = await inTab(tabId, pageState, [], 20_000).catch(() => {
+    throw new Error('Could not read the opened tab. Keep it open and try again.');
+  });
+  while (state?.challenge) {
+    if (Date.now() - started > CHALLENGE_WAIT_MS) throw new Error('The site check was not completed in the opened tab');
+    report('challenge', { site });
+    await new Promise((r) => setTimeout(r, 2000));
+    await waitForTabComplete(tabId, 15_000);
+    state = await inTab(tabId, pageState, [], 20_000).catch(() => ({ challenge: true }));
+  }
+}
+
 async function runCapture(msg, report) {
   const { url, jobId, token, apiBase, requestId } = msg;
+  // The clone's own budget (Max pages / Depth chosen on clonyfy.com).
+  const maxPages = Math.max(1, Math.min(60, parseInt(msg.maxPages, 10) || 1));
+  const maxDepth = Math.max(1, Math.min(5, parseInt(msg.depth, 10) || 1));
   let api;
   try { api = new URL(apiBase).origin; } catch { throw new Error('Unknown Clonyfy address'); }
   if (!API_ORIGINS.includes(api)) throw new Error('Captures can only be sent to Clonyfy');
   if (!/^https?:\/\//i.test(url || '')) throw new Error('Invalid page address');
+  const site = new URL(url).hostname;
 
-  report('permission', { site: new URL(url).hostname });
+  report('permission', { site });
   if (!(await ensureAllowed(url, requestId))) throw new Error('Permission to read this site was not given');
 
   report('opening');
@@ -149,52 +176,74 @@ async function runCapture(msg, report) {
   // Heavy pages (ads, trackers) may never report "complete" — continue after 25s anyway.
   await waitForTabComplete(tabId, 25_000);
 
-  // The page must be the real page: if the site shows its human check, the user does it
-  // in that tab (they are the human it asks for) and the capture continues afterwards.
-  const started = Date.now();
-  let state = await inTab(tabId, pageState, [], 20_000).catch(() => {
-    throw new Error('Could not read the opened tab. Keep it open and try again.');
-  });
-  while (state?.challenge) {
-    if (Date.now() - started > CHALLENGE_WAIT_MS) throw new Error('The site check was not completed in the opened tab');
-    report('challenge', { site: new URL(url).hostname });
-    await new Promise((r) => setTimeout(r, 2000));
-    await waitForTabComplete(tabId, 15_000);
-    state = await inTab(tabId, pageState, [], 20_000).catch(() => ({ challenge: true }));
+  // Pages: the start page, then its links (menus first) — breadth-first, up to the
+  // clone's page budget and depth, all in the same tab the user is already verified in.
+  const pages = [];
+  const files = new Map(); // url → kind, shared by all pages
+  const queue = [{ url, depth: 0 }];
+  const seen = new Set([pageKey(url)]);
+  while (queue.length && pages.length < maxPages) {
+    const item = queue.shift();
+    const n = pages.length + 1;
+    if (pages.length) {
+      report('next-page', { page: n, pages: maxPages, url: item.url });
+      await new Promise((r) => setTimeout(r, 1200)); // a visitor's pace between pages
+      await chrome.tabs.update(tabId, { url: item.url });
+      await waitForTabComplete(tabId, 25_000);
+    }
+    await waitForRealPage(tabId, site, report);
+    report('html', { page: n, pages: maxPages });
+    const page = await inTab(tabId, readPage, [], 120_000).catch(() => null);
+    if (!page?.domSnapshot) {
+      if (!pages.length) throw new Error('Could not read the page');
+      continue; // a later page failed: keep the ones already captured
+    }
+    // The site may redirect (e.g. to a page already captured) — keep each page once.
+    if (pages.some((p) => pageKey(p.url) === pageKey(page.url))) continue;
+    seen.add(pageKey(page.url));
+    pages.push({ url: page.url, title: page.title, serverHtml: page.serverHtml, domSnapshot: page.domSnapshot, networkRecord: page.network });
+    for (const f of page.files) if (!files.has(f.url)) files.set(f.url, f.kind);
+    if (item.depth + 1 <= maxDepth) {
+      for (const link of page.links || []) {
+        const key = pageKey(link);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        queue.push({ url: link, depth: item.depth + 1 });
+      }
+    }
   }
 
-  report('html');
-  const page = await inTab(tabId, readPage, [], 120_000);
-  if (!page?.domSnapshot) throw new Error('Could not read the page');
-
-  // Files, read in the page in batches (the page's own cache and session; nothing new is requested from accounts).
-  const files = page.files.slice(0, MAX_FILES);
+  // Files of every page, read in the page in batches (its own cache and session; nothing
+  // new is requested from accounts).
+  const list = [...files].map(([fileUrl, kind]) => ({ url: fileUrl, kind })).slice(0, MAX_FILES);
   const kinds = { css: 0, js: 0, assets: 0 };
-  for (const f of files) kinds[f.kind === 'css' ? 'css' : f.kind === 'js' ? 'js' : 'assets']++;
-  report('files', { total: files.length, ...kinds });
+  for (const f of list) kinds[f.kind === 'css' ? 'css' : f.kind === 'js' ? 'js' : 'assets']++;
+  report('files', { total: list.length, pages: pages.length, ...kinds });
   const assets = [];
   let bytes = 0;
-  for (let i = 0; i < files.length; i += 25) {
-    const batch = files.slice(i, i + 25);
+  for (let i = 0; i < list.length; i += 25) {
+    const batch = list.slice(i, i + 25);
     const left = Math.max(0, MAX_TOTAL_BYTES - bytes);
     const read = await inTab(tabId, readFiles, [batch.map((f) => f.url), Math.min(MAX_FILE_BYTES, left)]).catch(() => []);
     for (const r of read || []) {
       if (r.data) bytes += Math.round(r.data.length * 0.75);
       assets.push(r);
     }
-    const done = Math.min(files.length, i + batch.length);
-    report(done === files.length ? 'files-done' : 'files', { done, total: files.length, ...kinds });
+    const done = Math.min(list.length, i + batch.length);
+    report(done === list.length ? 'files-done' : 'files', { done, total: list.length, pages: pages.length, ...kinds });
   }
 
-  report('uploading');
+  report('uploading', { pages: pages.length });
+  const first = pages[0];
   const bundle = sanitizeBundle({
-    url: page.url,
-    title: page.title,
+    url: first.url,
+    title: first.title,
     capturedAt: new Date().toISOString(),
-    serverHtml: page.serverHtml,
-    domSnapshot: page.domSnapshot,
+    serverHtml: first.serverHtml,
+    domSnapshot: first.domSnapshot,
     assets,
-    networkRecord: page.network,
+    networkRecord: first.networkRecord,
+    pages,
   });
   const res = await fetch(`${api}/api/helper/capture?job=${encodeURIComponent(jobId)}`, {
     method: 'POST',
@@ -204,7 +253,7 @@ async function runCapture(msg, report) {
   });
   const out = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(out.error || `Upload failed (HTTP ${res.status})`);
-  return { files: assets.length, read: assets.filter((a) => a.data).length };
+  return { files: assets.length, read: assets.filter((x) => x.data).length, pages: pages.length };
 }
 
 /* ─────────────── Functions below run inside the site's tab (self-contained) ─────────────── */
@@ -379,8 +428,34 @@ async function readPage() {
   };
   const copy = document.documentElement.cloneNode(true);
   bake(document, copy, 0);
+  // Links to other pages of this site, for the next pages: header/menu links first, then
+  // the rest in page order. Never sign-in/account pages, and never files.
+  const bare = (h) => h.toLowerCase().replace(/^www\./, '');
+  const skipPath = /\/(log-?in|sign-?in|sign-?up|register|logout|log-?out|account|my-?account|myzillow|profile|settings|cart|checkout|auth|oauth|password)(\/|$|\?)/i;
+  const fileExt = /\.(pdf|zip|jpe?g|png|gif|webp|svg|mp4|mp3|docx?|xlsx?|pptx?|csv|xml|json|rss|ics)$/i;
+  const links = [];
+  const linkSeen = new Set();
+  const anchors = [
+    ...document.querySelectorAll('header a[href], nav a[href], [role="navigation"] a[href]'),
+    ...document.querySelectorAll('main a[href]'),
+    ...document.querySelectorAll('a[href]'),
+  ];
+  for (const a of anchors) {
+    let u;
+    try { u = new URL(a.getAttribute('href'), location.href); } catch { continue; }
+    if (!/^https?:$/.test(u.protocol) || bare(u.hostname) !== bare(location.hostname)) continue;
+    if (skipPath.test(u.pathname) || fileExt.test(u.pathname)) continue;
+    u.hash = '';
+    const key = u.pathname.replace(/\/+$/, '') + u.search;
+    if (linkSeen.has(key) || u.href === location.href.split('#')[0]) continue;
+    linkSeen.add(key);
+    links.push(u.href);
+    if (links.length >= 200) break;
+  }
+
   const doctype = document.doctype ? `<!DOCTYPE ${document.doctype.name}>` : '<!DOCTYPE html>';
   return {
+    links,
     url: location.href,
     title: document.title,
     serverHtml,
