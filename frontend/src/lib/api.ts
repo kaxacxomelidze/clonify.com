@@ -381,7 +381,15 @@ export type CloneJobResponse = {
   ignoreRobots?: boolean;
   fullSite?: boolean;
   /** status "needs_helper": the site blocks automated browsers; capture it with the Clonyfy Helper. */
-  helper?: { vendor: string; url: string; token: string; expiresAt: number } | null;
+  helper?: {
+    vendor: string;
+    url: string;
+    token: string;
+    expiresAt: number;
+    /** The clone's page budget: the helper follows links up to it. */
+    maxPages?: number;
+    depth?: number;
+  } | null;
 };
 
 export type OutputItem = {

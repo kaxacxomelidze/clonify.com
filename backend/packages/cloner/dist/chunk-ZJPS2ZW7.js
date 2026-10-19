@@ -13703,6 +13703,7 @@ var NON_PAGE_EXTS2 = /* @__PURE__ */ new Set([
 ]);
 var NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
 var FALLBACK_LANDING_PATHS = ["/home", "/index", "/en", "/en-us", "/main", "/welcome", "/product", "/features", "/about", "/pricing"];
+var PROTECTED_HOME_FALLBACK_PATHS = ["/home", "/index", "/en", "/en-us", "/main", "/welcome"];
 var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 6e4 : 15e4;
 var FULL_SITE_PAGE_CAPTURE_TIMEOUT = Math.max(
   PAGE_CAPTURE_TIMEOUT,
@@ -14270,7 +14271,6 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   let startProtected = false;
   const landingUrls = /* @__PURE__ */ new Set();
   const pumpFallback = () => {
-    if (startProtected) return;
     if (!fallbackQueue || records.length > 0 || budgetUsed() >= opts.maxPages) return;
     while (fallbackQueue.length && fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
       const next = fallbackQueue.shift();
@@ -14294,9 +14294,11 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   }).sort((a, b) => new URL(a).pathname.split("/").filter(Boolean).length - new URL(b).pathname.split("/").filter(Boolean).length || a.length - b.length);
   let sitemapFallbacksAdded = false;
   const startFallbacks = () => {
-    if (records.length > 0 || startProtected) return;
-    if (!fallbackQueue) fallbackQueue = FALLBACK_LANDING_PATHS.map((p) => new URL(p, origin).href);
-    if (sitemapFetchDone && !sitemapFallbacksAdded) {
+    if (records.length > 0) return;
+    if (!fallbackQueue) {
+      fallbackQueue = (startProtected ? PROTECTED_HOME_FALLBACK_PATHS : FALLBACK_LANDING_PATHS).map((p) => new URL(p, origin).href);
+    }
+    if (sitemapFetchDone && !sitemapFallbacksAdded && !startProtected) {
       sitemapFallbacksAdded = true;
       fallbackQueue = [.../* @__PURE__ */ new Set([...fallbackQueue, ...sitemapFallbacks()])];
     }
@@ -14304,7 +14306,10 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
   };
   const maybeEnqueueSitemap = () => {
     if (sitemapEnqueued || !startUrlFinished || !sitemapFetchDone) return;
-    if (startProtected && records.length === 0) return;
+    if (startProtected && records.length === 0) {
+      startFallbacks();
+      return;
+    }
     if (records.length === 0) startFallbacks();
     sitemapEnqueued = true;
     const remaining = Math.max(0, opts.maxPages - budgetUsed());
@@ -15686,6 +15691,7 @@ function sanitizeHelperBundle(input) {
   const str = (v) => typeof v === "string" ? v : "";
   const assets = Array.isArray(b.assets) ? b.assets : [];
   const network = Array.isArray(b.networkRecord) ? b.networkRecord : [];
+  const pages = scrubPages(Array.isArray(b.pages) ? b.pages : []);
   return {
     v: 1,
     url: scrubUrl(str(b.url)),
@@ -15698,17 +15704,39 @@ function sanitizeHelperBundle(input) {
       if (typeof a.data === "string" && a.data) asset.data = a.data;
       return asset;
     }),
-    networkRecord: network.filter((n) => !!n && typeof n === "object" && typeof n.url === "string").filter((n) => String(n.method || "GET").toUpperCase() === "GET").map((n) => {
-      const contentType = str(n.contentType).slice(0, 120);
-      return {
-        method: "GET",
-        url: scrubUrl(str(n.url)),
-        status: Number(n.status) || 0,
-        contentType,
-        body: scrubBody(typeof n.body === "string" ? n.body : null, contentType)
-      };
-    })
+    networkRecord: scrubNetwork(network),
+    pages: pages.length ? pages : b.domSnapshot ? [{
+      url: scrubUrl(str(b.url)),
+      title: str(b.title).slice(0, 300),
+      serverHtml: scrubHtml(str(b.serverHtml)),
+      domSnapshot: scrubHtml(str(b.domSnapshot)),
+      networkRecord: scrubNetwork(network)
+    }] : []
   };
+}
+var MAX_PAGES2 = 60;
+function scrubNetwork(list) {
+  const str = (v) => typeof v === "string" ? v : "";
+  return list.filter((n) => !!n && typeof n === "object" && typeof n.url === "string").filter((n) => String(n.method || "GET").toUpperCase() === "GET").map((n) => {
+    const contentType = str(n.contentType).slice(0, 120);
+    return {
+      method: "GET",
+      url: scrubUrl(str(n.url)),
+      status: Number(n.status) || 0,
+      contentType,
+      body: scrubBody(typeof n.body === "string" ? n.body : null, contentType)
+    };
+  });
+}
+function scrubPages(list) {
+  const str = (v) => typeof v === "string" ? v : "";
+  return list.filter((p) => !!p && typeof p === "object" && typeof p.url === "string").slice(0, MAX_PAGES2).map((p) => ({
+    url: scrubUrl(str(p.url)),
+    title: str(p.title).slice(0, 300),
+    serverHtml: scrubHtml(str(p.serverHtml)),
+    domSnapshot: scrubHtml(str(p.domSnapshot)),
+    networkRecord: scrubNetwork(Array.isArray(p.networkRecord) ? p.networkRecord : [])
+  }));
 }
 function findCredentialLeaks(input) {
   const leaks = [];
@@ -15781,11 +15809,12 @@ async function runHelperCapture(rawBundle, options, events = {}) {
     } catch {
       throw new Error("Helper capture has no valid page URL");
     }
-    if (!bundle.domSnapshot || bundle.domSnapshot.length < 200) throw new Error("Helper capture contains no page content");
+    if (!bundle.pages.some((p) => p.domSnapshot && p.domSnapshot.length >= 200)) throw new Error("Helper capture contains no page content");
     logger.info("\nCLONYFY v0.1 \u2014 Clonyfy Helper capture");
     logger.info(`Target      : ${bundle.url}`);
     logger.info(`Output      : ${out}`);
     logger.info(`Captured in : the user's own browser (${bundle.capturedAt || "now"})`);
+    logger.info(`Pages       : ${bundle.pages.length} captured in the browser`);
     logger.info(`Files       : ${bundle.assets.filter((a) => a.data).length} read in the browser, ${bundle.assets.filter((a) => !a.data).length} to download`);
     const assetsDir = join7(out, "public", "_assets");
     const capturedPagesDir = join7(out, "captured-pages");
@@ -15810,11 +15839,11 @@ async function runHelperCapture(rawBundle, options, events = {}) {
         return;
       }
       const ext = extFor(url, contentType);
-      const filename2 = `${createHash7("sha1").update(body).digest("hex").slice(0, 16)}${ext}`;
-      const localPath = join7(assetsDir, filename2);
-      const webPath = `/_assets/${filename2}`;
+      const filename = `${createHash7("sha1").update(body).digest("hex").slice(0, 16)}${ext}`;
+      const localPath = join7(assetsDir, filename);
+      const webPath = `/_assets/${filename}`;
       writeFileSync5(localPath, body);
-      await notifyArtifact({ relPath: `public/_assets/${filename2}`, absPath: localPath, kind: "asset" });
+      await notifyArtifact({ relPath: `public/_assets/${filename}`, absPath: localPath, kind: "asset" });
       assets.push({ originalUrl: url, localPath: webPath });
       assetMap.set(url, webPath);
       assetMap.set(url.split("?")[0].split("#")[0], webPath);
@@ -15870,39 +15899,50 @@ async function runHelperCapture(rawBundle, options, events = {}) {
       writeFileSync5(css.path, rewriteCssUrls(css.text, assetMap, css.sourceUrl), "utf8");
     }
     logger.info(`  Files saved: ${assets.length} (${downloaded} downloaded by the server), ${failed.length} unavailable`);
-    const network = bundle.networkRecord.map((n) => ({
-      method: n.method,
-      url: n.url,
-      postData: null,
-      status: n.status,
-      contentType: n.contentType,
-      body: n.body
-    }));
-    const route = routeForUrl(bundle.url);
-    const record = {
-      url: bundle.url,
-      route,
-      html: "",
-      serverHtml: bundle.serverHtml || void 0,
-      assets,
-      network,
-      failedAssets: failed
-    };
-    record.html = rewriteHtml({ ...record, html: bundle.domSnapshot }, targetOrigin);
     const routeMap = {};
     const pageFilename = (r) => `${safeName(r)}.html`;
-    const filename = pageFilename(route);
-    writeFileSync5(join7(capturedPagesDir, filename), record.html, "utf8");
-    routeMap[route] = filename;
-    logger.info(`  [1/1] \u2713 ${bundle.url}  (assets: ${assets.length}, network: ${network.length})`);
-    const opts = { url: bundle.url, out, maxPages: 1, depth: 1, ignoreRobots: true, concurrency: 1 };
-    return await finishClone(opts, [record], {
+    const records = [];
+    const rewriteStats = [];
+    const seenRoutes = /* @__PURE__ */ new Set();
+    const pages = bundle.pages.filter((p) => p.domSnapshot && p.domSnapshot.length >= 200);
+    for (const [i, page] of pages.entries()) {
+      const route = routeForUrl(page.url);
+      if (seenRoutes.has(route)) continue;
+      seenRoutes.add(route);
+      const network = page.networkRecord.map((n) => ({
+        method: n.method,
+        url: n.url,
+        postData: null,
+        status: n.status,
+        contentType: n.contentType,
+        body: n.body
+      }));
+      const record = {
+        url: page.url,
+        route,
+        html: "",
+        serverHtml: page.serverHtml || void 0,
+        assets,
+        network,
+        failedAssets: failed
+      };
+      record.html = rewriteHtml({ ...record, html: page.domSnapshot }, targetOrigin);
+      const filename = pageFilename(route);
+      writeFileSync5(join7(capturedPagesDir, filename), record.html, "utf8");
+      routeMap[route] = filename;
+      records.push(record);
+      rewriteStats.push({ url: page.url, assets: assets.length, network: network.length });
+      logger.info(`  [${i + 1}/${pages.length}] \u2713 ${page.url}  (assets: ${assets.length}, network: ${network.length})`);
+    }
+    if (!records.length) throw new Error("Helper capture contains no page content");
+    const opts = { url: bundle.url, out, maxPages: records.length, depth: 1, ignoreRobots: true, concurrency: 1 };
+    return await finishClone(opts, records, {
       targetOrigin,
       capturedPagesDir,
       routeMap,
       pageFilename,
       notifyArtifact,
-      rewriteStats: [{ url: bundle.url, assets: assets.length, network: network.length }]
+      rewriteStats
     });
   } catch (err) {
     logger.error(err instanceof Error ? err.message : "Helper capture failed", err);
@@ -16239,4 +16279,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-PIZM54TF.js.map
+//# sourceMappingURL=chunk-ZJPS2ZW7.js.map

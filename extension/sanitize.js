@@ -69,6 +69,7 @@ export function scrubHtml(html) {
 export function sanitizeBundle(input) {
   const b = input && typeof input === 'object' ? input : {};
   const str = (v) => (typeof v === 'string' ? v : '');
+  const pages = scrubPages(b.pages);
   return {
     v: 1,
     url: scrubUrl(str(b.url)),
@@ -83,11 +84,39 @@ export function sanitizeBundle(input) {
         if (typeof a.data === 'string' && a.data) asset.data = a.data;
         return asset;
       }),
-    networkRecord: (Array.isArray(b.networkRecord) ? b.networkRecord : [])
-      .filter((n) => n && typeof n.url === 'string' && String(n.method || 'GET').toUpperCase() === 'GET')
-      .map((n) => {
-        const contentType = str(n.contentType).slice(0, 120);
-        return { method: 'GET', url: scrubUrl(n.url), status: Number(n.status) || 0, contentType, body: scrubBody(typeof n.body === 'string' ? n.body : null, contentType) };
-      }),
+    networkRecord: scrubNetwork(b.networkRecord),
+    pages: pages.length ? pages : (b.domSnapshot ? [{
+      url: scrubUrl(str(b.url)),
+      title: str(b.title).slice(0, 300),
+      serverHtml: scrubHtml(str(b.serverHtml)),
+      domSnapshot: scrubHtml(str(b.domSnapshot)),
+      networkRecord: scrubNetwork(b.networkRecord),
+    }] : []),
   };
+}
+
+const MAX_PAGES = 60;
+
+function scrubNetwork(list) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  return (Array.isArray(list) ? list : [])
+    .filter((n) => n && typeof n.url === 'string' && String(n.method || 'GET').toUpperCase() === 'GET')
+    .map((n) => {
+      const contentType = str(n.contentType).slice(0, 120);
+      return { method: 'GET', url: scrubUrl(n.url), status: Number(n.status) || 0, contentType, body: scrubBody(typeof n.body === 'string' ? n.body : null, contentType) };
+    });
+}
+
+function scrubPages(list) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  return (Array.isArray(list) ? list : [])
+    .filter((p) => p && typeof p.url === 'string')
+    .slice(0, MAX_PAGES)
+    .map((p) => ({
+      url: scrubUrl(p.url),
+      title: str(p.title).slice(0, 300),
+      serverHtml: scrubHtml(str(p.serverHtml)),
+      domSnapshot: scrubHtml(str(p.domSnapshot)),
+      networkRecord: scrubNetwork(p.networkRecord),
+    }));
 }

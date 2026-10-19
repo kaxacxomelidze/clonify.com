@@ -15,6 +15,7 @@ export type HelperStage =
   | "permission"
   | "opening"
   | "challenge"
+  | "next-page"
   | "html"
   | "files"
   | "files-done"
@@ -32,6 +33,10 @@ export type HelperProgress = {
   assets?: number;
   files?: number;
   read?: number;
+  /** Page being captured (1-based) and the page budget. */
+  page?: number;
+  pages?: number;
+  url?: string;
   message?: string;
 };
 
@@ -92,7 +97,7 @@ export function onHelperReady(callback: (version: string) => void): () => void {
  * comes through `onProgress`; resolves when the upload is accepted.
  */
 export function captureWithHelper(
-  input: { url: string; jobId: string; token: string },
+  input: { url: string; jobId: string; token: string; maxPages?: number; depth?: number },
   onProgress: (p: HelperProgress) => void,
 ): { promise: Promise<HelperProgress>; cancel: () => void } {
   const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -121,6 +126,8 @@ export function captureWithHelper(
         url: input.url,
         jobId: input.jobId,
         token: input.token,
+        maxPages: input.maxPages ?? 1,
+        depth: input.depth ?? 1,
         apiBase: getApiBaseUrl(),
       },
       window.location.origin,

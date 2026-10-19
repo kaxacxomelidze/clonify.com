@@ -496,6 +496,8 @@ function ClonePage() {
           url={helperOffer.url}
           jobId={run.id}
           token={helperOffer.token}
+          maxPages={helperOffer.maxPages ?? 1}
+          depth={helperOffer.depth ?? 1}
           onUploaded={onHelperUploaded}
         />
       )}

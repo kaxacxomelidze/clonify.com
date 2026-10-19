@@ -82,3 +82,35 @@ describe('Clonyfy Helper extension stripping (what runs in the user browser)', (
     expect(fromExtension).toEqual(sanitizeHelperBundle(dirtyBundle()));
   });
 });
+
+describe('Clonyfy Helper multi-page bundles', () => {
+  const multi = () => {
+    const b = dirtyBundle();
+    return {
+      ...b,
+      pages: [
+        { url: b.url, title: 'Homes', serverHtml: b.serverHtml, domSnapshot: b.domSnapshot, networkRecord: b.networkRecord, cookies: 'x=1' },
+        { url: 'https://www.example.com/rent?session=abc', title: 'Rent', serverHtml: '<meta name="csrf-token" content="t2">', domSnapshot: `<input type="password" value="hunter2">${'<p>Rentals</p>'.repeat(30)}`,
+          networkRecord: [{ method: 'GET', url: 'https://www.example.com/api/rentals?token=t', status: 200, contentType: 'application/json', body: '{"items":[1],"auth":{"jwt":"x"}}', responseHeaders: { 'set-cookie': 'a' } }] },
+      ],
+    };
+  };
+
+  it('strips credentials from every page, on the server and in the extension alike', async () => {
+    expect(findCredentialLeaks(multi()).length).toBeGreaterThan(10);
+    const clean = sanitizeHelperBundle(multi());
+    expect(findCredentialLeaks(clean)).toEqual([]);
+    expect(clean.pages.map((p) => p.url)).toEqual(['https://www.example.com/homes?page=2', 'https://www.example.com/rent']);
+    expect(clean.pages[1]!.domSnapshot).toContain('<p>Rentals</p>');
+    expect(JSON.parse(clean.pages[1]!.networkRecord[0]!.body!)).toEqual({ items: [1] });
+    // @ts-expect-error — plain JS module shipped in the extension
+    const { sanitizeBundle } = await import('../../../../../extension/sanitize.js');
+    expect(sanitizeBundle(multi())).toEqual(clean);
+  });
+
+  it('a one-page bundle (older helper) still yields its page', () => {
+    const clean = sanitizeHelperBundle(dirtyBundle());
+    expect(clean.pages).toHaveLength(1);
+    expect(clean.pages[0]!.domSnapshot).toContain('<p>Listing</p>');
+  });
+});
