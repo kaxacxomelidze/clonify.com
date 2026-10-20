@@ -29,6 +29,9 @@ dist/
 build/
 coverage/
 
+nginx/
+compose.yaml
+
 # Logs / temp
 *.log
 *.tmp
