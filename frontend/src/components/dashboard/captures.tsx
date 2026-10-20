@@ -38,6 +38,7 @@ export const STATUS_LABELS: Record<CloneStatus, string> = {
   done: "Complete",
   running: "Running",
   queued: "Queued",
+  waiting: "Waiting for helper",
   error: "Failed",
 };
 

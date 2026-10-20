@@ -31,12 +31,15 @@ type Props = {
 
 type Step = "detecting" | "install" | "capturing" | "error";
 
+/** Set when the user opens the install link; cleared once the helper answers. */
+const INSTALL_CLICKED_KEY = "clonyfy_helper_install_clicked";
+
 const STAGE_TEXT: Record<string, (p: HelperProgress) => string> = {
   permission: (p) =>
     `Allow Clonyfy Helper to read ${p.site || "the site"} in the small window (once per site).`,
-  opening: () => "Opening the page in your browser…",
+  opening: () => "Opening the page in the Clonyfy Helper window…",
   challenge: (p) =>
-    `${p.site || "The site"} is checking that you're human — complete it in the opened tab, the capture continues by itself.`,
+    `${p.site || "The site"} is checking that you're human — complete it in the Clonyfy Helper window, the capture continues by itself.`,
   html: (p) =>
     p.pages && p.pages > 1
       ? `Reading page ${p.page ?? 1} of up to ${p.pages}…`
@@ -52,17 +55,49 @@ const STAGE_TEXT: Record<string, (p: HelperProgress) => string> = {
   done: () => "Captured — building your clone.",
 };
 
-const STAGE_PROGRESS: Record<string, number> = {
-  permission: 8,
-  opening: 18,
-  challenge: 22,
-  "next-page": 30,
-  html: 30,
-  files: 45,
-  "files-done": 85,
-  uploading: 92,
-  done: 100,
-};
+/**
+ * Overall clone progress while the helper works, 0–90%: allow 3, open 6, pages 8–58,
+ * files 58–83, upload 88, sent 90. The server's build then takes it from 90 to 100%.
+ */
+function helperPercent(p: HelperProgress | null): number {
+  if (!p) return 1;
+  switch (p.stage) {
+    case "permission":
+      return 3;
+    case "opening":
+    case "challenge":
+      return 6;
+    case "next-page":
+    case "html": {
+      const pages = Math.max(1, p.pages ?? 1);
+      const at = (p.page ?? 1) - 1 + (p.stage === "html" ? 0.5 : 0);
+      return Math.round(8 + (Math.min(at, pages) / pages) * 50);
+    }
+    case "files":
+      return p.total ? Math.round(58 + ((p.done ?? 0) / p.total) * 25) : 58;
+    case "files-done":
+      return 83;
+    case "uploading":
+      return 88;
+    case "done":
+      return 90;
+    default:
+      return 1;
+  }
+}
+
+/** Which stages count as reached, for the HTML / CSS / JavaScript / Assets chips. */
+const STAGE_ORDER = [
+  "permission",
+  "opening",
+  "challenge",
+  "next-page",
+  "html",
+  "files",
+  "files-done",
+  "uploading",
+  "done",
+];
 
 export function ProtectedSiteCard({
   site,
@@ -92,16 +127,52 @@ export function ProtectedSiteCard({
     const poll = window.setInterval(() => {
       void detectHelper(400).then((v) => v && setStep((s) => (s === "install" ? "capturing" : s)));
     }, 2500);
+    // Chrome only adds an extension to pages loaded after it was installed. Back from the
+    // store (or chrome://extensions) and still not detected → reload once; the dashboard
+    // resumes this clone and the capture starts by itself.
+    const onReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      let clicked = false;
+      try {
+        clicked = sessionStorage.getItem(INSTALL_CLICKED_KEY) === "1";
+      } catch {
+        /* ignore */
+      }
+      if (!clicked) return;
+      void detectHelper(800).then((v) => {
+        if (cancelled) return;
+        if (v) {
+          try {
+            sessionStorage.removeItem(INSTALL_CLICKED_KEY);
+          } catch {
+            /* ignore */
+          }
+          setStep((s) => (s === "install" ? "capturing" : s));
+        } else {
+          window.location.reload();
+        }
+      });
+    };
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("focus", onReturn);
     return () => {
       cancelled = true;
       stop();
       window.clearInterval(poll);
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", onReturn);
     };
   }, []);
 
   // Install-once flag on the account: the card never shows again for this user.
   useEffect(() => {
-    if (step !== "capturing" || user?.helperInstalled) return;
+    if (step !== "capturing") return;
+    try {
+      sessionStorage.removeItem(INSTALL_CLICKED_KEY);
+    } catch {
+      /* ignore */
+    }
+    if (user?.helperInstalled) return;
     void markHelperInstalled()
       .then(() => refresh())
       .catch(() => {});
@@ -122,18 +193,12 @@ export function ProtectedSiteCard({
     return () => run.cancel();
   }, [step, url, jobId, token, site, maxPages, depth, onUploaded]);
 
-  const pct = progress ? (STAGE_PROGRESS[progress.stage] ?? 10) : 4;
-  // Pages fill 18–45%, files 45–85%.
-  const pagePct =
-    (progress?.stage === "html" || progress?.stage === "next-page") && progress.pages
-      ? 18 + Math.round((((progress.page ?? 1) - 1) / progress.pages) * 27)
-      : null;
-  const filesPct =
-    progress?.stage === "files" && progress.total
-      ? 45 + Math.round(((progress.done ?? 0) / progress.total) * 40)
-      : (pagePct ?? pct);
+  // Never moves backwards (e.g. a "challenge" report between pages).
+  const peak = useRef(0);
+  peak.current = step === "capturing" ? Math.max(peak.current, helperPercent(progress)) : 0;
+  const percent = peak.current;
   const reached = (stage: string) =>
-    progress ? (STAGE_PROGRESS[progress.stage] ?? 0) >= STAGE_PROGRESS[stage]! : false;
+    progress ? STAGE_ORDER.indexOf(progress.stage) >= STAGE_ORDER.indexOf(stage) : false;
   const chips: Array<[string, boolean]> = [
     ["HTML", reached("files")],
     ["CSS", reached("files-done")],
@@ -177,6 +242,13 @@ export function ProtectedSiteCard({
               target={FROM_STORE ? "_blank" : undefined}
               rel="noreferrer"
               download={FROM_STORE ? undefined : "clonyfy-helper.zip"}
+              onClick={() => {
+                try {
+                  sessionStorage.setItem(INSTALL_CLICKED_KEY, "1");
+                } catch {
+                  /* ignore */
+                }
+              }}
               className="dashboard-button bg-primary text-primary-foreground"
             >
               {FROM_STORE ? <ExternalLink size={16} /> : <Download size={16} />}
@@ -203,21 +275,28 @@ export function ProtectedSiteCard({
       {step === "capturing" && (
         <div className="mt-4 max-w-2xl">
           <h2 className="text-2xl font-semibold">Cloning {site}</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            {progress ? (STAGE_TEXT[progress.stage]?.(progress) ?? "Working…") : "Starting…"}
-          </p>
+          <div className="mt-2 flex items-baseline justify-between gap-4">
+            <p className="text-sm text-muted-foreground">
+              {progress ? (STAGE_TEXT[progress.stage]?.(progress) ?? "Working…") : "Starting…"}
+            </p>
+            <span className="text-sm tabular-nums">{percent}%</span>
+          </div>
           <div
-            className="mt-5 h-2 w-full overflow-hidden rounded-full bg-muted"
+            className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted"
             role="progressbar"
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={filesPct}
+            aria-valuenow={percent}
           >
             <div
               className="h-full rounded-full bg-primary transition-all duration-500"
-              style={{ width: `${filesPct}%` }}
+              style={{ width: `${percent}%` }}
             />
           </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            The site opens in a small Clonyfy Helper window that closes by itself when it's done —
+            keep it in front until then (Chrome pauses pages that are hidden).
+          </p>
           <div className="mt-4 flex flex-wrap gap-2">
             {chips.map(([label, ok]) => (
               <span

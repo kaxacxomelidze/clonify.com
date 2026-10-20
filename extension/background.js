@@ -9,7 +9,7 @@
  *
  * Flow (started by the Clonyfy web app through bridge.js):
  *   1. one-time allow for the site (Chrome's own permission prompt, from a user click)
- *   2. open the site in a tab (or use the one the user already has open)
+ *   2. open the site in a small Clonyfy Helper window (the user's own tabs stay untouched)
  *   3. wait until the page is the real page (the user completes any check themselves)
  *   4. read the rendered page + its files in that tab
  *   5. strip credentials, upload to the Clonyfy backend
@@ -25,9 +25,25 @@ const CHALLENGE_WAIT_MS = 3 * 60 * 1000;
 
 const pendingAllows = new Map(); // requestId → resolve(granted)
 
-chrome.runtime.onInstalled.addListener((details) => {
-  // First install: tell Clonyfy, so the install card never shows again.
-  if (details.reason === 'install') {
+/** Clonyfy pages the bridge runs on (same list as content_scripts in manifest.json). */
+const APP_PAGES = chrome.runtime.getManifest().content_scripts?.[0]?.matches || [];
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason !== 'install' && details.reason !== 'update') return;
+  // Chrome adds content scripts only to pages loaded after the install, so a Clonyfy tab
+  // already open (waiting for the helper) would never see it. Add the bridge there now:
+  // the waiting clone continues by itself.
+  const appTabs = await chrome.tabs.query({ url: APP_PAGES }).catch(() => []);
+  for (const tab of appTabs) {
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['bridge.js'] }).catch(() => {});
+  }
+  if (details.reason !== 'install') return;
+  // First install: back to Clonyfy — the open dashboard if there is one, else a new tab.
+  const back = appTabs.find((t) => /\/dashboard/.test(t.url || '')) || appTabs[0];
+  if (back?.id != null) {
+    chrome.tabs.update(back.id, { active: true }).catch(() => {});
+    if (back.windowId != null) chrome.windows.update(back.windowId, { focused: true }).catch(() => {});
+  } else {
     chrome.tabs.create({ url: 'https://clonyfy.com/dashboard?helper=installed' }).catch(() => {});
   }
 });
@@ -48,7 +64,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.tabs.sendMessage(appTab, { type: 'progress', requestId: msg.requestId, stage, ...extra }).catch(() => {});
     };
     const release = keepAlive();
-    runCapture(msg, report)
+    runCapture({ ...msg, appTab }, report)
       .then((result) => report('done', result))
       .catch((err) => report('error', { message: String(err?.message || err) }))
       .finally(release);
@@ -98,24 +114,23 @@ function waitForTabComplete(tabId, timeoutMs = 60_000) {
   });
 }
 
-/** The user's own tab on that site if they already have it open, otherwise a new one. */
-async function openSiteTab(url) {
-  const target = new URL(url);
-  const bare = target.hostname.replace(/^www\./, '');
-  const tabs = await chrome.tabs.query({ url: sitePatterns(url) }).catch(() => []);
-  const samePage = tabs.find((t) => {
-    try {
-      const u = new URL(t.url);
-      return u.hostname.replace(/^www\./, '') === bare && u.pathname === target.pathname;
-    } catch { return false; }
-  });
-  if (samePage) {
-    await chrome.tabs.update(samePage.id, { active: true });
-    if (samePage.windowId != null) await chrome.windows.update(samePage.windowId, { focused: true }).catch(() => {});
-    return samePage.id;
-  }
-  const tab = await chrome.tabs.create({ url, active: true });
-  return tab.id;
+/**
+ * The capture runs in its own small Clonyfy Helper window, so the user's tabs are never
+ * navigated and the window closes itself when done. It has to stay on screen: Chrome stops
+ * rendering hidden pages (background tabs, minimized windows) — no animation frames, no
+ * lazy-loading — so a hidden capture would miss lazy sections and images.
+ */
+async function openCaptureWindow(url) {
+  const win = await chrome.windows.create({ url, type: 'popup', focused: true, width: 1440, height: 900 });
+  const tabId = win.tabs?.[0]?.id ?? (await chrome.tabs.query({ windowId: win.id }))[0]?.id;
+  if (tabId == null) throw new Error('Could not open the capture window');
+  return { windowId: win.id, tabId };
+}
+
+/** Back to the Clonyfy tab the capture was started from. */
+async function returnToApp(appTabId) {
+  const tab = await chrome.tabs.update(appTabId, { active: true }).catch(() => null);
+  if (tab?.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
 }
 
 async function inTab(tabId, func, args = [], timeoutMs = 90_000) {
@@ -158,7 +173,7 @@ async function waitForRealPage(tabId, site, report) {
 }
 
 async function runCapture(msg, report) {
-  const { url, jobId, token, apiBase, requestId } = msg;
+  const { url, jobId, token, apiBase, requestId, appTab } = msg;
   // The clone's own budget (Max pages / Depth chosen on clonyfy.com).
   const maxPages = Math.max(1, Math.min(60, parseInt(msg.maxPages, 10) || 1));
   const maxDepth = Math.max(1, Math.min(5, parseInt(msg.depth, 10) || 1));
@@ -172,12 +187,54 @@ async function runCapture(msg, report) {
   if (!(await ensureAllowed(url, requestId))) throw new Error('Permission to read this site was not given');
 
   report('opening');
-  const tabId = await openSiteTab(url);
+  const capture = await openCaptureWindow(url);
+  let windowClosed = false;
+  const onWindowRemoved = (id) => { if (id === capture.windowId) windowClosed = true; };
+  chrome.windows.onRemoved.addListener(onWindowRemoved);
+  let captured;
+  try {
+    captured = await capturePages(capture.tabId, { url, site, maxPages, maxDepth }, report);
+  } catch (err) {
+    if (windowClosed) throw new Error('The Clonyfy Helper window was closed before the capture finished.');
+    throw err;
+  } finally {
+    chrome.windows.onRemoved.removeListener(onWindowRemoved);
+    // Done reading: close the capture window and bring the user back to the dashboard.
+    if (!windowClosed) await chrome.windows.remove(capture.windowId).catch(() => {});
+    await returnToApp(appTab);
+  }
+  const { pages, assets } = captured;
+
+  report('uploading', { pages: pages.length });
+  const first = pages[0];
+  const bundle = sanitizeBundle({
+    url: first.url,
+    title: first.title,
+    capturedAt: new Date().toISOString(),
+    serverHtml: first.serverHtml,
+    domSnapshot: first.domSnapshot,
+    assets,
+    networkRecord: first.networkRecord,
+    pages,
+  });
+  const res = await fetch(`${api}/api/helper/capture?job=${encodeURIComponent(jobId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Helper-Token': token },
+    body: JSON.stringify(bundle),
+    credentials: 'omit',
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out.error || `Upload failed (HTTP ${res.status})`);
+  return { files: assets.length, read: assets.filter((x) => x.data).length, pages: pages.length };
+}
+
+/** Read every page (start page, then its links) and their files in the capture tab. */
+async function capturePages(tabId, { url, site, maxPages, maxDepth }, report) {
   // Heavy pages (ads, trackers) may never report "complete" — continue after 25s anyway.
   await waitForTabComplete(tabId, 25_000);
 
   // Pages: the start page, then its links (menus first) — breadth-first, up to the
-  // clone's page budget and depth, all in the same tab the user is already verified in.
+  // clone's page budget and depth, all in the capture window (the user's browser session).
   const pages = [];
   const files = new Map(); // url → kind, shared by all pages
   const queue = [{ url, depth: 0 }];
@@ -232,28 +289,7 @@ async function runCapture(msg, report) {
     const done = Math.min(list.length, i + batch.length);
     report(done === list.length ? 'files-done' : 'files', { done, total: list.length, pages: pages.length, ...kinds });
   }
-
-  report('uploading', { pages: pages.length });
-  const first = pages[0];
-  const bundle = sanitizeBundle({
-    url: first.url,
-    title: first.title,
-    capturedAt: new Date().toISOString(),
-    serverHtml: first.serverHtml,
-    domSnapshot: first.domSnapshot,
-    assets,
-    networkRecord: first.networkRecord,
-    pages,
-  });
-  const res = await fetch(`${api}/api/helper/capture?job=${encodeURIComponent(jobId)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Helper-Token': token },
-    body: JSON.stringify(bundle),
-    credentials: 'omit',
-  });
-  const out = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(out.error || `Upload failed (HTTP ${res.status})`);
-  return { files: assets.length, read: assets.filter((x) => x.data).length, pages: pages.length };
+  return { pages, assets };
 }
 
 /* ─────────────── Functions below run inside the site's tab (self-contained) ─────────────── */
