@@ -55,6 +55,8 @@ const STAGES = [
   },
 ];
 
+const HELPER_RESUME_KEY = "clonyfy_helper_resume";
+
 type Run = {
   id: string;
   domain: string;
@@ -131,6 +133,34 @@ function ClonePage() {
     }
   }, []);
 
+  // A clone waiting for the Clonyfy Helper survives a reload: installing the helper only
+  // reaches tabs loaded after the install, so the card reloads the page once it's added.
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(HELPER_RESUME_KEY);
+      if (!saved) return;
+      const resumed = JSON.parse(saved) as Run;
+      if (!resumed?.id) return;
+      setRun(resumed);
+      setUrl(`https://${resumed.domain}/`);
+      setProgress(5); // where the server's attempt left it (no pages yet)
+      setPhase("running"); // the status poll moves it back to "protected" with a fresh offer
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (phase === "protected" && run)
+        sessionStorage.setItem(HELPER_RESUME_KEY, JSON.stringify(run));
+      else if (phase === "done" || phase === "error" || phase === "idle")
+        sessionStorage.removeItem(HELPER_RESUME_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, [phase, run]);
+
   useEffect(() => {
     if (!fullSiteAllowed && maxMode) setMaxMode(false);
   }, [fullSiteAllowed, maxMode]);
@@ -158,14 +188,14 @@ function ClonePage() {
         const pct =
           status === "done"
             ? 100
-            : status === "error"
-              ? progress
-              : status === "saving"
-                ? Math.max(progress, 92)
-                : fullSiteRun
-                  ? Math.min(90, Math.round(8 + Math.min(pages, 200) * 0.4))
-                  : Math.min(90, Math.round((pages / targetPages) * 85) + 5);
-        setProgress(pct);
+            : status === "saving"
+              ? 95
+              : fullSiteRun
+                ? Math.min(90, Math.round(8 + Math.min(pages, 200) * 0.4))
+                : Math.min(90, Math.round((pages / targetPages) * 85) + 5);
+        // Only forwards: a helper clone hands over at 90% while its server build reports 0 pages.
+        if (status !== "error")
+          setProgress((current) => (status === "done" ? 100 : Math.max(current, pct)));
         setRun((current) => {
           if (!current || current.id !== jobId) return current;
           const next: Run = {
@@ -241,13 +271,11 @@ function ClonePage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-    // progress intentionally omitted from deps — used only for saving floor
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, run?.id, run?.domain, run?.pages, run?.fullSite, maxPages, addJob, refreshJobs]);
 
   const onHelperUploaded = useCallback(() => {
     setHelperOffer(null);
-    setProgress(50);
+    setProgress(90); // the helper card covered 0–90%; the server's build finishes the rest
     setRun((current) => (current ? { ...current, status: "running" } : current));
     setNotice("Page captured in your browser — Clonyfy is building the clone.");
     setPhase("running");

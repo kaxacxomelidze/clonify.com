@@ -1,4 +1,5 @@
-export type CloneStatus = "done" | "running" | "queued" | "error";
+// "waiting": the site blocks our servers; the clone continues through the Clonyfy Helper.
+export type CloneStatus = "done" | "running" | "queued" | "waiting" | "error";
 
 export type CloneJob = {
   id: string;

@@ -46,9 +46,11 @@ function mapOutput(item: OutputItem): CloneJob {
       ? statusRaw === "saving"
         ? "running"
         : statusRaw
-      : statusRaw === "error" || statusRaw === "failed"
-        ? "error"
-        : "done";
+      : statusRaw === "needs_helper"
+        ? "waiting"
+        : statusRaw === "error" || statusRaw === "failed"
+          ? "error"
+          : "done";
   return {
     id: String(item.id || item.dir),
     domain,

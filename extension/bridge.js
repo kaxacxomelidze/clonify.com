@@ -4,6 +4,10 @@
  * relays capture progress back. It reads nothing from the page.
  */
 (() => {
+  // Injected on install into tabs that were already open, and declared as a content
+  // script for new ones: run once per page, or every request would be forwarded twice.
+  if (window.__clonyfyHelperBridge) return;
+  window.__clonyfyHelperBridge = true;
   const APP = 'clonyfy-app';
   const HELPER = 'clonyfy-helper';
   const version = chrome.runtime.getManifest().version;

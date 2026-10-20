@@ -435,7 +435,8 @@
   color: #a1d6b5;
   background: rgb(116 191 146 / 0.1);
 }
-.capture-status[data-status="running"] {
+.capture-status[data-status="running"],
+.capture-status[data-status="waiting"] {
   color: #dfca9d;
   background: rgb(216 198 163 / 0.1);
 }

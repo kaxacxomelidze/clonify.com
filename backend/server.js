@@ -5022,6 +5022,15 @@ async function handleRequest(req, res) {
           completedAt: new Date().toISOString(),
         }).catch(() => {});
       }
+      // Waiting for the Clonyfy Helper: valid only while its offer is live (an expired offer
+      // or a server restart ends it — that clone failed and its quota slot is returned).
+      const helperOfferLive = liveJob?.status === 'needs_helper' && (liveJob.helper?.expiresAt || 0) > Date.now();
+      if (status === 'needs_helper' && !helperOfferLive && !(liveJob && isActiveJob(liveJob))) {
+        status = 'error';
+        updateCloneStatus({ id: c.id, status: 'error', completedAt: new Date().toISOString() }).catch(() => {});
+        deleteUsageEvent(`clone:${c.id}`).catch(() => {});
+      }
+      if (helperOfferLive) status = 'needs_helper';
       if (!fast && (status === 'done' || status === 'error' || status === 'saving')) {
         try {
           const out = resolveCloneOutDir(c.out_dir) || c.out_dir;
@@ -5704,17 +5713,22 @@ async function handleRequest(req, res) {
       && timingSafeEqual(Buffer.from(token), Buffer.from(expected));
     if (!job || !tokenOk) return json(res, { error: 'This capture is not valid any more. Start the clone again.' }, 404);
     if (Date.now() > job.helper.expiresAt) return json(res, { error: 'This capture expired. Start the clone again.' }, 410);
-    if (job.status !== 'needs_helper' || typeof job.finalize !== 'function') {
+    if (job.status !== 'needs_helper' || typeof job.finalize !== 'function' || job.helperUploading) {
       return json(res, { error: 'This clone can no longer receive a capture. Start the clone again.' }, 409);
     }
+    // Claim the offer before the (large, slow) body arrives: two uploads must never both
+    // pass the check above and build into the same output folder at the same time.
+    job.helperUploading = true;
     let bundle;
     try { bundle = await readJsonBody(req, HELPER_BUNDLE_LIMIT_BYTES); } catch (err) {
+      job.helperUploading = false;
       const tooLarge = err?.message === 'request too large';
       return json(res, { error: tooLarge ? 'The captured page is too large to upload.' : 'Invalid capture data.' }, tooLarge ? 413 : 400);
     }
     let capturedHost = '';
     try { capturedHost = new URL(String(bundle?.url || '')).hostname; } catch {}
     if (!sameSiteHost(capturedHost, job.hostname)) {
+      job.helperUploading = false;
       return json(res, { error: `The captured tab shows ${capturedHost || 'another page'}, not ${job.hostname}.` }, 400);
     }
     // Every captured page must belong to the site that was blocked.
@@ -5722,6 +5736,7 @@ async function handleRequest(req, res) {
       let host = '';
       try { host = new URL(String(p?.url || '')).hostname; } catch {}
       if (!sameSiteHost(host, job.hostname)) {
+        job.helperUploading = false;
         return json(res, { error: `A captured page is not on ${job.hostname}.` }, 400);
       }
     }
@@ -5729,6 +5744,7 @@ async function handleRequest(req, res) {
     job.helper = null; // one capture per offer; a failure below issues a fresh one
     job.helperVendor = vendor;
     job.status = 'running';
+    job.helperUploading = false; // the status now refuses further uploads
     job.logs.push(`[INFO] Received the page from the Clonyfy Helper — building the clone of ${job.hostname}.`);
     persistJob(job, { force: true });
     json(res, { ok: true, id: job.id }, 202);
@@ -6033,20 +6049,25 @@ async function handleRequest(req, res) {
             }
           }
         }
+        // Blocked by bot protection: not a failure — the clone continues in the user's browser
+        // through the Clonyfy Helper, so history shows "Waiting for helper", not "Failed".
+        const waitingForHelper = !(exitCode === 0 && cloneReadable?.ok) && !job.pages && !!readNeedsHelper(job.logs);
         let cloneRecordSaved = false;
         try {
           await insertClone({
             id: job.id, userId: job.userId, userName: job.userName,
-            url: job.url, outDir: job.outDir, status: exitCode === 0 && cloneReadable?.ok ? 'done' : 'error',
+            url: job.url, outDir: job.outDir,
+            status: exitCode === 0 && cloneReadable?.ok ? 'done' : waitingForHelper ? 'needs_helper' : 'error',
             pages: job.pages, assets: job.assets, apiRoutes: job.apiRoutes,
-            startedAt: job.startedAt, completedAt,
+            startedAt: job.startedAt, completedAt: waitingForHelper ? null : completedAt,
           });
           cloneRecordSaved = true;
         } catch (dbErr) {
           job.logs.push(`[WARN] Could not save clone record: ${dbErr?.message || dbErr}`);
         }
         // A clone that failed without capturing anything doesn't use up the monthly quota.
-        if (!(exitCode === 0 && cloneReadable?.ok) && !job.pages && job.userId) {
+        // (One waiting for the helper is still in progress — it counts once it finishes.)
+        if (!(exitCode === 0 && cloneReadable?.ok) && !job.pages && job.userId && !waitingForHelper) {
           await deleteUsageEvent(`clone:${job.id}`).catch(() => {});
         }
         const cloneSucceeded = exitCode === 0 && cloneReadable?.ok;
