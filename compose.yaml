@@ -42,6 +42,8 @@ services:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
+      - /home/deploy/casino/letsencrypt:/etc/nginx/casino-le:ro
+      - /home/deploy/casino/acme:/var/www/casino-acme:ro
 
 networks:
   clonify-db:
