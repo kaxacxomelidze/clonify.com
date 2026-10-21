@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { resolve, join } from 'path';
 import { checkRobots } from './robots.js';
+import { REDIRECT_MARKER, resolveStartUrl } from './startUrl.js';
 import { crawl, isFastCloneProfile, isServerlessRuntime } from './crawler.js';
 import { shouldReplaceCapturedHtml } from './captureQuality.js';
 import { botProtectionMessage, takeBotProtection } from './botProtection.js';
@@ -53,6 +54,15 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     }
     logger.info(`Log file    : ${join(opts.out, 'cloner.log')}`);
     logger.info(`Tip         : run with --verbose (or DEBUG=1) to see per-asset/rewrite detail on the console`);
+
+    // A domain that redirects to another one is cloned as the site visitors land on —
+    // robots.txt, same-site links, files and rewriting all follow the redirected site.
+    const start = await resolveStartUrl(opts.url);
+    if (start.from) {
+      opts.url = start.url;
+      logger.info(`Redirects to: ${start.url} — cloning that site`);
+      logger.info(`${REDIRECT_MARKER} ${JSON.stringify({ from: start.from, to: start.url })}`);
+    }
 
     let targetOrigin: string;
     try {
