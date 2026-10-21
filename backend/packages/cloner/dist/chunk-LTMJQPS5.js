@@ -302,6 +302,58 @@ async function checkRobots(targetUrl) {
   }
 }
 
+// src/userAgent.ts
+var CLONYFY_USER_AGENT = "Mozilla/5.0 (compatible; Clonyfy/1.0; +https://clonyfy.com)";
+
+// src/startUrl.ts
+var REDIRECT_MARKER = "[REDIRECT]";
+var SIGN_IN_PATH = /\/(log-?in|sign-?in|sign-?up|auth|oauth2?|sso|accounts?|session|cas)(\/|$|\?)/i;
+var META_REFRESH = /<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\s*(\d+)\s*;\s*url=([^"'>\s]+)/i;
+function isWebUrl(u) {
+  return u.protocol === "http:" || u.protocol === "https:";
+}
+async function resolveStartUrl(url, timeoutMs = 15e3) {
+  let start;
+  try {
+    start = new URL(url);
+  } catch {
+    return { url };
+  }
+  let finalUrl = start.href;
+  try {
+    const res = await safeFetch(start.href, {
+      headers: { "User-Agent": CLONYFY_USER_AGENT, Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8" },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    finalUrl = res.url || finalUrl;
+    if (res.ok && /html/i.test(res.headers.get("content-type") || "")) {
+      const head = (await res.text().catch(() => "")).slice(0, 64e3);
+      const m = head.match(META_REFRESH);
+      if (m && Number(m[1]) <= 3) {
+        try {
+          finalUrl = new URL(m[2].replace(/&amp;/g, "&"), finalUrl).href;
+        } catch {
+        }
+      }
+    } else {
+      await res.body?.cancel().catch(() => {
+      });
+    }
+  } catch {
+    return { url: start.href };
+  }
+  let end;
+  try {
+    end = new URL(finalUrl);
+  } catch {
+    return { url: start.href };
+  }
+  if (!isWebUrl(end) || end.origin === start.origin) return { url: start.href };
+  if (SIGN_IN_PATH.test(end.pathname + end.search)) return { url: start.href };
+  end.hash = "";
+  return { url: end.href, from: start.href };
+}
+
 // node_modules/eventemitter3/index.mjs
 var import_index = __toESM(require_eventemitter3(), 1);
 
@@ -785,9 +837,6 @@ var PQueue = class extends import_index.default {
     return this.#isPaused;
   }
 };
-
-// src/userAgent.ts
-var CLONYFY_USER_AGENT = "Mozilla/5.0 (compatible; Clonyfy/1.0; +https://clonyfy.com)";
 
 // src/crawler.ts
 import { createHash as createHash4 } from "crypto";
@@ -15976,6 +16025,12 @@ CLONYFY v0.1`);
     }
     logger.info(`Log file    : ${join8(opts.out, "cloner.log")}`);
     logger.info(`Tip         : run with --verbose (or DEBUG=1) to see per-asset/rewrite detail on the console`);
+    const start = await resolveStartUrl(opts.url);
+    if (start.from) {
+      opts.url = start.url;
+      logger.info(`Redirects to: ${start.url} \u2014 cloning that site`);
+      logger.info(`${REDIRECT_MARKER} ${JSON.stringify({ from: start.from, to: start.url })}`);
+    }
     let targetOrigin;
     try {
       targetOrigin = new URL(opts.url).origin;
@@ -16279,4 +16334,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-ZJPS2ZW7.js.map
+//# sourceMappingURL=chunk-LTMJQPS5.js.map

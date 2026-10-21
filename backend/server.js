@@ -2258,6 +2258,19 @@ function readNeedsHelper(logs) {
   return null;
 }
 
+/** The site the start URL redirected to, if the cloner followed one ("[REDIRECT] {from,to}"). */
+function readRedirect(logs) {
+  for (const line of logs || []) {
+    const at = String(line).indexOf('[REDIRECT]');
+    if (at < 0) continue;
+    try {
+      const r = JSON.parse(String(line).slice(at + '[REDIRECT]'.length).trim());
+      return r?.to ? { from: String(r.from || ''), to: String(r.to), host: new URL(String(r.to)).hostname } : null;
+    } catch { return null; }
+  }
+  return null;
+}
+
 /** Same site, ignoring "www." (zillow.com ↔ www.zillow.com). */
 function sameSiteHost(a, b) {
   const bare = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
@@ -5725,19 +5738,22 @@ async function handleRequest(req, res) {
       const tooLarge = err?.message === 'request too large';
       return json(res, { error: tooLarge ? 'The captured page is too large to upload.' : 'Invalid capture data.' }, tooLarge ? 413 : 400);
     }
+    // The blocked site, or the site its address redirects to (lovable.com → lovable.dev).
+    const siteHost = readRedirect(job.logs)?.host || job.hostname;
+    const onSite = (host) => sameSiteHost(host, siteHost) || sameSiteHost(host, job.hostname);
     let capturedHost = '';
     try { capturedHost = new URL(String(bundle?.url || '')).hostname; } catch {}
-    if (!sameSiteHost(capturedHost, job.hostname)) {
+    if (!onSite(capturedHost)) {
       job.helperUploading = false;
-      return json(res, { error: `The captured tab shows ${capturedHost || 'another page'}, not ${job.hostname}.` }, 400);
+      return json(res, { error: `The captured tab shows ${capturedHost || 'another page'}, not ${siteHost}.` }, 400);
     }
     // Every captured page must belong to the site that was blocked.
     for (const p of Array.isArray(bundle?.pages) ? bundle.pages : []) {
       let host = '';
       try { host = new URL(String(p?.url || '')).hostname; } catch {}
-      if (!sameSiteHost(host, job.hostname)) {
+      if (!onSite(host)) {
         job.helperUploading = false;
-        return json(res, { error: `A captured page is not on ${job.hostname}.` }, 400);
+        return json(res, { error: `A captured page is not on ${siteHost}.` }, 400);
       }
     }
     const vendor = job.helper.vendor;
@@ -6085,7 +6101,8 @@ async function handleRequest(req, res) {
           job.status = 'needs_helper';
           job.helper = {
             vendor: String(needsHelper.vendor || 'bot protection'),
-            url: job.url,
+            // The site the start URL redirects to (lovable.com → lovable.dev) is the one cloned.
+            url: readRedirect(job.logs)?.to || job.url,
             token: randomBytes(24).toString('base64url'),
             expiresAt: Date.now() + HELPER_CAPTURE_TTL_MS,
             // The clone's own page budget: the helper follows links in the user's tab up to it.
