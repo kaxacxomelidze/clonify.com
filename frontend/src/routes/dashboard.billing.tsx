@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { Check, CreditCard, Sparkles } from "lucide-react";
+import { Check, CreditCard, Plus, Sparkles } from "lucide-react";
 import { FREE_PLAN, PLAN_RANK, PLANS } from "@/components/dashboard/data";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -10,6 +10,7 @@ import {
   cancelSubscription,
   fetchBillingHistory,
   openBillingPortal,
+  startWhopAddon,
   syncWhopCheckout,
 } from "@/lib/api";
 import { toast } from "sonner";
@@ -46,6 +47,21 @@ function BillingPage() {
   const [notice, setNotice] = useState("");
   const [cancelled, setCancelled] = useState(!!user?.cancelAtPeriodEnd);
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
+  const [addonBusy, setAddonBusy] = useState(false);
+  const cloneCredits = user?.cloneCredits ?? usage?.cloneCredits ?? 0;
+
+  async function buyAddon() {
+    setAddonBusy(true);
+    try {
+      const { url } = await startWhopAddon();
+      window.location.href = url;
+    } catch (err) {
+      setAddonBusy(false);
+      setNotice(
+        err instanceof ApiError ? err.message : "Couldn't start the add-on checkout. Try again.",
+      );
+    }
+  }
   const planKey = String(user?.plan || "free").toLowerCase();
   const planLabel =
     planKey === "starter"
@@ -250,6 +266,13 @@ function BillingPage() {
             })}
           </div>
 
+          {cloneCredits > 0 && (
+            <p className="mt-5 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">+{cloneCredits} bonus clones</span>{" "}
+              available — used automatically once this month's quota runs out.
+            </p>
+          )}
+
           <div className="mt-8 flex flex-wrap gap-3">
             {currentKey !== "unlimited" && (
               <button
@@ -258,6 +281,16 @@ function BillingPage() {
               >
                 <Sparkles className="h-4 w-4" />
                 Upgrade plan
+              </button>
+            )}
+            {currentKey !== "unlimited" && (
+              <button
+                onClick={buyAddon}
+                disabled={addonBusy}
+                className="inline-flex items-center gap-2 rounded-full border border-border px-6 py-3 text-sm font-medium transition-colors hover:bg-accent disabled:opacity-60"
+              >
+                <Plus className="h-4 w-4" />
+                Buy +15 clones — $20
               </button>
             )}
             {isPaid && !isComplimentary && (
