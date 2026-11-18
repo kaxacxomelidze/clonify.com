@@ -311,6 +311,8 @@ export const frenchCopy: Record<string, string> = {
   "(opens in a new tab)": "(s’ouvre dans un nouvel onglet)",
   "Clonyfy. All rights reserved.": "Clonyfy. Tous droits réservés.",
   "Built for people who ship.": "Pour ceux qui concrétisent leurs idées.",
+  "Please complete the human verification and try again.":
+    "Veuillez compléter la vérification humaine et réessayer.",
   Legal: "Mentions légales",
   "Legal Notice": "Mentions légales",
   "Privacy Policy": "Politique de confidentialité",

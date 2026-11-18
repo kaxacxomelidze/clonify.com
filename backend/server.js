@@ -36,7 +36,7 @@ import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGra
 import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
 import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript, buildLiveBridgeScript } from './lib/clonePreviewRuntime.js';
 import { getThemeModel, buildThemeEngineModule, stripThemeArtifacts, applyThemeScriptToHtml } from './lib/themeModels.js';
-import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts } from './local-supabase-compat.js';
+import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts, insertTrackEvent, getFunnelCounts } from './local-supabase-compat.js';
 import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
   retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
@@ -7335,6 +7335,18 @@ async function handleRequest(req, res) {
     });
   }
 
+  // GET /api/admin/analytics/funnel — self-hosted funnel counts (admin only).
+  if (req.method === 'GET' && url.pathname === '/api/admin/analytics/funnel') {
+    if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
+    const days = Math.min(365, Math.max(1, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const rows = await getFunnelCounts(since).catch(() => []);
+    const order = ['landing_view', 'signup_view', 'onboarding', 'paywall_view', 'purchase_view', 'churn'];
+    const byName = Object.fromEntries(rows.map(r => [r.name, { total: r.total, uniques: r.uniques }]));
+    const funnel = order.map(name => ({ name, total: byName[name]?.total || 0, uniques: byName[name]?.uniques || 0 }));
+    return json(res, { days, since, funnel });
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/admin/users') {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     const PAGE_SIZE = 50;
@@ -7533,6 +7545,28 @@ async function handleRequest(req, res) {
       google_oauth_enabled: !!getGoogleOAuthSettings(s).google_client_id,
       github_oauth_enabled: !!getGithubOAuthSettings(s).github_client_id,
     });
+  }
+
+  // POST /api/track — self-hosted funnel analytics. Never throws into the app.
+  if (req.method === 'POST' && url.pathname === '/api/track') {
+    if (!checkRateLimit(`track:${ip}`, 120, 60_000)) return json(res, { ok: true });
+    const body = await readJsonBody(req).catch(() => ({}));
+    const ALLOWED = new Set([
+      'landing_view', 'signup_view', 'onboarding', 'paywall_view', 'purchase_view', 'churn',
+    ]);
+    const name = String(body.event || '').trim();
+    if (!ALLOWED.has(name)) return json(res, { ok: false, error: 'unknown event' }, 400);
+    const user = await getSessionUser(req).catch(() => null);
+    const anonId = String(body.anonId || '').slice(0, 64) || null;
+    const props = body.props && typeof body.props === 'object' ? body.props : null;
+    const path = typeof body.path === 'string' ? body.path.slice(0, 300) : null;
+    const referrer = typeof body.referrer === 'string' ? body.referrer.slice(0, 300) : null;
+    try {
+      await insertTrackEvent({ id: randomUUID(), userId: user?.id || null, anonId, name, props, path, referrer, ip });
+    } catch (err) {
+      console.error('[track] insert failed:', err.message);
+    }
+    return json(res, { ok: true });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/public-config') {

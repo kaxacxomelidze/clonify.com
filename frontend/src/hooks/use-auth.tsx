@@ -25,8 +25,13 @@ type AuthContextValue = {
   usage: UsageSummary | null;
   loading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (name: string, email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, turnstileToken?: string) => Promise<void>;
+  register: (
+    name: string,
+    email: string,
+    password: string,
+    turnstileToken?: string,
+  ) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   acceptToken: (token: string) => Promise<void>;
@@ -85,16 +90,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const login = useCallback(
-    async (email: string, password: string) => {
-      const data = await loginRequest(email, password, true);
+    async (email: string, password: string, turnstileToken = "") => {
+      const data = await loginRequest(email, password, true, turnstileToken);
       applySession(data.token, data.user, data.usage);
     },
     [applySession],
   );
 
   const register = useCallback(
-    async (name: string, email: string, password: string) => {
-      const data = await registerRequest(name, email, password);
+    async (name: string, email: string, password: string, turnstileToken = "") => {
+      const data = await registerRequest(name, email, password, turnstileToken);
       applySession(data.token, data.user, data.usage);
     },
     [applySession],

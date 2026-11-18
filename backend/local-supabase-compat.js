@@ -761,7 +761,45 @@ export async function ensureLocalSchema() {
       source text NOT NULL,
       received_at timestamptz NOT NULL DEFAULT now()
     );
+    -- Product-funnel analytics events (landing, sign-up, onboarding, paywall, purchase, churn).
+    CREATE TABLE IF NOT EXISTS events (
+      id text PRIMARY KEY,
+      user_id text,
+      anon_id text,
+      name text NOT NULL,
+      props jsonb,
+      path text,
+      referrer text,
+      ip text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS events_name_created_idx ON events (name, created_at);
   `);
+}
+
+/** Records one funnel analytics event. */
+export async function insertTrackEvent({
+  id, userId = null, anonId = null, name, props = null, path = null, referrer = null, ip = null,
+}) {
+  await getPool().query(
+    `INSERT INTO events (id, user_id, anon_id, name, props, path, referrer, ip)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, userId, anonId, name, props ? JSON.stringify(props) : null, path, referrer, ip],
+  );
+}
+
+/** Totals and unique visitors per event since `sinceIso` (admin funnel view). */
+export async function getFunnelCounts(sinceIso) {
+  const result = await getPool().query(
+    `SELECT name,
+            COUNT(*)::int AS total,
+            COUNT(DISTINCT COALESCE(user_id, anon_id))::int AS uniques
+       FROM events
+      WHERE created_at >= $1
+      GROUP BY name`,
+    [sinceIso],
+  );
+  return result.rows;
 }
 
 /** Records a webhook delivery id; false if it was already processed (at-least-once delivery). */

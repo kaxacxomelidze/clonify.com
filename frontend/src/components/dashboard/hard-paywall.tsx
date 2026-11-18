@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Gift, Loader2, X } from "lucide-react";
 import { PLANS } from "@/components/dashboard/data";
-import { ApiError, startWhopCheckout, startWhopDownsell } from "@/lib/api";
+import { ApiError, startWhopCheckout, startWhopDownsell, track } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type Interval = "monthly" | "annual";
@@ -21,6 +21,10 @@ export function HardPaywall({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const [showExit, setShowExit] = useState(false);
   const yearly = interval === "annual";
+
+  useEffect(() => {
+    track("paywall_view");
+  }, []);
 
   async function choose(planKey: string) {
     setError("");

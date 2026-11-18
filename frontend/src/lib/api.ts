@@ -301,23 +301,92 @@ export type AuthSession = {
   usage?: UsageSummary;
 };
 
-export async function loginRequest(email: string, password: string, remember = true) {
+const ANON_KEY = "clonyfy_anon_id";
+function getAnonId(): string {
+  try {
+    let id = localStorage.getItem(ANON_KEY);
+    if (!id) {
+      id = globalThis.crypto?.randomUUID?.() || `a_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(ANON_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+export type FunnelEvent =
+  | "landing_view"
+  | "signup_view"
+  | "onboarding"
+  | "paywall_view"
+  | "purchase_view"
+  | "churn";
+
+const trackedOnce = new Set<string>();
+
+/**
+ * Fire-and-forget self-hosted funnel analytics. Never throws into the UI. `once` de-dupes a
+ * view event per page load; pass false for repeatable actions.
+ */
+export function track(event: FunnelEvent, props?: Record<string, unknown>, once = true) {
+  try {
+    if (once) {
+      if (trackedOnce.has(event)) return;
+      trackedOnce.add(event);
+    }
+    void apiFetch("/api/track", {
+      method: "POST",
+      body: {
+        event,
+        anonId: getAnonId(),
+        props: props || null,
+        path: typeof location !== "undefined" ? location.pathname : null,
+        referrer: typeof document !== "undefined" ? document.referrer : null,
+      },
+      retries: 0,
+      timeoutMs: 8000,
+    }).catch(() => {});
+  } catch {
+    /* analytics must never break the app */
+  }
+}
+
+/** Cloudflare Turnstile config for the auth forms; sitekey is "" when CAPTCHA is off. */
+export async function fetchCaptchaConfig() {
+  return apiFetch<{ provider: "turnstile" | null; sitekey: string }>(
+    "/api/auth/captcha-config",
+    { auth: false },
+  );
+}
+
+export async function loginRequest(
+  email: string,
+  password: string,
+  remember = true,
+  turnstileToken = "",
+) {
   await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
   return apiFetch<AuthSession>("/api/auth/login", {
     method: "POST",
     auth: false,
-    body: { email, password, remember },
+    body: { email, password, remember, turnstileToken },
     timeoutMs: 120_000,
     retries: 3,
   });
 }
 
-export async function registerRequest(name: string, email: string, password: string) {
+export async function registerRequest(
+  name: string,
+  email: string,
+  password: string,
+  turnstileToken = "",
+) {
   await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
   return apiFetch<AuthSession>("/api/auth/register", {
     method: "POST",
     auth: false,
-    body: { name, email, password, affiliate: getAffiliateCode() },
+    body: { name, email, password, affiliate: getAffiliateCode(), turnstileToken },
     timeoutMs: 120_000,
     retries: 3,
   });

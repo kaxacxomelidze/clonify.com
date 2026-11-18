@@ -11,6 +11,7 @@ import {
   ApiError,
   downloadZipBlob,
   syncWhopCheckout,
+  track,
   triggerBrowserDownload,
   type CloneJobResponse,
 } from "@/lib/api";
@@ -134,6 +135,11 @@ function ClonePage() {
     cloneLimit != null &&
     (usage?.clonesThisMonth ?? 0) >= cloneLimit &&
     credits <= 0;
+
+  // Reaching the dashboard is the onboarding step of the funnel.
+  useEffect(() => {
+    if (user) track("onboarding");
+  }, [user]);
 
   // Back from the add-on checkout: settle the credit now instead of waiting for the webhook.
   useEffect(() => {

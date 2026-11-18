@@ -12,6 +12,7 @@ import {
   openBillingPortal,
   startWhopAddon,
   syncWhopCheckout,
+  track,
 } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -303,6 +304,7 @@ function BillingPage() {
                         return;
                       }
                       const result = await cancelSubscription();
+                      track("churn", { plan: currentKey }, false);
                       if (result.redirectUrl) {
                         // Cancellation happens on Whop's billing page.
                         window.location.href = result.redirectUrl;

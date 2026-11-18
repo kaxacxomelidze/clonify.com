@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+import { track } from "@/lib/api";
 import { Navbar } from "@/components/site/navbar";
 import { Hero } from "@/components/site/hero";
 import { Stats } from "@/components/site/stats";
@@ -15,6 +17,9 @@ import { FinalCta } from "@/components/site/final-cta";
 import { Footer } from "@/components/site/footer";
 
 export function LandingPage() {
+  useEffect(() => {
+    track("landing_view");
+  }, []);
   return (
     <>
       <Navbar />

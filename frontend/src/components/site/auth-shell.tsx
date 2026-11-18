@@ -1,6 +1,13 @@
 ﻿import { useSiteLanguage } from "@/hooks/use-site-language";
 import { useAuth } from "@/hooks/use-auth";
-import { ApiError, ensureApiAwake, githubAuthUrl, googleAuthUrl } from "@/lib/api";
+import {
+  ApiError,
+  ensureApiAwake,
+  fetchCaptchaConfig,
+  githubAuthUrl,
+  googleAuthUrl,
+  track,
+} from "@/lib/api";
 import { postAuthDestination, rememberPendingPlan } from "@/lib/pending-plan";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -8,6 +15,7 @@ import { ArrowLeft, AtSign, LockKeyhole, UserRound, Eye, EyeOff, ArrowRight } fr
 import { Brand, BrandMark } from "./brand";
 import { LanguageSwitcher } from "./language-switcher";
 import { AuthArt } from "./auth-art";
+import { Turnstile } from "./turnstile";
 
 export function AuthShell({
   title,
@@ -27,6 +35,23 @@ export function AuthShell({
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [captchaSitekey, setCaptchaSitekey] = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
+
+  // Turnstile is on only when the backend reports a sitekey; otherwise the form works as before.
+  useEffect(() => {
+    let active = true;
+    void fetchCaptchaConfig()
+      .then((c) => {
+        if (active && c?.sitekey) setCaptchaSitekey(c.sitekey);
+      })
+      .catch(() => {
+        /* no captcha configured / unreachable: leave the form open */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Already signed in (e.g. clicked "Log in" or "Get started" from the landing page):
   // skip the form instead of making the user log in again.
@@ -37,7 +62,8 @@ export function AuthShell({
 
   useEffect(() => {
     rememberPendingPlan();
-  }, []);
+    if (mode === "register") track("signup_view");
+  }, [mode]);
 
   useEffect(() => {
     try {
@@ -66,13 +92,17 @@ export function AuthShell({
     const email = String(form.get("email") || "").trim();
     const password = String(form.get("password") || "");
     const name = String(form.get("name") || "").trim();
+    if (captchaSitekey && !captchaToken) {
+      setError(tr("Please complete the human verification and try again."));
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
       const attempt = async () => {
-        if (mode === "login") await login(email, password);
-        else await register(name, email, password);
+        if (mode === "login") await login(email, password, captchaToken);
+        else await register(name, email, password, captchaToken);
       };
       try {
         await attempt();
@@ -207,6 +237,9 @@ export function AuthShell({
                   {tr("Forgot password?")}
                 </Link>
               </p>
+            ) : null}
+            {captchaSitekey ? (
+              <Turnstile sitekey={captchaSitekey} onToken={setCaptchaToken} />
             ) : null}
             {error ? (
               <p role="alert" className="text-sm text-destructive">

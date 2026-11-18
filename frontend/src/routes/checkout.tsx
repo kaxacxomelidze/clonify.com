@@ -17,7 +17,7 @@ import {
 import { BrandMark } from "@/components/site/brand";
 import { PLAN_RANK, PLANS } from "@/components/dashboard/data";
 import { useAuth } from "@/hooks/use-auth";
-import { ApiError, startWhopAddon, startWhopCheckout } from "@/lib/api";
+import { ApiError, startWhopAddon, startWhopCheckout, track } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const TITLE = "Configure your plan — Clonyfy";
@@ -186,6 +186,10 @@ function CheckoutPage() {
   useEffect(() => {
     if (!loading && !isAuthenticated) void navigate({ to: "/login" });
   }, [loading, isAuthenticated, navigate]);
+
+  useEffect(() => {
+    track("purchase_view");
+  }, []);
 
   // Pick the requested plan if it's an upgrade, otherwise the next plan up.
   useEffect(() => {
