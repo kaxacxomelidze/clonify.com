@@ -15,6 +15,7 @@ import { Route as CheckoutRouteImport } from './routes/checkout'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as FrRouteImport } from './routes/fr'
+import { Route as LegalNoticeRouteImport } from './routes/legal-notice'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as RegisterRouteImport } from './routes/register'
@@ -66,6 +67,11 @@ const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
 const FrRoute = FrRouteImport.update({
   id: '/fr',
   path: '/fr',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LegalNoticeRoute = LegalNoticeRouteImport.update({
+  id: '/legal-notice',
+  path: '/legal-notice',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -186,6 +192,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRouteWithChildren
   '/forgot-password': typeof ForgotPasswordRoute
   '/fr': typeof FrRouteWithChildren
+  '/legal-notice': typeof LegalNoticeRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
@@ -214,6 +221,7 @@ export interface FileRoutesByTo {
   '/affiliates': typeof AffiliatesRoute
   '/checkout': typeof CheckoutRoute
   '/forgot-password': typeof ForgotPasswordRoute
+  '/legal-notice': typeof LegalNoticeRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
@@ -245,6 +253,7 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRouteWithChildren
   '/forgot-password': typeof ForgotPasswordRoute
   '/fr': typeof FrRouteWithChildren
+  '/legal-notice': typeof LegalNoticeRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
@@ -277,6 +286,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/forgot-password'
     | '/fr'
+    | '/legal-notice'
     | '/login'
     | '/privacy'
     | '/register'
@@ -305,6 +315,7 @@ export interface FileRouteTypes {
     | '/affiliates'
     | '/checkout'
     | '/forgot-password'
+    | '/legal-notice'
     | '/login'
     | '/privacy'
     | '/register'
@@ -335,6 +346,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/forgot-password'
     | '/fr'
+    | '/legal-notice'
     | '/login'
     | '/privacy'
     | '/register'
@@ -366,6 +378,7 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRouteWithChildren
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   FrRoute: typeof FrRouteWithChildren
+  LegalNoticeRoute: typeof LegalNoticeRoute
   LoginRoute: typeof LoginRoute
   PrivacyRoute: typeof PrivacyRoute
   RegisterRoute: typeof RegisterRoute
@@ -415,6 +428,13 @@ declare module '@tanstack/react-router' {
       path: '/fr'
       fullPath: '/fr'
       preLoaderRoute: typeof FrRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/legal-notice': {
+      id: '/legal-notice'
+      path: '/legal-notice'
+      fullPath: '/legal-notice'
+      preLoaderRoute: typeof LegalNoticeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -633,6 +653,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRouteWithChildren,
   ForgotPasswordRoute: ForgotPasswordRoute,
   FrRoute: FrRouteWithChildren,
+  LegalNoticeRoute: LegalNoticeRoute,
   LoginRoute: LoginRoute,
   PrivacyRoute: PrivacyRoute,
   RegisterRoute: RegisterRoute,

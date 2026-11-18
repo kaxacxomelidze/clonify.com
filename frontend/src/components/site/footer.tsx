@@ -115,7 +115,17 @@ export function Footer() {
           <span>
             © {new Date().getFullYear()} {tr("Clonyfy. All rights reserved.")}
           </span>
-          <span>{tr("Built for people who ship.")}</span>
+          <nav aria-label={tr("Legal")} className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <a href="/legal-notice" className="transition-colors hover:text-foreground">
+              {tr("Legal Notice")}
+            </a>
+            <a href="/privacy" className="transition-colors hover:text-foreground">
+              {tr("Privacy Policy")}
+            </a>
+            <a href="/terms" className="transition-colors hover:text-foreground">
+              {tr("Terms of Use")}
+            </a>
+          </nav>
         </div>
 
         {/* Each letter responds independently to the pointer. */}
