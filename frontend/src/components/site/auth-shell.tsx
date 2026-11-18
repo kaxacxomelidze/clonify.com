@@ -119,7 +119,11 @@ export function AuthShell({
         await new Promise((r) => setTimeout(r, 2000));
         await attempt();
       }
-      await navigate(postAuthDestination() as never);
+      const dest = postAuthDestination();
+      // New sign-ups with no plan in flight start the guided onboarding; everyone else
+      // (returning logins, or a pending checkout) goes to their normal destination.
+      const toOnboarding = mode === "register" && (dest as { to: string }).to === "/dashboard";
+      await navigate((toOnboarding ? { to: "/start" } : dest) as never);
     } catch (err) {
       const message =
         err instanceof ApiError
