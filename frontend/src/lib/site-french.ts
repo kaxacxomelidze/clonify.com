@@ -313,6 +313,17 @@ export const frenchCopy: Record<string, string> = {
   "Built for people who ship.": "Pour ceux qui concrétisent leurs idées.",
   "Please complete the human verification and try again.":
     "Veuillez compléter la vérification humaine et réessayer.",
+  "Verification code": "Code de vérification",
+  "Verify & continue": "Vérifier et continuer",
+  "Resend code": "Renvoyer le code",
+  "We sent a 6-digit code to": "Nous avons envoyé un code à 6 chiffres à",
+  "Enter it to finish creating your account.":
+    "Saisissez-le pour finaliser la création de votre compte.",
+  "A new code is on its way.": "Un nouveau code arrive.",
+  "Couldn't resend right now. Try again shortly.":
+    "Impossible de renvoyer pour l’instant. Réessayez bientôt.",
+  "That code is wrong or expired. Request a new one.":
+    "Ce code est incorrect ou expiré. Demandez-en un nouveau.",
   Legal: "Mentions légales",
   "Legal Notice": "Mentions légales",
   "Privacy Policy": "Politique de confidentialité",

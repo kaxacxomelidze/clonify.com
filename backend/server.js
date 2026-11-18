@@ -5156,21 +5156,72 @@ async function handleRequest(req, res) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, { error: 'Invalid email address' }, 400);
     if (await getUserByEmail(email.toLowerCase().trim())) return json(res, { error: 'An account with this email already exists' }, 409);
     const { hash, salt } = await hashPw(password);
+    // Email-code verification (anti-bot) is used only when SMTP is configured; otherwise
+    // the account is created instantly as before so sign-up never breaks without email.
+    const mailOn = !!getMailSettings().smtp_host;
+    const verifyCode = mailOn ? String(Math.floor(100000 + Math.random() * 900000)) : null;
     const user = {
       id: randomUUID(), name: name.trim(), email: email.toLowerCase().trim(),
-      hash, salt, verifyToken: null, verifyExpiry: null,
+      hash, salt,
+      verifyToken: verifyCode,
+      verifyExpiry: verifyCode ? Date.now() + 15 * 60 * 1000 : null,
       createdAt: new Date().toISOString(),
     };
     await insertUser(user);
-    await updateUser(user.id, { email_verified: 1 });
     // Whop affiliate who sent this visitor; passed to Whop at checkout so they earn the commission.
     await rememberSignupAffiliate(user, affiliateCode);
+    if (mailOn) {
+      // Hold the session until the code sent to the real inbox is entered (see /api/auth/verify-code).
+      sendEmail(user.email, 'Your Clonyfy verification code',
+        renderEmail('verify-code', { SUBJECT: 'Your verification code', NAME: user.name, CODE: verifyCode })
+      ).catch(() => {});
+      audit(user.id, user.name, 'register_pending_code', null, ip);
+      return json(res, { needsCode: true, email: user.email });
+    }
+    await updateUser(user.id, { email_verified: 1 });
     const token = randomUUID();
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
     const freshUser = await getUserById(user.id);
     const usage = await getUserUsageSummary(freshUser);
     return json(res, { token, user: userPublic(freshUser), usage });
+  }
+
+  // POST /api/auth/verify-code — confirm the sign-up email code and start the session.
+  if (req.method === 'POST' && url.pathname === '/api/auth/verify-code') {
+    if (!checkRateLimit(`vcode:${ip}`, 10, 300000)) return json(res, { error: 'Too many attempts. Try again in a few minutes.' }, 429);
+    const { email, code } = await readJsonBody(req);
+    const user = await getUserByEmail(String(email || '').toLowerCase().trim());
+    if (!user) return json(res, { error: 'Enter the 6-digit code we emailed you.' }, 400);
+    if (!(user.email_verified === 1 || user.email_verified === true)) {
+      const ok = user.verify_token
+        && String(code || '').trim() === String(user.verify_token)
+        && Number(user.verify_expiry) > Date.now();
+      if (!ok) return json(res, { error: 'That code is wrong or expired. Request a new one.' }, 400);
+      await updateUser(user.id, { email_verified: 1, verify_token: null, verify_expiry: null });
+    }
+    if (user.blocked) return await blockedUserResponse(res, user);
+    const token = randomUUID();
+    await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
+    audit(user.id, user.name, 'register', null, ip);
+    const freshUser = await getUserById(user.id);
+    const usage = await getUserUsageSummary(freshUser);
+    return json(res, { token, user: userPublic(freshUser), usage });
+  }
+
+  // POST /api/auth/resend-code — new sign-up code. Always 200 (don't leak which emails exist).
+  if (req.method === 'POST' && url.pathname === '/api/auth/resend-code') {
+    if (!checkRateLimit(`vcoderesend:${ip}`, 4, 3600000)) return json(res, { error: 'Too many requests. Try again later.' }, 429);
+    const { email } = await readJsonBody(req);
+    const user = await getUserByEmail(String(email || '').toLowerCase().trim());
+    if (user && !(user.email_verified === 1 || user.email_verified === true) && getMailSettings().smtp_host) {
+      const verifyCode = String(Math.floor(100000 + Math.random() * 900000));
+      await updateUser(user.id, { verify_token: verifyCode, verify_expiry: Date.now() + 15 * 60 * 1000 });
+      sendEmail(user.email, 'Your Clonyfy verification code',
+        renderEmail('verify-code', { SUBJECT: 'Your verification code', NAME: user.name, CODE: verifyCode })
+      ).catch(() => {});
+    }
+    return json(res, { ok: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/auth/login') {
@@ -7582,6 +7633,7 @@ async function handleRequest(req, res) {
       github_oauth_enabled: !!github.github_client_id,
       affiliate_commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
       email_enabled: !!getMailSettings().smtp_host,
+      mixpanel_token: String(process.env.MIXPANEL_TOKEN || '').trim(),
     });
   }
 

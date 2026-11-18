@@ -6,6 +6,7 @@ import {
   fetchCaptchaConfig,
   githubAuthUrl,
   googleAuthUrl,
+  resendCodeRequest,
   track,
 } from "@/lib/api";
 import { postAuthDestination, rememberPendingPlan } from "@/lib/pending-plan";
@@ -31,12 +32,21 @@ export function AuthShell({
   footer: ReactNode;
 }) {
   const { t: tr, language } = useSiteLanguage();
-  const { login, register, isAuthenticated } = useAuth();
+  const { login, register, verifyCode, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [captchaSitekey, setCaptchaSitekey] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
+  const [codeEmail, setCodeEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [resendNote, setResendNote] = useState("");
+
+  function goPostAuth() {
+    const dest = postAuthDestination();
+    const toOnboarding = mode === "register" && (dest as { to: string }).to === "/dashboard";
+    return navigate((toOnboarding ? { to: "/start" } : dest) as never);
+  }
 
   // Turnstile is on only when the backend reports a sitekey; otherwise the form works as before.
   useEffect(() => {
@@ -100,9 +110,14 @@ export function AuthShell({
     setError("");
     try {
       await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
+      let needsCode = false;
       const attempt = async () => {
         if (mode === "login") await login(email, password, captchaToken);
-        else await register(name, email, password, captchaToken);
+        else {
+          const result = await register(name, email, password, captchaToken);
+          needsCode = !!result.needsCode;
+          if (needsCode) setCodeEmail(result.email || email);
+        }
       };
       try {
         await attempt();
@@ -119,11 +134,12 @@ export function AuthShell({
         await new Promise((r) => setTimeout(r, 2000));
         await attempt();
       }
-      const dest = postAuthDestination();
-      // New sign-ups with no plan in flight start the guided onboarding; everyone else
-      // (returning logins, or a pending checkout) goes to their normal destination.
-      const toOnboarding = mode === "register" && (dest as { to: string }).to === "/dashboard";
-      await navigate((toOnboarding ? { to: "/start" } : dest) as never);
+      // Sign-up with SMTP on: show the code step instead of starting a session.
+      if (needsCode) {
+        setBusy(false);
+        return;
+      }
+      await goPostAuth();
     } catch (err) {
       const message =
         err instanceof ApiError
@@ -137,6 +153,33 @@ export function AuthShell({
       setError(message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onVerifyCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    setError("");
+    setBusy(true);
+    try {
+      await verifyCode(codeEmail, code.trim());
+      await goPostAuth();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : tr("That code is wrong or expired. Request a new one."),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onResend() {
+    setResendNote("");
+    try {
+      await resendCodeRequest(codeEmail);
+      setResendNote(tr("A new code is on its way."));
+    } catch {
+      setResendNote(tr("Couldn't resend right now. Try again shortly."));
     }
   }
 
@@ -186,6 +229,55 @@ export function AuthShell({
             </span>
           </div>
           <h1 id="auth-title">{title}</h1>
+          {codeEmail ? (
+            <form className="auth-form" onSubmit={onVerifyCode}>
+              <p className="auth-subtitle">
+                {tr("We sent a 6-digit code to")} <strong>{codeEmail}</strong>.{" "}
+                {tr("Enter it to finish creating your account.")}
+              </p>
+              <div className="auth-field">
+                <label htmlFor="auth-code">{tr("Verification code")}</label>
+                <div className="auth-input-wrap">
+                  <input
+                    id="auth-code"
+                    name="code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="------"
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+              {error ? (
+                <p role="alert" className="text-sm text-destructive">
+                  {error}
+                </p>
+              ) : null}
+              {resendNote ? (
+                <p className="text-xs text-muted-foreground">{resendNote}</p>
+              ) : null}
+              <button
+                type="submit"
+                className="auth-submit"
+                disabled={busy || code.length < 6}
+              >
+                <span>{busy ? tr("Please wait…") : tr("Verify & continue")}</span>
+                <ArrowRight aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={onResend}
+                className="mt-1 text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              >
+                {tr("Resend code")}
+              </button>
+            </form>
+          ) : (
+            <>
           <p className="auth-subtitle">{subtitle}</p>
           <div className="auth-socials">
             <SocialButton
@@ -255,6 +347,8 @@ export function AuthShell({
               <ArrowRight aria-hidden="true" />
             </button>
           </form>
+            </>
+          )}
           <p className="auth-account-link">{footer}</p>
         </section>
       </main>

@@ -335,6 +335,10 @@ export function track(event: FunnelEvent, props?: Record<string, unknown>, once 
       if (trackedOnce.has(event)) return;
       trackedOnce.add(event);
     }
+    mixpanelTrack(event, {
+      ...(props || {}),
+      path: typeof location !== "undefined" ? location.pathname : undefined,
+    });
     void apiFetch("/api/track", {
       method: "POST",
       body: {
@@ -350,6 +354,64 @@ export function track(event: FunnelEvent, props?: Record<string, unknown>, once 
   } catch {
     /* analytics must never break the app */
   }
+}
+
+const ADMIN_TOKEN_KEY = "clonyfy_admin_token";
+export function getAdminToken(): string {
+  try {
+    return localStorage.getItem(ADMIN_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+export function setAdminToken(token: string | null) {
+  try {
+    if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else localStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export type AdminStats = {
+  totalUsers: number;
+  blockedUsers: number;
+  totalClones: number;
+  activeNow: number;
+  totalRevenue: number;
+  monthRevenue: number;
+  mrr: number;
+  arr: number;
+  pendingPayments: number;
+  totalErrors: number;
+  starterUsers: number;
+  growthUsers: number;
+  unlimitedUsers: number;
+};
+export type FunnelRow = { name: string; total: number; uniques: number };
+
+export async function adminLogin(password: string) {
+  const r = await apiFetch<{ token: string }>("/api/admin/auth", {
+    method: "POST",
+    auth: false,
+    body: { password },
+  });
+  setAdminToken(r.token);
+  return r;
+}
+
+export async function fetchAdminStats() {
+  return apiFetch<AdminStats>("/api/admin/stats", {
+    auth: false,
+    headers: { "X-Admin-Token": getAdminToken() },
+  });
+}
+
+export async function fetchAdminFunnel(days = 30) {
+  return apiFetch<{ days: number; since: string; funnel: FunnelRow[] }>(
+    `/api/admin/analytics/funnel?days=${days}`,
+    { auth: false, headers: { "X-Admin-Token": getAdminToken() } },
+  );
 }
 
 /** Cloudflare Turnstile config for the auth forms; sitekey is "" when CAPTCHA is off. */
@@ -376,6 +438,9 @@ export async function loginRequest(
   });
 }
 
+/** Register returns a session, or { needsCode } when email-code verification is required. */
+export type RegisterResult = AuthSession | { needsCode: true; email: string };
+
 export async function registerRequest(
   name: string,
   email: string,
@@ -383,12 +448,31 @@ export async function registerRequest(
   turnstileToken = "",
 ) {
   await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
-  return apiFetch<AuthSession>("/api/auth/register", {
+  return apiFetch<RegisterResult>("/api/auth/register", {
     method: "POST",
     auth: false,
     body: { name, email, password, affiliate: getAffiliateCode(), turnstileToken },
     timeoutMs: 120_000,
     retries: 3,
+  });
+}
+
+/** Confirm the 6-digit sign-up code and receive a session. */
+export async function verifyCodeRequest(email: string, code: string) {
+  return apiFetch<AuthSession>("/api/auth/verify-code", {
+    method: "POST",
+    auth: false,
+    body: { email, code },
+    timeoutMs: 60_000,
+    retries: 1,
+  });
+}
+
+export async function resendCodeRequest(email: string) {
+  return apiFetch<{ ok: boolean }>("/api/auth/resend-code", {
+    method: "POST",
+    auth: false,
+    body: { email },
   });
 }
 
@@ -896,7 +980,44 @@ export async function fetchPublicConfig() {
     github_oauth_enabled?: boolean;
     affiliate_commission?: string;
     email_enabled?: boolean;
+    mixpanel_token?: string;
   }>("/api/public-config", { auth: false });
+}
+
+let mpTokenPromise: Promise<string> | null = null;
+function getMixpanelToken(): Promise<string> {
+  if (!mpTokenPromise) {
+    mpTokenPromise = fetchPublicConfig()
+      .then((c) => c?.mixpanel_token || "")
+      .catch(() => "");
+  }
+  return mpTokenPromise;
+}
+
+/** Sends one event to Mixpanel's HTTP API (no SDK). No-op when no token is configured. */
+function mixpanelTrack(event: string, props: Record<string, unknown>) {
+  void getMixpanelToken().then((token) => {
+    if (!token || typeof fetch === "undefined") return;
+    try {
+      const payload = {
+        event,
+        properties: {
+          token,
+          distinct_id: getAnonId(),
+          time: Math.floor(Date.now() / 1000),
+          ...props,
+        },
+      };
+      const data = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      void fetch(`https://api.mixpanel.com/track?ip=1&data=${encodeURIComponent(data)}`, {
+        method: "POST",
+        mode: "no-cors",
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      /* analytics must never break the app */
+    }
+  });
 }
 
 /** Resolve Scene Graph for Figma Desktop plugin (clipboard import). */

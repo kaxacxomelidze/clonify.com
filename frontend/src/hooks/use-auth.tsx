@@ -13,6 +13,7 @@ import {
   loginRequest,
   logoutRequest,
   registerRequest,
+  verifyCodeRequest,
   setAuthToken,
   ensureApiAwake,
   startApiKeepWarm,
@@ -31,7 +32,8 @@ type AuthContextValue = {
     email: string,
     password: string,
     turnstileToken?: string,
-  ) => Promise<void>;
+  ) => Promise<{ needsCode: boolean; email?: string }>;
+  verifyCode: (email: string, code: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   acceptToken: (token: string) => Promise<void>;
@@ -100,6 +102,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = useCallback(
     async (name: string, email: string, password: string, turnstileToken = "") => {
       const data = await registerRequest(name, email, password, turnstileToken);
+      if ("needsCode" in data && data.needsCode) {
+        return { needsCode: true as const, email: data.email };
+      }
+      applySession(data.token, data.user, data.usage);
+      return { needsCode: false as const };
+    },
+    [applySession],
+  );
+
+  const verifyCode = useCallback(
+    async (email: string, code: string) => {
+      const data = await verifyCodeRequest(email, code);
       applySession(data.token, data.user, data.usage);
     },
     [applySession],
@@ -128,11 +142,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: !!user,
       login,
       register,
+      verifyCode,
       logout,
       refresh,
       acceptToken,
     }),
-    [user, usage, loading, login, register, logout, refresh, acceptToken],
+    [user, usage, loading, login, register, verifyCode, logout, refresh, acceptToken],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
