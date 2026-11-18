@@ -44,14 +44,14 @@ export function Hero() {
         <div className="hero-editorial-copy">
           <h1 className="hero-heading">
             <span className="hero-line">
-              <span data-hero-line>{tr("See it.")}</span>
+              <span data-hero-line>{tr("Clone any website")}</span>
             </span>
             <span className="hero-line">
-              <span data-hero-line>{tr("Clone it.")}</span>
+              <span data-hero-line>{tr("in seconds")}</span>
             </span>
             <span className="hero-line">
               <span data-hero-line className="hero-outline-type">
-                {tr("Make it yours.")}
+                {tr("with AI.")}
               </span>
             </span>
           </h1>
