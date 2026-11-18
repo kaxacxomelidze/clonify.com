@@ -3,23 +3,17 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   LayoutGrid,
   Gauge,
-  Library,
   Settings,
   BarChart3,
   CreditCard,
   Menu,
   Plus,
   Activity,
-  CalendarDays,
-  ListTodo,
-  Files,
   Blocks,
-  Users,
   LogOut,
-  HandCoins,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Brand, BrandMark } from "@/components/site/brand";
+import { Brand } from "@/components/site/brand";
 import {
   Sheet,
   SheetContent,
@@ -32,19 +26,15 @@ import type { CloneJob } from "./data";
 import { useDashboardWorkspace } from "./workspace";
 import { useAuth } from "@/hooks/use-auth";
 
+// Calendar, My tasks, Library, Documents and Teams were removed from the nav; Affiliates is
+// hidden (its /dashboard/affiliates page still works by direct link).
 const NAV = [
   { to: "/dashboard", label: "Clone", icon: LayoutGrid, exact: true },
   { to: "/dashboard/overview", label: "Overview", icon: Gauge, exact: false },
-  { to: "/dashboard/calendar", label: "Calendar", icon: CalendarDays, exact: false },
-  { to: "/dashboard/tasks", label: "My tasks", icon: ListTodo, exact: false },
-  { to: "/dashboard/library", label: "Library", icon: Library, exact: false },
   { to: "/dashboard/activity", label: "Activity", icon: Activity, exact: false },
   { to: "/dashboard/analytics", label: "Analytics", icon: BarChart3, exact: false },
-  { to: "/dashboard/documents", label: "Documents", icon: Files, exact: false },
   { to: "/dashboard/integrations", label: "Integrations", icon: Blocks, exact: false },
-  { to: "/dashboard/team", label: "Teams", icon: Users, exact: false },
   { to: "/dashboard/billing", label: "Subscription", icon: CreditCard, exact: false },
-  { to: "/dashboard/affiliates", label: "Affiliates", icon: HandCoins, exact: false },
   { to: "/dashboard/settings", label: "Settings", icon: Settings, exact: false },
 ] as const;
 
@@ -143,15 +133,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                 <Sidebar onNavigate={() => setOpen(false)} onSelect={setSelected} />
               </SheetContent>
             </Sheet>
-            {current === "Clone" ? (
-              <Link
-                to="/dashboard"
-                aria-label="Clonyfy dashboard"
-                className="grid h-11 w-11 shrink-0 place-items-center rounded-full"
-              >
-                <BrandMark className="h-7 w-7" />
-              </Link>
-            ) : (
+            {current !== "Clone" && (
               <span className="hidden text-sm text-muted-foreground sm:block">{current}</span>
             )}
           </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Check, Figma, Github, MessageSquare, NotebookPen } from "lucide-react";
+import { Check, Figma, Github } from "lucide-react";
 import { ApiError, connectGitHub } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -51,13 +51,6 @@ function IntegrationsPage() {
     } finally {
       setBusy(false);
     }
-  };
-
-  const comingSoon = (name: string) => {
-    toast.message(`${name} is not available yet`, {
-      description: "We'll notify you when this integration ships. No connection was attempted.",
-    });
-    setNotice(`${name} is on the roadmap. Nothing was connected.`);
   };
 
   return (
@@ -159,40 +152,6 @@ function IntegrationsPage() {
           </div>
         </section>
 
-        {[
-          {
-            name: "Slack",
-            short: "SL",
-            icon: MessageSquare,
-            description: "Completion alerts for your team after a capture finishes.",
-          },
-          {
-            name: "Notion",
-            short: "NT",
-            icon: NotebookPen,
-            description: "Capture notes and launch checklists in a shared workspace.",
-          },
-        ].map((item) => (
-          <section key={item.name} className="integration-card surface rounded-3xl p-6">
-            <div className="flex items-center gap-4">
-              <span className="grid h-12 w-12 place-items-center rounded-2xl border border-border">
-                <item.icon size={24} strokeWidth={1.5} />
-              </span>
-              <div>
-                <h2 className="font-display text-xl">{item.name}</h2>
-                <p className="mt-1 text-[10px] uppercase tracking-widest text-muted-foreground">
-                  {item.short} · Coming soon
-                </p>
-              </div>
-            </div>
-            <p className="mt-5 text-sm leading-relaxed text-muted-foreground">{item.description}</p>
-            <div className="mt-6 flex flex-wrap gap-2">
-              <button className="dashboard-button" onClick={() => comingSoon(item.name)}>
-                Notify me
-              </button>
-            </div>
-          </section>
-        ))}
       </div>
       <p className="surface rounded-2xl p-5 text-sm text-muted-foreground" role="status">
         {notice || "GitHub push and Figma export are available from finished captures in Library."}
