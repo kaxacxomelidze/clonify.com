@@ -41,6 +41,7 @@ import {
   whopPlanId, planFromWhopPlanId, whopUnavailableReason, whopConfigured, createWhopCheckout,
   retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
   listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS, lookupWhopUser,
+  whopAddonPlanId, whopDownsellPlanId, ADDON_CLONE_CREDITS,
 } from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
@@ -247,7 +248,7 @@ setInterval(() => {
 const PLAN_LIMITS = {
   free:       { clonesPerMonth: 3,        maxPages: 20,  fullSite: false, editsPerMonth: 2,  savesPerMonth: 2,  sharesPerMonth: 2  },
   starter:    { clonesPerMonth: 10,       maxPages: 500, fullSite: false, editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: 25 },
-  growth:     { clonesPerMonth: 25,       maxPages: 500, fullSite: false, editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: Infinity },
+  growth:     { clonesPerMonth: 30,       maxPages: 500, fullSite: false, editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: Infinity },
   unlimited:  { clonesPerMonth: Infinity, maxPages: 500, fullSite: true,  editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: Infinity },
 };
 const USAGE_KIND_LIMIT_KEY = { edit: 'editsPerMonth', save: 'savesPerMonth', share: 'sharesPerMonth' };
@@ -257,16 +258,16 @@ const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
 function planRank(plan) {
   return PLAN_RANK[normalizePlan(plan)] ?? 0;
 }
-/** Figma export and templates are Growth and Scale features. */
+/** Figma export and templates are Growth and Pro features. */
 function hasGrowthFeatures(plan) {
   return planRank(plan) >= PLAN_RANK.growth;
 }
-const GROWTH_FEATURE_ERROR = (feature) => `${feature}: available on the Growth and Scale plans. Upgrade to use it.`;
+const GROWTH_FEATURE_ERROR = (feature) => `${feature}: available on the Growth and Pro plans. Upgrade to use it.`;
 /** Clones counted against the monthly quota (deleting a clone does not give it back). */
 function clonesUsedThisPeriod(user) {
   return countUsageEventsSince(user.id, 'clone', planPeriodStart(user).toISOString());
 }
-const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', enterprise: 'unlimited' };
+const PLAN_ALIASES = { popular: 'growth', pro: 'unlimited', scale: 'unlimited', enterprise: 'unlimited' };
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
 const IS_RENDER = !!(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
@@ -326,15 +327,15 @@ const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE
 const FULL_SITE_DEPTH = Math.max(50, parseInt(process.env.CLONYFY_FULL_SITE_DEPTH || '256', 10) || 256);
 const SERVERLESS_FULL_SITE_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_FULL_SITE_MAX_PAGES || String(SERVERLESS_MAX_PAGES), 10) || SERVERLESS_MAX_PAGES);
 const PLAN_PRICES = {
-  starter:    { monthly: 19.99, annual: 191.90 },
-  growth:     { monthly: 29.99, annual: 287.90 },
-  unlimited:  { monthly: 59.99, annual: 575.90 },
+  starter:    { monthly: 17.99, annual: 118.73 },
+  growth:     { monthly: 26.99, annual: 178.13 },
+  unlimited:  { monthly: 79.99, annual: 527.93 },
 };
 const PLAN_LABELS = {
   free: 'Free',
   starter: 'Starter',
   growth: 'Growth',
-  unlimited: 'Scale',
+  unlimited: 'Pro',
 };
 function legacyAliasesForPlan(plan) {
   const normalized = normalizePlan(plan);
@@ -390,6 +391,7 @@ async function getUserUsageSummary(user) {
     savesThisMonth,
     sharesThisMonth,
     clonesThisMonth,
+    cloneCredits: Math.max(0, Number(user.clone_credits) || 0),
     limits: {
       clonesPerMonth: finiteLimit(limits.clonesPerMonth),
       maxPages: limits.maxPages,
@@ -607,6 +609,24 @@ async function handleWhopEvent(event) {
     const amount = whopAmount(data.total, data.usd_total, data.subtotal);
     // Only money that actually arrived upgrades anyone: paid status, a real amount, one of our plans.
     const settled = (data.status ? data.status === 'paid' : true) && (data.substatus ? data.substatus === 'succeeded' : true);
+    // One-time "Extra Website Clones" add-on: grant clone credits instead of a plan.
+    const addonPlanId = whopAddonPlanId();
+    if (settled && amount > 0 && addonPlanId && data.plan?.id === addonPlanId) {
+      if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
+      const { user } = await resolveWhopUser(data, membershipId);
+      if (!user) throw new Error(`No Clonyfy user for Whop add-on payment ${data.id}`);
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: normalizePlan(user.plan), amount, currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note: `Add-on: +${ADDON_CLONE_CREDITS} clones`,
+        promoCode: null, discountPercent: 0, interval: 'one_time', status: 'confirmed',
+        submittedAt: new Date().toISOString(),
+      });
+      await updateUser(user.id, { clone_credits: (user.clone_credits || 0) + ADDON_CLONE_CREDITS });
+      _invalidateUserSessions(user.id);
+      audit(user.id, user.name, 'whop_addon_clones', `payment=${data.id} credits=+${ADDON_CLONE_CREDITS}`, null);
+      return;
+    }
     const mappedPlan = planFromWhopPlanId(data.plan?.id);
     if (!settled || amount <= 0 || !mappedPlan) {
       console.log(`[whop] payment ${data.id} ignored (status=${data.status}/${data.substatus} amount=${amount} plan=${data.plan?.id})`);
@@ -3887,6 +3907,7 @@ function userPublic(u) {
     billingSource: !isPaidPlan(plan) ? null : u.whop_membership_id ? 'whop' : u.stripe_subscription_id ? 'stripe' : 'manual',
     createdAt: u.created_at,
     helperInstalled: !!u.helper_installed_at,
+    cloneCredits: Math.max(0, Number(u.clone_credits) || 0),
   };
 }
 
@@ -5841,8 +5862,10 @@ async function handleRequest(req, res) {
         const limits = getEffectivePlanLimits(plan);
         if (limits.clonesPerMonth !== Infinity) {
           const used = await clonesUsedThisPeriod(cloneUser);
-          if (used >= limits.clonesPerMonth) {
-            return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade to clone more.` }, 429);
+          // One-time add-on credits cover clones once the monthly plan quota is used up.
+          const credits = cloneUser.clone_credits || 0;
+          if (used >= limits.clonesPerMonth && credits <= 0) {
+            return json(res, { error: `Monthly limit reached (${used}/${limits.clonesPerMonth} for ${plan} plan). Upgrade or add more clones to continue.` }, 429);
           }
         }
         // Cap concurrent running jobs per user
@@ -5861,7 +5884,7 @@ async function handleRequest(req, res) {
 
         if (wantFullSite) {
           if (!limits.fullSiteAllowed) {
-            return json(res, { error: 'Select all pages is available on the Scale plan. Upgrade to clone the full site.' }, 403);
+            return json(res, { error: 'Select all pages is available on the Pro plan. Upgrade to clone the full site.' }, 403);
           }
           fullSite = true;
           maxPages = String(limits.fullSiteMaxPages);
@@ -5870,7 +5893,7 @@ async function handleRequest(req, res) {
           maxPages = String(Math.min(parseInt(maxPages, 10) || 20, limits.maxPages));
         }
       } else if (wantFullSite) {
-        return json(res, { error: 'Sign in with a Scale plan to use Select all pages.' }, 401);
+        return json(res, { error: 'Sign in with a Pro plan to use Select all pages.' }, 401);
       }
       maxPages = String(Math.max(1, parseInt(maxPages, 10) || 1));
       depth = String(Math.max(1, parseInt(depth, 10) || 1));
@@ -5884,9 +5907,17 @@ async function handleRequest(req, res) {
         const cloneLimit = getEffectivePlanLimits(normalizePlan(cloneUser.plan)).clonesPerMonth;
         if (cloneLimit !== Infinity) {
           const usedNow = await clonesUsedThisPeriod(cloneUser);
+          // Past the monthly quota this clone must be paid for by an add-on credit; spend one.
           if (usedNow > cloneLimit) {
-            await deleteUsageEvent(`clone:${id}`).catch(() => {});
-            return json(res, { error: `Monthly limit reached (${cloneLimit}/${cloneLimit} for ${normalizePlan(cloneUser.plan)} plan). Upgrade to clone more.` }, 429);
+            const fresh = await getUserById(cloneUser.id).catch(() => null);
+            const credits = fresh?.clone_credits || 0;
+            if (credits <= 0) {
+              await deleteUsageEvent(`clone:${id}`).catch(() => {});
+              return json(res, { error: `Monthly limit reached (${cloneLimit}/${cloneLimit} for ${normalizePlan(cloneUser.plan)} plan). Upgrade or add more clones to continue.` }, 429);
+            }
+            await updateUser(cloneUser.id, { clone_credits: credits - 1 });
+            _invalidateUserSessions(cloneUser.id);
+            cloneUser.clone_credits = credits - 1;
           }
         }
       }
@@ -8337,6 +8368,84 @@ async function handleRequest(req, res) {
       interval: bi, status: 'pending', submittedAt: new Date().toISOString(),
     }).catch((err) => console.error('[whop checkout] pending payment insert failed:', err.message));
     audit(user.id, user.name, 'whop_checkout_created', `plan=${plan} interval=${bi} checkout=${checkout.id}${checkout.affiliateCode ? ` affiliate=${checkout.affiliateCode}` : ''}`, ip);
+    return json(res, { url: checkout.url, checkoutId: checkout.id });
+  }
+
+  // POST /api/payments/whop/addon — one-time "Extra Website Clones" add-on (+15 for $20).
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/addon') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Sign in first.' }, 401);
+    if (!checkRateLimit(`whop_checkout:${user.id}`, 20, 600000)) return json(res, { error: 'Too many checkout attempts. Wait a few minutes and try again.' }, 429);
+    const planId = whopAddonPlanId();
+    const reason = whopUnavailableReason();
+    if (reason) return json(res, { error: reason }, 503);
+    if (!planId) return json(res, { error: 'The clone add-on isn’t available right now.', code: 'addon_unavailable' }, 503);
+    const body = await readJsonBody(req).catch(() => ({}));
+    const appUrl = publicAppUrl(req);
+    const linkedCode = cleanWhopAffiliateCode(body.affiliate);
+    const savedFresh = user.whop_affiliate_code
+      && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+    let affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
+    if (affiliateCode && affiliateCode.toLowerCase() === String(user.whop_username || '').toLowerCase()) affiliateCode = '';
+    let checkout;
+    try {
+      checkout = await createWhopCheckout({
+        planId,
+        metadata: { userId: user.id, kind: 'addon_clones15', email: user.email },
+        redirectUrl: `${appUrl}/dashboard?addon=success`,
+        affiliateCode,
+      });
+    } catch (err) {
+      return json(res, { error: `Whop checkout failed: ${err.message}` }, 502);
+    }
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: normalizePlan(user.plan), amount: 20, currency: 'USD', method: 'whop',
+      txId: checkout.id, note: `Add-on checkout started (+${ADDON_CLONE_CREDITS} clones)`, promoCode: null, discountPercent: 0,
+      interval: 'one_time', status: 'pending', submittedAt: new Date().toISOString(),
+    }).catch((err) => console.error('[whop addon] pending payment insert failed:', err.message));
+    audit(user.id, user.name, 'whop_addon_checkout_created', `checkout=${checkout.id}`, ip);
+    return json(res, { url: checkout.url, checkoutId: checkout.id });
+  }
+
+  // POST /api/payments/whop/downsell — exit-intent offer: Growth, first year 50% off.
+  if (req.method === 'POST' && url.pathname === '/api/payments/whop/downsell') {
+    const user = await getSessionUser(req);
+    if (!user) return json(res, { error: 'Sign in first.' }, 401);
+    if (!checkRateLimit(`whop_checkout:${user.id}`, 20, 600000)) return json(res, { error: 'Too many checkout attempts. Wait a few minutes and try again.' }, 429);
+    const planId = whopDownsellPlanId();
+    const reason = whopUnavailableReason();
+    if (reason) return json(res, { error: reason }, 503);
+    if (!planId) return json(res, { error: 'This offer isn’t available right now.', code: 'downsell_unavailable' }, 503);
+    // The downsell grants Growth — pointless for someone already on Growth or Pro.
+    if (isPaidPlan(user.plan) && planRank(user.plan) >= planRank('growth')) {
+      return json(res, { error: `You're already on ${getPlanLabel(normalizePlan(user.plan))}.`, code: 'already_on_plan' }, 409);
+    }
+    const body = await readJsonBody(req).catch(() => ({}));
+    const appUrl = publicAppUrl(req);
+    const linkedCode = cleanWhopAffiliateCode(body.affiliate);
+    const savedFresh = user.whop_affiliate_code
+      && Date.now() - Date.parse(user.whop_affiliate_at || 0) < WHOP_AFFILIATE_WINDOW_MS;
+    let affiliateCode = linkedCode || (savedFresh ? cleanWhopAffiliateCode(user.whop_affiliate_code) : '');
+    if (affiliateCode && affiliateCode.toLowerCase() === String(user.whop_username || '').toLowerCase()) affiliateCode = '';
+    let checkout;
+    try {
+      checkout = await createWhopCheckout({
+        planId,
+        metadata: { userId: user.id, plan: 'growth', interval: 'annual', offer: 'downsell', email: user.email },
+        redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+        affiliateCode,
+      });
+    } catch (err) {
+      return json(res, { error: `Whop checkout failed: ${err.message}` }, 502);
+    }
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: 'growth', amount: 161.94, currency: 'USD', method: 'whop',
+      txId: checkout.id, note: 'Downsell checkout started (Growth, 50% first year)', promoCode: null, discountPercent: 50,
+      interval: 'annual', status: 'pending', submittedAt: new Date().toISOString(),
+    }).catch((err) => console.error('[whop downsell] pending payment insert failed:', err.message));
+    audit(user.id, user.name, 'whop_downsell_checkout_created', `checkout=${checkout.id}`, ip);
     return json(res, { url: checkout.url, checkoutId: checkout.id });
   }
 

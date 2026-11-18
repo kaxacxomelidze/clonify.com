@@ -919,6 +919,14 @@ a:hover .brand-lockup > svg {
   margin-top: 2px;
   color: var(--foreground);
 }
+.price-card li.plan-feature-excluded {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.price-card li.plan-feature-excluded svg {
+  color: var(--muted-foreground);
+}
 .pricing-bottomnote {
   display: flex;
   justify-content: space-between;

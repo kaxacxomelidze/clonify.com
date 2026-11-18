@@ -57,7 +57,7 @@ export function Hero() {
           </h1>
           <p className="hero-description" data-hero-reveal>
             {tr(
-              "Clone any website with AI in seconds. Turn a URL into a pixel-perfect, fully editable starting point. No design or coding skills required.",
+              "Turn any URL into a fully editable website you can customize and export. No design or coding skills required.",
             )}
           </p>
           <div className="hero-actions" data-hero-reveal>

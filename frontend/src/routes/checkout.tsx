@@ -8,14 +8,16 @@ import {
   Figma,
   Headphones,
   LayoutTemplate,
+  Loader2,
   Lock,
   PenTool,
   Plug,
+  Plus,
 } from "lucide-react";
 import { BrandMark } from "@/components/site/brand";
 import { PLAN_RANK, PLANS } from "@/components/dashboard/data";
 import { useAuth } from "@/hooks/use-auth";
-import { ApiError, startWhopCheckout } from "@/lib/api";
+import { ApiError, startWhopAddon, startWhopCheckout } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const TITLE = "Configure your plan — Clonyfy";
@@ -24,9 +26,9 @@ type PlanKey = "starter" | "growth" | "unlimited";
 const PLAN_KEYS: PlanKey[] = ["starter", "growth", "unlimited"];
 type Interval = "monthly" | "annual";
 
-/** Yearly billing is 12 months at 20% off — the same prices as the Whop yearly plans. */
+/** First-year billing is 12 months at 45% off — the same prices as the Whop yearly plans. */
 function yearlyTotal(monthly: number) {
-  return Math.round(monthly * 12 * 0.8 * 100) / 100;
+  return Math.round(monthly * 12 * 0.55 * 100) / 100;
 }
 
 export const Route = createFileRoute("/checkout")({
@@ -51,19 +53,19 @@ const TOP_FEATURES: Record<PlanKey, Array<{ icon: typeof Check; text: string }>>
     { icon: Copy, text: "10 website clones every month" },
     { icon: Code2, text: "Code & ZIP export" },
     { icon: PenTool, text: "Visual builder & editor" },
-    { icon: Headphones, text: "Support 6 days a week" },
+    { icon: LayoutTemplate, text: "Access to templates" },
   ],
   growth: [
-    { icon: Copy, text: "25 website clones every month" },
+    { icon: Copy, text: "30 website clones every month" },
     { icon: Figma, text: "Figma export" },
-    { icon: LayoutTemplate, text: "Access to templates" },
     { icon: Plug, text: "API access" },
+    { icon: Headphones, text: "Private support access" },
   ],
   unlimited: [
     { icon: Copy, text: "Unlimited website clones" },
     { icon: Figma, text: "Figma export & templates" },
     { icon: Plug, text: "API access" },
-    { icon: Headphones, text: "Priority support 7 days a week" },
+    { icon: Headphones, text: "Private support access" },
   ],
 };
 
@@ -163,7 +165,23 @@ function CheckoutPage() {
   const [checkoutUrl, setCheckoutUrl] = useState("");
   const [error, setError] = useState("");
   const [mounting, setMounting] = useState(false);
+  const [addonBusy, setAddonBusy] = useState(false);
+  const [addonError, setAddonError] = useState("");
   const mountRef = useRef<HTMLDivElement>(null);
+
+  async function buyAddon() {
+    setAddonError("");
+    setAddonBusy(true);
+    try {
+      const { url } = await startWhopAddon();
+      window.location.href = url;
+    } catch (err) {
+      setAddonBusy(false);
+      setAddonError(
+        err instanceof ApiError ? err.message : "Couldn't start the add-on checkout. Try again.",
+      );
+    }
+  }
 
   useEffect(() => {
     if (!loading && !isAuthenticated) void navigate({ to: "/login" });
@@ -321,7 +339,7 @@ function CheckoutPage() {
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {value === "monthly" ? "Monthly" : "Yearly −20%"}
+                {value === "monthly" ? "Monthly" : "Yearly −45%"}
               </button>
             ))}
           </div>
@@ -378,6 +396,33 @@ function CheckoutPage() {
             ))}
           </ul>
 
+          {/* Add-on: a one-time top-up purchased as its own checkout. */}
+          <div className="mt-8 rounded-xl border border-border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium">Need more clones?</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Extra Website Clones — +15 websites for $20. Instant access.
+                </p>
+              </div>
+              <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
+            </div>
+            <button
+              type="button"
+              onClick={buyAddon}
+              disabled={addonBusy}
+              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-border text-sm font-medium transition-colors hover:bg-accent disabled:opacity-60"
+            >
+              {addonBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              Add 15 clones — $20
+            </button>
+            {addonError && (
+              <p role="alert" className="mt-2 text-xs text-destructive">
+                {addonError}
+              </p>
+            )}
+          </div>
+
           <dl className="mt-8 space-y-3 border-t border-border pt-6 text-sm">
             <div className="flex justify-between gap-4">
               <dt>
@@ -412,7 +457,7 @@ function CheckoutPage() {
 
           {!selected && !loading ? (
             <p className="mt-6 rounded-xl border border-border p-4 text-sm text-muted-foreground">
-              You're on Scale, our top plan — there's nothing to upgrade to.{" "}
+              You're on Pro, our top plan — there's nothing to upgrade to.{" "}
               <Link
                 to="/dashboard/billing"
                 className="text-foreground underline underline-offset-4"

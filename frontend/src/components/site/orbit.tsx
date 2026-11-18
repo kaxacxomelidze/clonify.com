@@ -35,7 +35,6 @@ export function Orbit() {
                 "We are not building a website builder. We are building a website production accelerator that integrates into existing workflows and reduces site creation from days to minutes.",
               )}
             </p>
-            <span className="orbit-price">{tr("GET YOURS FOR JUST $19.99 ↗")}</span>
           </div>
           <div className="orbit-pill-field">
             {PILLS.map((p, i) => {

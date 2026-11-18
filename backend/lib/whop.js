@@ -11,6 +11,22 @@ const PLAN_ENV = {
   unlimited: { monthly: 'WHOP_PLAN_SCALE_MONTHLY', annual: 'WHOP_PLAN_SCALE_ANNUAL' },
 };
 
+/** One-time "Extra Website Clones" add-on: +15 clones for $20, granted on payment.succeeded. */
+export const ADDON_CLONE_CREDITS = 15;
+
+/** Whop plan id (plan_…) for the +15-clones checkout add-on, or '' when not configured. */
+export function whopAddonPlanId() {
+  return String(process.env.WHOP_PLAN_ADDON_CLONES15 || '').trim();
+}
+
+/**
+ * Whop plan id for the exit-intent downsell (Growth, first year 50% off then renews at the
+ * standard annual price). Grants the Growth plan on an annual interval. '' when not configured.
+ */
+export function whopDownsellPlanId() {
+  return String(process.env.WHOP_PLAN_GROWTH_DOWNSELL || '').trim();
+}
+
 export function whopApiKey() {
   return String(process.env.WHOP_API_KEY || '').trim();
 }
@@ -40,6 +56,8 @@ function legacyWhopPlans() {
 export function planFromWhopPlanId(whopPlan) {
   const id = String(whopPlan || '').trim();
   if (!id) return null;
+  // The exit-intent downsell is a Growth annual plan priced for a first-year discount.
+  if (id && id === whopDownsellPlanId()) return { plan: 'growth', interval: 'annual' };
   for (const [plan, intervals] of Object.entries(PLAN_ENV)) {
     for (const [interval, envName] of Object.entries(intervals)) {
       if (String(process.env[envName] || '').trim() === id) return { plan, interval };

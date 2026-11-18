@@ -10,11 +10,13 @@ import type { CloneJob } from "@/components/dashboard/data";
 import {
   ApiError,
   downloadZipBlob,
+  syncWhopCheckout,
   triggerBrowserDownload,
   type CloneJobResponse,
 } from "@/lib/api";
 import { ProtectedSiteCard } from "@/components/dashboard/protected-site";
 import { HelperOnboarding } from "@/components/dashboard/helper-onboarding";
+import { HardPaywall } from "@/components/dashboard/hard-paywall";
 import { useInteractivePreview } from "@/hooks/use-interactive-preview";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -94,7 +96,7 @@ function cloneFailureReason(logs: string[]) {
 
 function ClonePage() {
   const { addJob, refreshJobs } = useDashboardWorkspace();
-  const { user, usage } = useAuth();
+  const { user, usage, refresh } = useAuth();
   const [url, setUrl] = useState("");
   const [maxPages, setMaxPages] = useState(8);
   const [depth, setDepth] = useState(2);
@@ -120,6 +122,40 @@ function ClonePage() {
   const fullSiteAllowed =
     user?.planLimits?.fullSiteAllowed === true || usage?.limits?.fullSiteAllowed === true;
   const useMax = fullSiteAllowed && maxMode;
+
+  // Hard paywall: a free user who has used their monthly clones (and has no add-on credits left)
+  // must pick a plan to keep going. The X opens the exit-intent downsell instead of closing.
+  const [paywallClosed, setPaywallClosed] = useState(false);
+  const cloneLimit = user?.planLimits?.clonesPerMonth ?? usage?.limits?.clonesPerMonth ?? null;
+  const credits = user?.cloneCredits ?? usage?.cloneCredits ?? 0;
+  const mustUpgrade =
+    !!user &&
+    String(user.plan).toLowerCase() === "free" &&
+    cloneLimit != null &&
+    (usage?.clonesThisMonth ?? 0) >= cloneLimit &&
+    credits <= 0;
+
+  // Back from the add-on checkout: settle the credit now instead of waiting for the webhook.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("addon") !== "success") return;
+    params.delete("addon");
+    const rest = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
+    let cancelled = false;
+    void (async () => {
+      setNotice("Payment received — adding your clones…");
+      for (let attempt = 0; attempt < 6 && !cancelled; attempt++) {
+        await syncWhopCheckout().catch(() => null);
+        await refresh();
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+      if (!cancelled) setNotice("Your extra clones are ready.");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh]);
 
   useEffect(() => {
     try {
@@ -380,6 +416,7 @@ function ClonePage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
+      {mustUpgrade && !paywallClosed && <HardPaywall onClose={() => setPaywallClosed(true)} />}
       <header>
         <p className="eyebrow">From inspiration to your next build</p>
         <h1 className="display-lg mt-3">Clone a website.</h1>
@@ -474,7 +511,7 @@ function ClonePage() {
           {fullSiteAllowed && (
             <label
               className="flex min-h-11 items-center gap-3 text-sm"
-              title="Clone every discoverable same-origin page at maximum depth (Scale)"
+              title="Clone every discoverable same-origin page at maximum depth (Pro)"
             >
               <input
                 type="checkbox"

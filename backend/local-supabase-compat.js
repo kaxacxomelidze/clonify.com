@@ -745,6 +745,9 @@ export async function ensureLocalSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS whop_user_id text;
     -- Clonyfy Helper extension installed (the protected-site install card never shows again).
     ALTER TABLE users ADD COLUMN IF NOT EXISTS helper_installed_at text;
+    -- One-time extra clone credits bought as a checkout add-on (+15 for $20); a persistent
+    -- balance spent only once the monthly plan quota is used up, never reset by the period.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS clone_credits integer NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS users_whop_membership_id_idx ON users (whop_membership_id);
     CREATE INDEX IF NOT EXISTS idx_payments_tx_id ON payments (tx_id);
     -- Clone quota is counted from usage_events so deleting a clone can't refund it.

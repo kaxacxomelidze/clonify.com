@@ -50,9 +50,9 @@ function BillingPage() {
   const planLabel =
     planKey === "starter"
       ? "Starter"
-      : planKey === "unlimited" || planKey === "scale"
-        ? "Scale"
-        : planKey === "growth" || planKey === "popular" || planKey === "pro"
+      : planKey === "unlimited" || planKey === "scale" || planKey === "pro"
+        ? "Pro"
+        : planKey === "growth" || planKey === "popular"
           ? "Growth"
           : "Free";
   const [previewPlan, setPreviewPlan] = useState(planLabel);

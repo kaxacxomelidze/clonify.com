@@ -5,17 +5,20 @@ import { Reveal, SplitHeading } from "@/components/anim";
 import { Cta } from "./cta";
 import { useSignedIn } from "@/hooks/use-auth";
 import { ArrowGlyph } from "./brand";
-/** Backend plan keys for the pricing cards (Scale is "unlimited" internally). */
+/** Backend plan keys for the pricing cards (Pro is "unlimited" internally). */
 const PLAN_KEY: Record<string, string> = {
   Starter: "starter",
   Growth: "growth",
-  Scale: "unlimited",
+  Pro: "unlimited",
 };
+
+/** First-year billing is 12 months at 45% off. */
+const ANNUAL_RATE = 0.55;
 
 const PLANS = [
   {
     name: "Starter",
-    price: 19.99,
+    price: 17.99,
     note: "≈ 1 coffee per week",
     blurb: "For testing on real projects before committing.",
     action: "Get started",
@@ -25,32 +28,34 @@ const PLANS = [
       "Unlimited Screens",
       "Code & ZIP Export",
       "Visual Builder & Editor",
-      "6 Days/Week Support",
+      "Access to Templates",
       "Cancel Anytime",
     ],
+    excluded: ["Figma Export", "Private Support Access"],
   },
   {
     name: "Growth",
-    price: 29.99,
+    price: 26.99,
     note: "",
     blurb: "For growing teams shipping faster every week.",
     action: "Start now",
     popular: true,
     features: [
-      "25 Website Clones / Month",
+      "30 Website Clones / Month",
       "Unlimited Screens",
       "Code & ZIP Export",
-      "Figma Export",
       "Visual Builder & Editor",
       "Access to Templates",
+      "Figma Export",
       "API Access",
-      "6 Days/Week Support",
+      "Private Support Access",
       "Cancel Anytime",
     ],
+    excluded: [],
   },
   {
-    name: "Scale",
-    price: 59.99,
+    name: "Pro",
+    price: 79.99,
     note: "",
     blurb: "For high-volume cloning with priority support.",
     action: "Start now",
@@ -63,9 +68,10 @@ const PLANS = [
       "Visual Builder & Editor",
       "Access to Templates",
       "API Access",
-      "7 Days/Week Priority Support",
+      "Private Support Access",
       "Cancel Anytime",
     ],
+    excluded: [],
   },
 ];
 
@@ -138,7 +144,7 @@ export function Pricing() {
                 </button>
               ))}
             </div>
-            <span>{tr("20% less with yearly billing.")}</span>
+            <span>{tr("45% less with yearly billing.")}</span>
           </div>
         </div>
         <div ref={grid} className="pricing-cards" onMouseLeave={() => setHovered(null)}>
@@ -186,15 +192,15 @@ export function Pricing() {
               <div className="plan-price">
                 <span className="text-5xl">
                   {language === "en" && "$"}
-                  {amount(yearly ? p.price * 0.8 : p.price)}
+                  {amount(yearly ? p.price * ANNUAL_RATE : p.price)}
                 </span>
                 <span>{language === "fr" ? "$US /mois" : "/mo"}</span>
               </div>
               <p className="billing-note">
                 {yearly
                   ? language === "fr"
-                    ? `${amount(p.price * 12 * 0.8)} $US facturés par an`
-                    : `$${(p.price * 12 * 0.8).toFixed(2)} billed yearly`
+                    ? `${amount(p.price * 12 * ANNUAL_RATE)} $US la première année`
+                    : `$${(p.price * 12 * ANNUAL_RATE).toFixed(2)} billed first year`
                   : tr(p.note || "Billed monthly. Cancel anytime.")}
               </p>
               <Cta
@@ -211,6 +217,14 @@ export function Pricing() {
                   <li key={f}>
                     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                       <path d="m3 8 3 3 7-7" stroke="currentColor" strokeWidth="1.3" />
+                    </svg>
+                    {tr(f)}
+                  </li>
+                ))}
+                {p.excluded.map((f) => (
+                  <li key={f} className="plan-feature-excluded">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.3" />
                     </svg>
                     {tr(f)}
                   </li>

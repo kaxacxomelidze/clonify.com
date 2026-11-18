@@ -277,6 +277,8 @@ export type AuthUser = {
   createdAt?: string;
   /** The Clonyfy Helper browser extension was installed (protected-site card never shows again). */
   helperInstalled?: boolean;
+  /** One-time extra clone credits bought as an add-on, spent after the monthly quota runs out. */
+  cloneCredits?: number;
 };
 
 export type UsageSummary = {
@@ -285,6 +287,7 @@ export type UsageSummary = {
   savesThisMonth?: number;
   sharesThisMonth?: number;
   clonesThisMonth?: number;
+  cloneCredits?: number;
   limits?: PlanLimits;
   totalClones?: number;
   totalPages?: number;
@@ -489,6 +492,22 @@ export async function startWhopCheckout(plan: string, interval: "monthly" | "ann
 
 export async function syncWhopCheckout() {
   return apiFetch<{ ok: boolean; user?: AuthUser }>("/api/payments/whop/sync", { method: "POST" });
+}
+
+/** One-time "Extra Website Clones" add-on: +15 clones for $20 (instant access). */
+export async function startWhopAddon() {
+  return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/addon", {
+    method: "POST",
+    body: { affiliate: getAffiliateCode() },
+  });
+}
+
+/** Exit-intent downsell: Growth, first year 50% off then renews at the standard annual price. */
+export async function startWhopDownsell() {
+  return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/downsell", {
+    method: "POST",
+    body: { affiliate: getAffiliateCode() },
+  });
 }
 
 export async function openBillingPortal() {

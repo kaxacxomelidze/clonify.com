@@ -88,10 +88,6 @@ export function SocialProof() {
                 "9,000+ developers and designers trust Clonyfy for rapid prototyping and production deployments.",
               )}
             </p>
-            <div className="testimonial-rating">
-              <span>★★★★★</span>
-              <span>{tr("4.9 / 5 USER RATING")}</span>
-            </div>
           </div>
           <div className="testimonial-stage">
             <span className="quote-mark" aria-hidden="true">
