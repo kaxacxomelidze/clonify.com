@@ -12,14 +12,14 @@ const num = (price: string) => Number(price.replace(/[^0-9.]/g, "")) || 0;
 const money = (n: number) => `$${n.toFixed(2)}`;
 
 /**
- * Blocking upgrade wall. The only way out without subscribing is the X, which opens the
- * exit-intent downsell. Mount it over the app for users who must pick a plan to continue.
+ * Blocking upgrade wall. The X simply closes the wall. (The exit-intent downsell below is
+ * disabled until the WHOP_PLAN_GROWTH_DOWNSELL plan is configured — re-enable by pointing the
+ * X at setShowExit(true) again.) Mount it over the app for users who must pick a plan to continue.
  */
 export function HardPaywall({ onClose }: { onClose: () => void }) {
   const [interval, setInterval] = useState<Interval>("annual");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [showExit, setShowExit] = useState(false);
   const yearly = interval === "annual";
 
   useEffect(() => {
@@ -37,8 +37,6 @@ export function HardPaywall({ onClose }: { onClose: () => void }) {
       setError(err instanceof ApiError ? err.message : "Couldn't start checkout. Try again.");
     }
   }
-
-  if (showExit) return <ExitOffer onClose={onClose} onBack={() => setShowExit(false)} />;
 
   return (
     <div
@@ -60,7 +58,7 @@ export function HardPaywall({ onClose }: { onClose: () => void }) {
           </div>
           <button
             type="button"
-            onClick={() => setShowExit(true)}
+            onClick={onClose}
             aria-label="Close"
             className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
