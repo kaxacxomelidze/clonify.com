@@ -21,8 +21,8 @@ export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
   const signedIn = useSignedIn();
-  const accountHref = signedIn ? "/dashboard" : language === "fr" ? "/fr/login" : "/login";
-  const accountLabel = signedIn ? tr("Dashboard") : tr("Log In & Get Started");
+  const loginHref = language === "fr" ? "/fr/login" : "/login";
+  const registerHref = language === "fr" ? "/fr/register" : "/register";
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
@@ -63,12 +63,29 @@ export function Navbar() {
 
         <div className="flex items-center gap-2">
           <LanguageSwitcher />
-          <Link
-            to={accountHref}
-            className="hidden items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-[0_18px_50px_-22px_var(--foreground)] transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03] sm:inline-flex"
-          >
-            {accountLabel}
-          </Link>
+          {signedIn ? (
+            <Link
+              to="/dashboard"
+              className="hidden items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-[0_18px_50px_-22px_var(--foreground)] transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03] sm:inline-flex"
+            >
+              {tr("Dashboard")}
+            </Link>
+          ) : (
+            <>
+              <Link
+                to={loginHref}
+                className="hidden items-center gap-2 rounded-full border border-border px-5 py-3 text-sm font-medium transition-colors duration-300 hover:bg-accent sm:inline-flex"
+              >
+                {tr("Log In")}
+              </Link>
+              <Link
+                to={registerHref}
+                className="hidden items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-[0_18px_50px_-22px_var(--foreground)] transition-transform duration-500 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.03] sm:inline-flex"
+              >
+                {tr("Get Started")}
+              </Link>
+            </>
+          )}
           <button
             onClick={() => setOpen((v) => !v)}
             aria-label={open ? tr("Close menu") : tr("Open menu")}
@@ -106,13 +123,32 @@ export function Navbar() {
                 </motion.a>
               ))}
               <div className="mt-4 flex flex-wrap items-center gap-3">
-                <Link
-                  to={accountHref}
-                  onClick={() => setOpen(false)}
-                  className="rounded-full bg-primary px-5 py-3 text-sm font-medium text-primary-foreground"
-                >
-                  {accountLabel}
-                </Link>
+                {signedIn ? (
+                  <Link
+                    to="/dashboard"
+                    onClick={() => setOpen(false)}
+                    className="rounded-full bg-primary px-5 py-3 text-sm font-medium text-primary-foreground"
+                  >
+                    {tr("Dashboard")}
+                  </Link>
+                ) : (
+                  <>
+                    <Link
+                      to={loginHref}
+                      onClick={() => setOpen(false)}
+                      className="rounded-full border border-border px-5 py-3 text-sm font-medium"
+                    >
+                      {tr("Log In")}
+                    </Link>
+                    <Link
+                      to={registerHref}
+                      onClick={() => setOpen(false)}
+                      className="rounded-full bg-primary px-5 py-3 text-sm font-medium text-primary-foreground"
+                    >
+                      {tr("Get Started")}
+                    </Link>
+                  </>
+                )}
               </div>
             </div>
           </motion.div>
