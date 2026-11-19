@@ -1517,7 +1517,7 @@ a:hover .brand-lockup > svg {
   padding-block: 65px 70px;
 }
 .hero-heading {
-  font-size: clamp(68px, 7.65vw, 118px);
+  font-size: clamp(60px, 6.8vw, 104px);
   line-height: 0.96;
   font-weight: 500;
   letter-spacing: -0.065em;
@@ -2399,7 +2399,7 @@ section[id] {
     gap: 30px;
   }
   .hero-heading {
-    font-size: 7.9vw;
+    font-size: 7vw;
   }
   .hero-actions {
     gap: 15px;
@@ -2439,7 +2439,7 @@ section[id] {
     padding-block: 36px 38px;
   }
   .hero-heading {
-    font-size: clamp(64px, 15vw, 98px);
+    font-size: clamp(56px, 13.5vw, 88px);
     line-height: 0.97;
   }
   .hero-outline-type {
@@ -2617,7 +2617,7 @@ section[id] {
     width: calc(100% - 32px);
   }
   .hero-heading {
-    font-size: 58px;
+    font-size: 52px;
   }
   .hero-actions {
     gap: 15px;

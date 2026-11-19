@@ -124,12 +124,6 @@ function StartPage() {
           <BrandMark className="h-7 w-7" />
           <span className="text-sm font-medium">Clonyfy</span>
         </Link>
-        <Link
-          to="/dashboard"
-          className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
-        >
-          Skip for now
-        </Link>
       </header>
 
       {step === "url" && (

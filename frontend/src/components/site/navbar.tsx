@@ -22,7 +22,7 @@ export function Navbar() {
   const [open, setOpen] = useState(false);
   const signedIn = useSignedIn();
   const accountHref = signedIn ? "/dashboard" : language === "fr" ? "/fr/login" : "/login";
-  const accountLabel = signedIn ? tr("Dashboard") : tr("Log in");
+  const accountLabel = signedIn ? tr("Dashboard") : tr("Log In & Get Started");
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
