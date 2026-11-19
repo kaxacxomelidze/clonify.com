@@ -4,7 +4,6 @@ const SIDE = [
   { value: "2min", label: "Avg. clone time" },
   { value: "99.2%", label: "Accuracy rate" },
   { value: "+9,000", label: "Active Users" },
-  { value: "4.9/5", label: "User Rating" },
 ];
 export function Stats() {
   const { t: tr, locale } = useSiteLanguage();
