@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { Check, CreditCard, Sparkles } from "lucide-react";
+import { CreditCard, Sparkles } from "lucide-react";
 import { FREE_PLAN, PLAN_RANK, PLANS } from "@/components/dashboard/data";
+import { PlanFeatureList } from "@/components/pricing/plan-feature-list";
+import { annualPerMonth, annualTotal, usd } from "@/lib/pricing";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -11,7 +13,6 @@ import {
   fetchBillingHistory,
   openBillingPortal,
   syncWhopCheckout,
-  track,
 } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -143,6 +144,10 @@ function BillingPage() {
     p.current ? "current" : (PLAN_RANK[p.key] ?? 0) < userRank ? "lower" : "upgrade";
   const plan = plans.find((item) => item.current) || FREE_PLAN;
   const isPaid = planLabel !== "Free";
+  /** Yearly subscribers pay the 45%-off price, billed once a year. */
+  const annual = String(user?.billingInterval || "").toLowerCase() === "annual";
+  const currentMonthly = PLANS.find((p) => p.key === plan.key)?.monthly ?? 0;
+  const nextChargeAmount = annual ? `${usd(annualTotal(currentMonthly))}/yr` : plan.price;
   /** Paid plan granted by hand: nothing is billed, so there is nothing to charge or cancel. */
   const isComplimentary = isPaid && user?.billingSource === "manual";
   const currentKey = plan.key;
@@ -280,7 +285,6 @@ function BillingPage() {
                         return;
                       }
                       const result = await cancelSubscription();
-                      track("churn", { plan: currentKey }, false);
                       if (result.redirectUrl) {
                         // Cancellation happens on Whop's billing page.
                         window.location.href = result.redirectUrl;
@@ -377,7 +381,7 @@ function BillingPage() {
               <span className="text-muted-foreground">Next charge</span>
               <span>
                 {isPaid && !cancelled && !isComplimentary
-                  ? `${plan.price}${renewsOn ? ` · ${renewsOn}` : ""}`
+                  ? `${nextChargeAmount}${renewsOn ? ` · ${renewsOn}` : ""}`
                   : "—"}
               </span>
             </div>
@@ -388,7 +392,7 @@ function BillingPage() {
       <div id="billing-plans" className="grid gap-6 md:grid-cols-3">
         {plans.map((p, i) => (
           <motion.div
-            key={p.name}
+            key={p.key}
             initial={false}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 0.1 + i * 0.07, ease: [0.16, 1, 0.3, 1] }}
@@ -397,24 +401,36 @@ function BillingPage() {
               p.current && "ring-1 ring-foreground/40",
             )}
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <p className="text-sm">{p.name}</p>
-              {p.current && (
+              {p.current ? (
                 <span className="rounded-full bg-primary px-3 py-1 text-[0.65rem] uppercase tracking-widest text-primary-foreground">
                   Current
                 </span>
+              ) : (
+                p.popular && (
+                  <span className="rounded-full border border-foreground/30 px-3 py-1 text-[0.65rem] uppercase tracking-widest">
+                    Most popular
+                  </span>
+                )
               )}
             </div>
-            <p className="mt-4 font-display text-4xl tracking-tight">{p.price}</p>
-            <p className="text-xs text-muted-foreground">{p.cycle}</p>
-            <ul className="mt-6 space-y-3">
-              {p.features.map((f) => (
-                <li key={f} className="flex items-start gap-2.5 text-sm text-muted-foreground">
-                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-foreground" />
-                  {f}
-                </li>
-              ))}
-            </ul>
+            {p.current && annual ? (
+              <>
+                <p className="mt-4 font-display text-4xl tracking-tight">
+                  {usd(annualPerMonth(p.monthly))}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  per month · {usd(annualTotal(p.monthly))} billed yearly
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-4 font-display text-4xl tracking-tight">{p.price}</p>
+                <p className="text-xs text-muted-foreground">{p.cycle}</p>
+              </>
+            )}
+            <PlanFeatureList features={p.featureRows} className="mt-6 space-y-3" />
             <button
               disabled={cardState(p) !== "upgrade"}
               onClick={() => {

@@ -13,7 +13,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Brand } from "@/components/site/brand";
+import { Brand, BrandMark } from "@/components/site/brand";
 import {
   Sheet,
   SheetContent,
@@ -26,8 +26,8 @@ import type { CloneJob } from "./data";
 import { useDashboardWorkspace } from "./workspace";
 import { useAuth } from "@/hooks/use-auth";
 
-// Calendar, My tasks, Library, Documents and Teams were removed from the nav; Affiliates is
-// hidden (its /dashboard/affiliates page still works by direct link).
+// Calendar, Tasks, Library, Documents and Teams were deleted; Affiliates is hidden (its
+// /dashboard/affiliates page still works by direct link).
 const NAV = [
   { to: "/dashboard", label: "Clone", icon: LayoutGrid, exact: true },
   { to: "/dashboard/overview", label: "Overview", icon: Gauge, exact: false },
@@ -41,18 +41,24 @@ const NAV = [
 function Sidebar({
   onNavigate,
   onSelect,
+  inDrawer = false,
 }: {
   onNavigate?: () => void;
   onSelect: (job: CloneJob) => void;
+  inDrawer?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const { jobs } = useDashboardWorkspace();
   const list = jobs.filter((job) => job.domain.toLowerCase().includes(query.trim().toLowerCase()));
   return (
-    <div className="dashboard-sidebar" data-lenis-prevent>
-      <Link to="/" aria-label="Clonyfy home" onClick={onNavigate} className="w-fit">
-        <Brand />
-      </Link>
+    <div className="dashboard-sidebar">
+      {/* Same 72px row as the top bar, so the logo and the controls share one line. */}
+      <div className={inDrawer ? "dashboard-sidebar-brand pr-16" : "dashboard-sidebar-brand"}>
+        <Link to="/" aria-label="Clonyfy home" onClick={onNavigate} className="w-fit">
+          <Brand />
+        </Link>
+      </div>
+      <div className="dashboard-sidebar-body" data-lenis-prevent>
       <nav aria-label="Dashboard" className="flex flex-col gap-1">
         {NAV.map((item) => (
           <Link
@@ -87,6 +93,7 @@ function Sidebar({
           )}
         </ul>
       </section>
+      </div>
     </div>
   );
 }
@@ -101,16 +108,26 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const initial = (user?.name || user?.email || "?").trim().charAt(0).toUpperCase() || "?";
 
+  // The editor uses the whole viewport: no sidebar, top bar or page padding around it.
+  if (pathname.startsWith("/dashboard/editor")) {
+    return <div className="dashboard-shell h-dvh overflow-hidden bg-background">{children}</div>;
+  }
+
   return (
-    <div className="dashboard-shell min-h-screen bg-background">
+    <div className="dashboard-shell flex min-h-screen bg-background">
       <a
         href="#dashboard-content"
         className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-full focus:bg-primary focus:p-3 focus:text-primary-foreground"
       >
         Skip to dashboard content
       </a>
-      <header className="sticky top-0 z-40 h-[72px] border-b border-border bg-background/95 backdrop-blur-xl">
-        <div className="mx-auto flex h-full max-w-[110rem] items-center justify-between gap-3 px-4">
+      {/* Full-height sidebar from the top of the page; the top bar sits over the content only. */}
+      <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 border-r border-border lg:block xl:w-72">
+        <Sidebar onSelect={setSelected} />
+      </aside>
+      <div className="flex min-w-0 flex-1 flex-col">
+      <header className="sticky top-0 z-40 h-[72px] shrink-0 border-b border-border bg-background/95 backdrop-blur-xl">
+        <div className="flex h-full items-center justify-between gap-3 px-4 md:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <Sheet open={open} onOpenChange={setOpen}>
               <SheetTrigger asChild>
@@ -123,27 +140,37 @@ export function DashboardShell({ children }: { children: ReactNode }) {
               </SheetTrigger>
               <SheetContent
                 side="left"
-                className="dashboard-shell w-[min(320px,calc(100vw-16px))] p-0 pt-12 [&>button]:grid [&>button]:h-11 [&>button]:w-11 [&>button]:place-items-center"
+                className="dashboard-shell w-[min(320px,calc(100vw-16px))] p-0 [&>button]:right-3 [&>button]:top-[14px] [&>button]:grid [&>button]:h-11 [&>button]:w-11 [&>button]:place-items-center"
                 data-lenis-prevent
               >
                 <SheetTitle className="sr-only">Dashboard navigation</SheetTitle>
                 <SheetDescription className="sr-only">
                   Navigate your workspace or inspect a recent capture.
                 </SheetDescription>
-                <Sidebar onNavigate={() => setOpen(false)} onSelect={setSelected} />
+                <Sidebar onNavigate={() => setOpen(false)} onSelect={setSelected} inDrawer />
               </SheetContent>
             </Sheet>
+            {/* Below lg the sidebar is a drawer, so the top bar carries the brand. */}
+            <Link to="/dashboard" aria-label="Clonyfy dashboard" className="shrink-0 lg:hidden">
+              <span className="block sm:hidden">
+                <BrandMark className="h-7 w-7" />
+              </span>
+              <span className="hidden sm:block">
+                <Brand />
+              </span>
+            </Link>
             {current !== "Clone" && (
-              <span className="hidden text-sm text-muted-foreground sm:block">{current}</span>
+              <span className="hidden text-sm text-muted-foreground lg:block">{current}</span>
             )}
           </div>
           <div className="flex items-center gap-2">
             <Link
               to="/dashboard"
-              className="inline-flex min-h-11 items-center gap-2 rounded-full bg-primary px-4 py-3 text-sm font-medium text-primary-foreground"
+              aria-label="New clone"
+              className="inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full bg-primary px-3 py-3 text-sm font-medium text-primary-foreground sm:px-4"
             >
               <Plus size={16} />
-              <span>New clone</span>
+              <span className="hidden sm:inline">New clone</span>
             </Link>
             <Link
               to="/dashboard/settings"
@@ -170,10 +197,6 @@ export function DashboardShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
-      <div className="mx-auto flex max-w-[110rem]">
-        <aside className="sticky top-[72px] hidden h-[calc(100dvh-72px)] w-64 shrink-0 border-r border-border lg:block xl:w-72">
-          <Sidebar onSelect={setSelected} />
-        </aside>
         <main
           id="dashboard-content"
           tabIndex={-1}

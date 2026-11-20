@@ -201,9 +201,24 @@
 .dashboard-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 24px 20px;
   height: 100%;
+}
+/* 72px, like the top bar: logo and top-bar controls share one line, one bottom border. */
+.dashboard-sidebar-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 72px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+.dashboard-sidebar-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 24px;
+  min-height: 0;
+  padding: 20px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }

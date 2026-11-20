@@ -6,6 +6,7 @@ import {
   fetchCaptchaConfig,
   githubAuthUrl,
   googleAuthUrl,
+  loginResendRequest,
   resendCodeRequest,
   track,
 } from "@/lib/api";
@@ -32,7 +33,7 @@ export function AuthShell({
   footer: ReactNode;
 }) {
   const { t: tr, language } = useSiteLanguage();
-  const { login, register, verifyCode, isAuthenticated } = useAuth();
+  const { login, verifyLogin, register, verifyCode, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -41,6 +42,23 @@ export function AuthShell({
   const [codeEmail, setCodeEmail] = useState("");
   const [code, setCode] = useState("");
   const [resendNote, setResendNote] = useState("");
+  // Login with a correct password → a code is emailed; this is that attempt's id.
+  const [loginChallenge, setLoginChallenge] = useState("");
+  const [resendIn, setResendIn] = useState(0);
+  // Turnstile tokens are single-use: a failed attempt needs a fresh widget.
+  const [captchaKey, setCaptchaKey] = useState(0);
+
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = window.setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => window.clearTimeout(t);
+  }, [resendIn]);
+
+  function resetCaptcha() {
+    if (!captchaSitekey) return;
+    setCaptchaToken("");
+    setCaptchaKey((k) => k + 1);
+  }
 
   function goPostAuth() {
     const dest = postAuthDestination();
@@ -112,11 +130,22 @@ export function AuthShell({
       await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
       let needsCode = false;
       const attempt = async () => {
-        if (mode === "login") await login(email, password, captchaToken);
-        else {
+        if (mode === "login") {
+          const result = await login(email, password, captchaToken);
+          needsCode = !!result.needsCode;
+          if (needsCode) {
+            setLoginChallenge(result.challenge || "");
+            setCodeEmail(result.email || email);
+            setCode("");
+            setResendIn(60);
+          }
+        } else {
           const result = await register(name, email, password, captchaToken);
           needsCode = !!result.needsCode;
-          if (needsCode) setCodeEmail(result.email || email);
+          if (needsCode) {
+            setCodeEmail(result.email || email);
+            setResendIn(60);
+          }
         }
       };
       try {
@@ -134,13 +163,14 @@ export function AuthShell({
         await new Promise((r) => setTimeout(r, 2000));
         await attempt();
       }
-      // Sign-up with SMTP on: show the code step instead of starting a session.
+      // Email code step (sign-up confirmation or login anti-bot check) before the session.
       if (needsCode) {
         setBusy(false);
         return;
       }
       await goPostAuth();
     } catch (err) {
+      resetCaptcha();
       const message =
         err instanceof ApiError
           ? err.message
@@ -162,9 +192,24 @@ export function AuthShell({
     setError("");
     setBusy(true);
     try {
-      await verifyCode(codeEmail, code.trim());
+      if (loginChallenge) {
+        await verifyLogin(loginChallenge, code.trim());
+      } else {
+        await verifyCode(codeEmail, code.trim());
+      }
       await goPostAuth();
     } catch (err) {
+      const expired =
+        err instanceof ApiError &&
+        !!(err.data as { expired?: boolean } | undefined)?.expired &&
+        !!loginChallenge;
+      if (expired) {
+        // This login attempt is over (too many tries or timed out): back to the form.
+        setLoginChallenge("");
+        setCodeEmail("");
+        setCode("");
+        resetCaptcha();
+      }
       setError(
         err instanceof ApiError ? err.message : tr("That code is wrong or expired. Request a new one."),
       );
@@ -174,12 +219,20 @@ export function AuthShell({
   }
 
   async function onResend() {
+    if (resendIn > 0) return;
     setResendNote("");
     try {
-      await resendCodeRequest(codeEmail);
+      if (loginChallenge) await loginResendRequest(loginChallenge);
+      else await resendCodeRequest(codeEmail);
+      setResendIn(60);
       setResendNote(tr("A new code is on its way."));
-    } catch {
-      setResendNote(tr("Couldn't resend right now. Try again shortly."));
+    } catch (err) {
+      const data = err instanceof ApiError ? (err.data as { retryAfter?: number } | null) : null;
+      const retryAfter = Number(data?.retryAfter || 0);
+      if (retryAfter > 0) setResendIn(retryAfter);
+      setResendNote(
+        err instanceof ApiError ? err.message : tr("Couldn't resend right now. Try again shortly."),
+      );
     }
   }
 
@@ -233,7 +286,9 @@ export function AuthShell({
             <form className="auth-form" onSubmit={onVerifyCode}>
               <p className="auth-subtitle">
                 {tr("We sent a 6-digit code to")} <strong>{codeEmail}</strong>.{" "}
-                {tr("Enter it to finish creating your account.")}
+                {loginChallenge
+                  ? tr("Enter it to log in. It keeps bots out of your account.")
+                  : tr("Enter it to finish creating your account.")}
               </p>
               <div className="auth-field">
                 <label htmlFor="auth-code">{tr("Verification code")}</label>
@@ -271,10 +326,27 @@ export function AuthShell({
               <button
                 type="button"
                 onClick={onResend}
-                className="mt-1 text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                disabled={resendIn > 0}
+                className="mt-1 text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:no-underline disabled:opacity-60"
               >
-                {tr("Resend code")}
+                {resendIn > 0 ? `${tr("Resend code")} (${resendIn}s)` : tr("Resend code")}
               </button>
+              {loginChallenge ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginChallenge("");
+                    setCodeEmail("");
+                    setCode("");
+                    setError("");
+                    setResendNote("");
+                    resetCaptcha();
+                  }}
+                  className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                >
+                  {tr("Use a different account")}
+                </button>
+              ) : null}
             </form>
           ) : (
             <>
@@ -335,7 +407,7 @@ export function AuthShell({
               </p>
             ) : null}
             {captchaSitekey ? (
-              <Turnstile sitekey={captchaSitekey} onToken={setCaptchaToken} />
+              <Turnstile key={captchaKey} sitekey={captchaSitekey} onToken={setCaptchaToken} />
             ) : null}
             {error ? (
               <p role="alert" className="text-sm text-destructive">

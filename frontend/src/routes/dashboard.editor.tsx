@@ -19,10 +19,10 @@ export const Route = createFileRoute("/dashboard/editor")({
   },
   head: () => ({
     meta: [
-      { title: "Visual editor — Clonyfy" },
+      { title: "Website editor — Clonyfy" },
       {
         name: "description",
-        content: "Edit cloned pages in the browser and save changes to your Clonyfy project.",
+        content: "Click any text to edit it, restyle your website and export it with Clonyfy.",
       },
     ],
   }),
@@ -33,22 +33,18 @@ function EditorPage() {
   const { outDir, route } = Route.useSearch();
   if (!outDir) {
     return (
-      <div className="space-y-4 p-2">
-        <h1 className="font-display text-2xl">Visual editor</h1>
+      <div className="mx-auto flex h-dvh max-w-md flex-col items-center justify-center gap-4 p-6 text-center">
+        <h1 className="font-display text-2xl">Website editor</h1>
         <p className="text-sm text-muted-foreground">
-          Open a finished clone from Library or Capture details to edit pages.
+          Open a finished clone from your dashboard to customize it.
         </p>
-        <Link to="/dashboard/library" className="dashboard-button inline-flex">
+        <Link to="/dashboard" className="dashboard-button inline-flex">
           <ArrowLeft size={16} />
-          Back to library
+          Back to dashboard
         </Link>
       </div>
     );
   }
-  // The Studio is a full-height workspace with its own top bar (back link included).
-  return (
-    <div className="p-1">
-      <VisualEditor outDir={outDir} initialRoute={route || "/"} />
-    </div>
-  );
+  // The editor is a full-screen workspace with its own top bar (back link included).
+  return <VisualEditor outDir={outDir} initialRoute={route || "/"} />;
 }

@@ -1,3 +1,5 @@
+import { PRICING_PLANS, usd } from "@/lib/pricing";
+
 // "waiting": the site blocks our servers; the clone continues through the Clonyfy Helper.
 export type CloneStatus = "done" | "running" | "queued" | "waiting" | "error";
 
@@ -99,60 +101,20 @@ export const CLONES: CloneJob[] = [
   },
 ];
 
-/** Paid plans — must match the landing pricing and the backend plan keys. */
-export const PLANS = [
-  {
-    key: "starter",
-    name: "Starter",
-    price: "$17.99",
-    cycle: "per month",
-    features: [
-      "10 website clones / month",
-      "Unlimited screens",
-      "Code & ZIP export",
-      "Visual builder & editor",
-      "Access to templates",
-      "Cancel anytime",
-    ],
-    current: false,
-  },
-  {
-    key: "growth",
-    name: "Growth",
-    price: "$26.99",
-    cycle: "per month",
-    features: [
-      "30 website clones / month",
-      "Unlimited screens",
-      "Code & ZIP export",
-      "Visual builder & editor",
-      "Access to templates",
-      "Figma export",
-      "API access",
-      "Private support access",
-      "Cancel anytime",
-    ],
-    current: false,
-  },
-  {
-    key: "unlimited",
-    name: "Pro",
-    price: "$79.99",
-    cycle: "per month",
-    features: [
-      "Unlimited website clones",
-      "Unlimited screens",
-      "Code & ZIP export",
-      "Figma export",
-      "Visual builder & editor",
-      "Access to templates",
-      "API access",
-      "Private support access",
-      "Cancel anytime",
-    ],
-    current: false,
-  },
-];
+/** Paid plans, from the shared pricing table (lib/pricing.ts). */
+export const PLANS = PRICING_PLANS.map((plan) => ({
+  key: plan.key,
+  name: plan.name,
+  price: usd(plan.monthly),
+  monthly: plan.monthly,
+  cycle: "per month",
+  popular: plan.popular,
+  /** Every row of the table, included (✓) and not included (❌). */
+  featureRows: plan.features,
+  /** Included rows only (labels). */
+  features: plan.features.filter((f) => f.included).map((f) => f.label),
+  current: false,
+}));
 
 export const FREE_PLAN = { key: "free", name: "Free", price: "$0", cycle: "forever" };
 

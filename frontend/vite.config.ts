@@ -5,7 +5,7 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import react from "@vitejs/plugin-react";
 import { nitro } from "nitro/vite";
 
-const isVercel = Boolean(process.env.VERCEL);
+const isVercel = Boolean(process.env["VERCEL"]);
 
 export default defineConfig(({ command }) => ({
   server: { host: "::", port: 8080 },

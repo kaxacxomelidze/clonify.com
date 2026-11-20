@@ -1,21 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import {
-  ArrowLeft,
-  Check,
-  Code2,
-  Copy,
-  Figma,
-  Headphones,
-  LayoutTemplate,
-  Loader2,
-  Lock,
-  PenTool,
-  Plug,
-  Plus,
-} from "lucide-react";
+import { ArrowLeft, Loader2, Lock, Plus } from "lucide-react";
 import { BrandMark } from "@/components/site/brand";
 import { PLAN_RANK, PLANS } from "@/components/dashboard/data";
+import { PlanFeatureList } from "@/components/pricing/plan-feature-list";
+import { ADDON, annualPerMonth, annualTotal, usd } from "@/lib/pricing";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError, startWhopAddon, startWhopCheckout, track } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -26,9 +15,12 @@ type PlanKey = "starter" | "growth" | "unlimited";
 const PLAN_KEYS: PlanKey[] = ["starter", "growth", "unlimited"];
 type Interval = "monthly" | "annual";
 
-/** First-year billing is 12 months at 45% off — the same prices as the Whop yearly plans. */
-function yearlyTotal(monthly: number) {
-  return Math.round(monthly * 12 * 0.55 * 100) / 100;
+/** Only in-app paths may be the post-payment destination (no open redirects). */
+function safeReturnPath(value: unknown): string | undefined {
+  const path = typeof value === "string" ? value : "";
+  return /^\/(start|dashboard)(\/[\w\-/]*)?(\?[\w.%=&\-/]*)?$/.test(path) && path.length <= 400
+    ? path
+    : undefined;
 }
 
 export const Route = createFileRoute("/checkout")({
@@ -39,35 +31,20 @@ export const Route = createFileRoute("/checkout")({
     plan?: PlanKey | undefined;
     interval?: Interval | undefined;
     status?: string | undefined;
+    returnPath?: string | undefined;
+    source?: string | undefined;
   } => ({
     plan: PLAN_KEYS.includes(search["plan"] as PlanKey) ? (search["plan"] as PlanKey) : undefined,
     interval: search["interval"] === "annual" ? "annual" : undefined,
     status: typeof search["status"] === "string" ? search["status"] : undefined,
+    returnPath: safeReturnPath(search["returnPath"]),
+    source:
+      typeof search["source"] === "string" && /^[\w-]{1,40}$/.test(search["source"])
+        ? search["source"]
+        : undefined,
   }),
   component: CheckoutPage,
 });
-
-/** The summary card's "top features", with an icon each. */
-const TOP_FEATURES: Record<PlanKey, Array<{ icon: typeof Check; text: string }>> = {
-  starter: [
-    { icon: Copy, text: "10 website clones every month" },
-    { icon: Code2, text: "Code & ZIP export" },
-    { icon: PenTool, text: "Visual builder & editor" },
-    { icon: LayoutTemplate, text: "Access to templates" },
-  ],
-  growth: [
-    { icon: Copy, text: "30 website clones every month" },
-    { icon: Figma, text: "Figma export" },
-    { icon: Plug, text: "API access" },
-    { icon: Headphones, text: "Private support access" },
-  ],
-  unlimited: [
-    { icon: Copy, text: "Unlimited website clones" },
-    { icon: Figma, text: "Figma export & templates" },
-    { icon: Plug, text: "API access" },
-    { icon: Headphones, text: "Private support access" },
-  ],
-};
 
 type WhopCheckoutElement = { mount: (target: HTMLElement) => void; destroy?: () => void };
 type WhopCheckoutGroup = {
@@ -151,7 +128,13 @@ function loadWhopElements(): Promise<WhopElementsFactory> {
 }
 
 function CheckoutPage() {
-  const { plan: requestedPlan, interval: requestedInterval, status } = Route.useSearch();
+  const {
+    plan: requestedPlan,
+    interval: requestedInterval,
+    status,
+    returnPath,
+    source,
+  } = Route.useSearch();
   const navigate = useNavigate();
   const { user, loading, isAuthenticated } = useAuth();
   const userRank = PLAN_RANK[String(user?.plan || "free").toLowerCase()] ?? 0;
@@ -201,17 +184,28 @@ function CheckoutPage() {
     });
   }, [loading, user, buyable, requestedPlan]);
 
+  /** After payment: back to where the user was (e.g. their clone), else Billing. */
+  const goPaid = useMemo(
+    () => () => {
+      if (returnPath) {
+        window.location.assign(`${returnPath}${returnPath.includes("?") ? "&" : "?"}whop=success`);
+        return;
+      }
+      void navigate({ to: "/dashboard/billing", search: { whop: "success" } as never });
+    },
+    [returnPath, navigate],
+  );
+
   // Back from an off-site payment step (3DS, bank page): only "succeeded" counts as paid.
   useEffect(() => {
-    if (status === "succeeded")
-      void navigate({ to: "/dashboard/billing", search: { whop: "success" } as never });
+    if (status === "succeeded") goPaid();
     else if (status === "failed")
       setError(
         "The payment didn't go through. You weren't charged — try again or use another card.",
       );
     else if (status === "canceled")
       setError("Payment was canceled. You can try again whenever you're ready.");
-  }, [status, navigate]);
+  }, [status, goPaid]);
 
   // Mount Whop's checkout for the selected plan; a new plan needs a new checkout.
   useEffect(() => {
@@ -225,15 +219,18 @@ function CheckoutPage() {
     target.innerHTML = "";
     void (async () => {
       try {
-        const res = await startWhopCheckout(selected, interval);
+        const res = await startWhopCheckout(selected, interval, returnPath);
         if (cancelled) return;
         setCheckoutUrl(res.url);
+        track("checkout_started", { plan: selected, interval, source: source || "checkout" }, false);
         if (!res.checkoutId) throw new Error("no embedded checkout");
         const WhopElements = await loadWhopElements();
         if (cancelled) return;
         const checkoutGroup = WhopElements().checkout.create({
           checkoutConfiguration: res.checkoutId,
-          returnUrl: `${window.location.origin}/checkout?plan=${selected}&interval=${interval}`,
+          returnUrl: `${window.location.origin}/checkout?plan=${selected}&interval=${interval}${
+            returnPath ? `&returnPath=${encodeURIComponent(returnPath)}` : ""
+          }`,
           appearance: {
             theme: { appearance: "dark", accentColor: "gray", grayColor: "gray" },
             variables: { "--radius": "10px" },
@@ -241,9 +238,7 @@ function CheckoutPage() {
             // and email field are hidden: our summary card and the signed-in email cover them.
             classes: CHECKOUT_CLASSES,
           },
-          onComplete: () => {
-            void navigate({ to: "/dashboard/billing", search: { whop: "success" } as never });
-          },
+          onComplete: () => goPaid(),
         });
         group = checkoutGroup;
         const checkoutElement = checkoutGroup.create("checkout", {
@@ -271,14 +266,15 @@ function CheckoutPage() {
       element?.destroy?.();
       group?.destroy?.();
     };
-  }, [selected, interval, user?.email, navigate]);
+  }, [selected, interval, user?.email, returnPath, source, goPaid]);
 
   const plan = PLANS.find((p) => p.key === selected) ?? PLANS[0]!;
-  const planKey = plan.key as PlanKey;
-  const monthly = Number(plan.price.replace("$", ""));
+  const monthly = plan.monthly;
   const yearly = interval === "annual";
-  const price = (yearly ? yearlyTotal(monthly) : monthly).toFixed(2);
-  const saving = (monthly * 12 - yearlyTotal(monthly)).toFixed(2);
+  const price = (yearly ? annualTotal(monthly) : monthly).toFixed(2);
+  const saving = (monthly * 12 - annualTotal(monthly)).toFixed(2);
+  /** Pro is unlimited: no plan to buy and no use for extra clones. */
+  const onTopPlan = !selected && !loading && !!user;
   const goBack = () =>
     window.history.length > 1 ? window.history.back() : void navigate({ to: "/dashboard/billing" });
 
@@ -302,23 +298,37 @@ function CheckoutPage() {
             </Link>
           </div>
 
-          <p className="mt-10 text-[15px] text-muted-foreground">
-            Subscribe to Clonyfy {plan.name}
-          </p>
-          <div className="mt-1 flex items-end gap-2">
-            <span className="text-[2.5rem] font-semibold leading-none tracking-tight">
-              ${price}
-            </span>
-            <span className="pb-1 text-sm leading-tight text-muted-foreground">
-              per
-              <br />
-              {yearly ? "year" : "month"}
-            </span>
-          </div>
-          {yearly && (
-            <p className="mt-2 text-sm text-muted-foreground">
-              ${(yearlyTotal(monthly) / 12).toFixed(2)}/month · you save ${saving} a year
+          {onTopPlan ? (
+            <p className="mt-10 text-[15px] text-muted-foreground">
+              You're on Clonyfy Pro — unlimited website clones and every feature.
             </p>
+          ) : (
+            <>
+              <p className="mt-10 text-[15px] text-muted-foreground">
+                Subscribe to Clonyfy {plan.name}
+              </p>
+              {/* Yearly is shown as the monthly price with the 45% reduction. */}
+              <div className="mt-1 flex items-end gap-2">
+                {yearly && (
+                  <s className="pb-1 text-lg leading-none text-muted-foreground">
+                    {usd(monthly)}
+                  </s>
+                )}
+                <span className="text-[2.5rem] font-semibold leading-none tracking-tight">
+                  {usd(yearly ? annualPerMonth(monthly) : monthly)}
+                </span>
+                <span className="pb-1 text-sm leading-tight text-muted-foreground">
+                  per
+                  <br />
+                  month
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {yearly
+                  ? `${usd(annualTotal(monthly))} billed yearly · you save ${saving} a year`
+                  : "Billed monthly · cancel anytime"}
+              </p>
+            </>
           )}
 
           <div
@@ -391,22 +401,18 @@ function CheckoutPage() {
             })}
           </div>
 
-          <ul className="mt-8 space-y-3">
-            {TOP_FEATURES[planKey].map(({ icon: Icon, text }) => (
-              <li key={text} className="flex items-center gap-3 text-sm">
-                <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-                {text}
-              </li>
-            ))}
-          </ul>
+          {!onTopPlan && (
+            <PlanFeatureList features={plan.featureRows} className="mt-8 space-y-3" />
+          )}
 
-          {/* Add-on: a one-time top-up purchased as its own checkout. */}
-          <div className="mt-8 rounded-xl border border-border p-4">
+          {/* Add-on: a one-time top-up bought as its own checkout (not for unlimited Pro). */}
+          {!onTopPlan && String(user?.plan || "").toLowerCase() !== "unlimited" && (
+            <div className="mt-8 rounded-xl border border-border p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-medium">Need more clones?</p>
+                <p className="text-sm font-medium">Add-On: Extra Website Clones</p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  Extra Website Clones — +15 websites for $20. Instant access.
+                  +{ADDON.clones} websites for {usd(ADDON.price)} (instant access).
                 </p>
               </div>
               <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -418,15 +424,17 @@ function CheckoutPage() {
               className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-border text-sm font-medium transition-colors hover:bg-accent disabled:opacity-60"
             >
               {addonBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              Add 15 clones — $20
+              Add {ADDON.clones} clones — {usd(ADDON.price)}
             </button>
             {addonError && (
               <p role="alert" className="mt-2 text-xs text-destructive">
                 {addonError}
               </p>
             )}
-          </div>
+            </div>
+          )}
 
+          {!onTopPlan && (
           <dl className="mt-8 space-y-3 border-t border-border pt-6 text-sm">
             <div className="flex justify-between gap-4">
               <dt>
@@ -450,6 +458,7 @@ function CheckoutPage() {
               <dd>${price} + tax</dd>
             </div>
           </dl>
+          )}
         </div>
       </section>
 

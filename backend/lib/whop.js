@@ -5,11 +5,48 @@ import { createHmac, timingSafeEqual } from 'crypto';
 const WHOP_API_BASE = (process.env.WHOP_API_BASE || 'https://api.whop.com/api/v1').replace(/\/+$/, '');
 const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
 
+// The top tier is sold as "Pro" (internal key "unlimited"). WHOP_PLAN_PRO_* is preferred;
+// the older WHOP_PLAN_SCALE_* names keep working.
 const PLAN_ENV = {
-  starter: { monthly: 'WHOP_PLAN_STARTER_MONTHLY', annual: 'WHOP_PLAN_STARTER_ANNUAL' },
-  growth: { monthly: 'WHOP_PLAN_GROWTH_MONTHLY', annual: 'WHOP_PLAN_GROWTH_ANNUAL' },
-  unlimited: { monthly: 'WHOP_PLAN_SCALE_MONTHLY', annual: 'WHOP_PLAN_SCALE_ANNUAL' },
+  starter: { monthly: ['WHOP_PLAN_STARTER_MONTHLY'], annual: ['WHOP_PLAN_STARTER_ANNUAL'] },
+  growth: { monthly: ['WHOP_PLAN_GROWTH_MONTHLY'], annual: ['WHOP_PLAN_GROWTH_ANNUAL'] },
+  unlimited: {
+    monthly: ['WHOP_PLAN_PRO_MONTHLY', 'WHOP_PLAN_SCALE_MONTHLY'],
+    annual: ['WHOP_PLAN_PRO_ANNUAL', 'WHOP_PLAN_SCALE_ANNUAL'],
+  },
 };
+function envFirst(names) {
+  for (const name of names || []) {
+    const v = String(process.env[name] || '').trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+// ── Payload normalizers: Whop's API versions name the same fields differently ──
+/** The Whop plan/variant id a payment or membership is for. */
+export function whopPlanIdOf(o) {
+  return String(o?.plan?.id || o?.variant?.id || o?.variant_id || o?.plan_id || '').trim();
+}
+/** The membership a payment belongs to. */
+export function whopMembershipIdOf(o) {
+  return String(o?.membership?.id || o?.membership_id || '').trim() || null;
+}
+/** Buyer email on a payment or membership. */
+export function whopEmailOf(o) {
+  return String(o?.user?.email || o?.member?.email || o?.customer_email || o?.email || '').trim().toLowerCase() || null;
+}
+/** Whop user id on a membership. */
+export function whopUserIdOf(m) {
+  return String(m?.user?.id || m?.user_id || '').trim() || null;
+}
+/** When the current paid period ends (a valid Date), or null. */
+export function whopPeriodEndOf(m) {
+  const raw = m?.renewal_period_end || m?.current_period_end || m?.expires_at || null;
+  if (!raw) return null;
+  const d = new Date(typeof raw === 'number' && raw < 1e12 ? raw * 1000 : raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 /** One-time "Extra Website Clones" add-on: +15 clones for $20, granted on payment.succeeded. */
 export const ADDON_CLONE_CREDITS = 15;
@@ -37,8 +74,7 @@ export function whopWebhookSecret() {
 
 /** Whop plan id (plan_xxx) for one of our plans + billing interval, or '' when not configured. */
 export function whopPlanId(plan, interval = 'monthly') {
-  const envName = PLAN_ENV[plan]?.[interval === 'annual' ? 'annual' : 'monthly'];
-  return envName ? String(process.env[envName] || '').trim() : '';
+  return envFirst(PLAN_ENV[plan]?.[interval === 'annual' ? 'annual' : 'monthly']);
 }
 
 /**
@@ -59,8 +95,8 @@ export function planFromWhopPlanId(whopPlan) {
   // The exit-intent downsell is a Growth annual plan priced for a first-year discount.
   if (id && id === whopDownsellPlanId()) return { plan: 'growth', interval: 'annual' };
   for (const [plan, intervals] of Object.entries(PLAN_ENV)) {
-    for (const [interval, envName] of Object.entries(intervals)) {
-      if (String(process.env[envName] || '').trim() === id) return { plan, interval };
+    for (const [interval, envNames] of Object.entries(intervals)) {
+      if (envNames.some((name) => String(process.env[name] || '').trim() === id)) return { plan, interval };
     }
   }
   for (const [legacyId, plan, interval] of legacyWhopPlans()) {
@@ -89,6 +125,8 @@ async function whopRequest(method, path, body) {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      // Optional pin of the API version the key was created with (see docs/whop-setup.md).
+      ...(process.env.WHOP_API_VERSION_DATE ? { 'Api-Version-Date': String(process.env.WHOP_API_VERSION_DATE).trim() } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(20_000),

@@ -59,8 +59,8 @@ function IntegrationsPage() {
         <p className="eyebrow">Fits into your workflow</p>
         <h1 className="display-lg mt-3">Integrations</h1>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          Connect GitHub with a personal access token to push clones. Other tools are listed for
-          roadmap clarity and fail safely.
+          Connect GitHub with a personal access token to push clones, or export finished clones to
+          Figma.
         </p>
       </header>
       <div className="grid gap-5 md:grid-cols-2">
@@ -103,8 +103,8 @@ function IntegrationsPage() {
             >
               {busy ? "Connecting…" : githubLogin ? "Reconnect" : "Connect GitHub"}
             </button>
-            <Link to="/dashboard/library" className="dashboard-button">
-              Open library to export
+            <Link to="/dashboard/activity" className="dashboard-button">
+              Open Activity to export
             </Link>
           </div>
           {repos.length > 0 && (
@@ -144,17 +144,16 @@ function IntegrationsPage() {
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
             <Link
-              to="/dashboard/library"
+              to="/dashboard/activity"
               className="dashboard-button bg-primary text-primary-foreground"
             >
-              Open library to export
+              Open Activity to export
             </Link>
           </div>
         </section>
-
       </div>
       <p className="surface rounded-2xl p-5 text-sm text-muted-foreground" role="status">
-        {notice || "GitHub push and Figma export are available from finished captures in Library."}
+        {notice || "GitHub push and Figma export are available from finished clones in Activity."}
       </p>
     </div>
   );

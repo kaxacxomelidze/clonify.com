@@ -4,29 +4,14 @@ import { fetchOutputs, type OutputItem } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 
 const STORAGE_KEY = "clonyfy-demo-captures-v1";
-export type WorkspaceTask = {
-  id: string;
-  title: string;
-  date: string;
-  done: boolean;
-  archived: boolean;
-  pinned: boolean;
-};
-const SEED_TASKS: WorkspaceTask[] = [];
 const WorkspaceContext = createContext<{
   jobs: CloneJob[];
   addJob: (job: CloneJob) => void;
   refreshJobs: () => Promise<void>;
-  tasks: WorkspaceTask[];
-  saveTask: (task: WorkspaceTask) => void;
-  removeTask: (id: string) => void;
 }>({
   jobs: [],
   addJob: () => {},
   refreshJobs: async () => {},
-  tasks: SEED_TASKS,
-  saveTask: () => {},
-  removeTask: () => {},
 });
 
 function mapOutput(item: OutputItem): CloneJob {
@@ -79,7 +64,6 @@ function elapsedSince(iso?: string) {
 export function DashboardWorkspace({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useAuth();
   const [jobs, setJobs] = useState<CloneJob[]>([]);
-  const [tasks, setTasks] = useState(SEED_TASKS);
 
   const refreshJobs = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -107,44 +91,16 @@ export function DashboardWorkspace({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer);
   }, [isAuthenticated, hasRunningJob, refreshJobs]);
 
+  // Tasks and the calendar were removed from the product: drop their saved demo data.
   useEffect(() => {
     try {
-      const saved: unknown = JSON.parse(localStorage.getItem("clonyfy-demo-tasks-v1") || "null");
-      if (Array.isArray(saved))
-        setTasks(
-          saved.filter(
-            (task): task is WorkspaceTask =>
-              !!task &&
-              typeof task.id === "string" &&
-              typeof task.title === "string" &&
-              /^\d{4}-\d{2}-\d{2}$/.test(task.date) &&
-              [task.done, task.archived, task.pinned].every((value) => typeof value === "boolean"),
-          ),
-        );
+      localStorage.removeItem("clonyfy-demo-tasks-v1");
+      localStorage.removeItem("clonyfy-team-members");
     } catch {
       /* Storage is optional. */
     }
   }, []);
 
-  const updateTasks = (update: (current: WorkspaceTask[]) => WorkspaceTask[]) => {
-    setTasks((current) => {
-      const next = update(current);
-      try {
-        localStorage.setItem("clonyfy-demo-tasks-v1", JSON.stringify(next));
-      } catch {
-        /* Keep the current session usable. */
-      }
-      return next;
-    });
-  };
-  const saveTask = (task: WorkspaceTask) =>
-    updateTasks((current) =>
-      current.some((item) => item.id === task.id)
-        ? current.map((item) => (item.id === task.id ? task : item))
-        : [...current, task],
-    );
-  const removeTask = (id: string) =>
-    updateTasks((current) => current.filter((task) => task.id !== id));
   const addJob = useCallback((job: CloneJob) => {
     setJobs((current) => {
       const next = [job, ...current.filter((item) => item.id !== job.id)];
@@ -162,7 +118,7 @@ export function DashboardWorkspace({ children }: { children: ReactNode }) {
     });
   }, []);
   return (
-    <WorkspaceContext.Provider value={{ jobs, addJob, refreshJobs, tasks, saveTask, removeTask }}>
+    <WorkspaceContext.Provider value={{ jobs, addJob, refreshJobs }}>
       {children}
     </WorkspaceContext.Provider>
   );

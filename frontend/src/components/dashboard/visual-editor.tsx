@@ -11,6 +11,7 @@ import {
   Palette,
   Redo2,
   Save,
+  SlidersHorizontal,
   Smartphone,
   Tablet,
   Undo2,
@@ -31,7 +32,12 @@ import {
   savePage,
   setCloneTheme,
 } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
 import { SiteStylePanel } from "@/components/dashboard/theme-models-panel";
+import { HardPaywall } from "@/components/dashboard/hard-paywall";
+import { EditorExportDialog } from "@/components/dashboard/editor-export";
+import { SimplePanel, type SimpleActions } from "@/components/dashboard/studio/simple-panel";
+import type { PlanKey } from "@/lib/pricing";
 import {
   Sheet,
   SheetContent,
@@ -181,14 +187,41 @@ function isTypingTarget(el: Element | null) {
 const TOP_BTN =
   "inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 text-xs transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
 
+/** "simple" (default): click text to type, one panel. "advanced": the full Studio. */
+type UiMode = "simple" | "advanced";
+const UI_MODE_KEY = "clonyfy.editor.mode";
+function readUiMode(): UiMode {
+  try {
+    return localStorage.getItem(UI_MODE_KEY) === "advanced" ? "advanced" : "simple";
+  } catch {
+    return "simple";
+  }
+}
+
 export function VisualEditor({
   outDir,
   initialRoute = "/",
+  variant = "dashboard",
+  onExport,
 }: {
   outDir: string;
   initialRoute?: string;
+  /** "onboarding": no dashboard links, no Advanced editor, page changes stay in this URL. */
+  variant?: "dashboard" | "onboarding";
+  /** Replaces the built-in export (paywall / export menu); called after saving. */
+  onExport?: () => void;
 }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const onboarding = variant === "onboarding";
+  const [uiMode, setUiModeState] = useState<UiMode>(() => (onboarding ? "simple" : readUiMode()));
+  const simple = uiMode === "simple";
+  const uiModeRef = useRef<UiMode>(uiMode);
+  uiModeRef.current = uiMode;
+  const plan = String(user?.plan || "free").toLowerCase();
+  const paid = plan !== "free" && plan !== "";
+  const [paywall, setPaywall] = useState<PlanKey | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -328,13 +361,14 @@ export function VisualEditor({
 
   const syncRouteInUrl = useCallback(
     (nextRoute: string) => {
+      if (onboarding) return;
       void navigate({
         to: "/dashboard/editor",
         search: { outDir, route: nextRoute },
         replace: true,
       });
     },
-    [navigate, outDir],
+    [navigate, outDir, onboarding],
   );
 
   /* -------------------------------------------------------------- history */
@@ -1157,7 +1191,7 @@ export function VisualEditor({
     }
     if (modeRef.current !== "edit" || !selectedRef.current) return;
     const step = e.shiftKey ? 10 : 1;
-    if (e.key.startsWith("Arrow")) {
+    if (e.key.startsWith("Arrow") && uiModeRef.current === "advanced") {
       e.preventDefault();
       if (e.key === "ArrowLeft") nudge(-step, 0);
       if (e.key === "ArrowRight") nudge(step, 0);
@@ -1275,6 +1309,11 @@ export function VisualEditor({
         if (ed && ed.el.contains(e.target as Node)) return;
         e.stopPropagation();
         const target = pickTarget(e.target);
+        // Simple editor: one click on any text puts the cursor in it, ready to type.
+        if (uiModeRef.current === "simple" && target && !isLocked(target) && canEditText(target)) {
+          startEditing(target, { x: e.clientX, y: e.clientY });
+          return;
+        }
         if (
           target &&
           target === selectedRef.current &&
@@ -1306,6 +1345,7 @@ export function VisualEditor({
       "pointerdown",
       (e) => {
         if (!editing() || e.button !== 0 || editingRef.current) return;
+        if (uiModeRef.current === "simple") return; // no accidental moves in the simple editor
         const target = pickTarget(e.target);
         const sel = selectedRef.current;
         if (!sel || !target || !(target === sel || sel.contains(target)) || isLocked(sel)) return;
@@ -1649,18 +1689,33 @@ export function VisualEditor({
     }
   };
 
-  const exportHtml = () => {
-    const doc = docRef.current;
-    if (!doc) return;
-    const blob = new Blob([asSaved(() => htmlForSave(doc))], { type: "text/html;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    const name =
-      (route === "/" ? "index" : route.replace(/^\/+|\/+$/g, "").replace(/[^\w-]+/g, "-")) ||
-      "page";
-    a.download = `${name}.html`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  /**
+   * Export: changes are saved first so every export includes them. Free accounts see the
+   * paywall (export is a paid feature); paying accounts get the export menu.
+   */
+  const onExportClick = async () => {
+    commitEditing();
+    if (dirty && !(await onSave())) return;
+    if (onExport) {
+      onExport();
+      return;
+    }
+    if (!paid) {
+      setPaywall("growth");
+      return;
+    }
+    setExportOpen(true);
+  };
+
+  const setUiMode = (next: UiMode) => {
+    commitEditing();
+    if (next === "simple" && modeRef.current !== "edit") switchMode("edit");
+    setUiModeState(next);
+    try {
+      localStorage.setItem(UI_MODE_KEY, next);
+    } catch {
+      /* the choice just isn't remembered */
+    }
   };
 
   /* -------------------------------------------------------------- canvas */
@@ -1678,11 +1733,27 @@ export function VisualEditor({
   const deviceSpec = DEVICES.find((d) => d.id === device)!;
   const deviceWidth = deviceSpec.width;
   const screenHeight = deviceSpec.height(deviceWidth);
+  // Simple editor: the page fills the canvas width (big and readable) and the frame fills
+  // the canvas height, so you scroll the page itself like in a browser.
+  const simpleScale = Math.min(1, Math.max(0.3, (canvasSize.w - 32) / deviceWidth));
   // Desktop shows a taller frame so the canvas below it isn't left empty.
-  const frameHeight = device === "desktop" ? Math.round(screenHeight * 1.4) : screenHeight;
+  const frameHeight = simple
+    ? Math.round(
+        Math.min(
+          screenHeight * 1.6,
+          Math.max(
+            screenHeight * (device === "desktop" ? 0.75 : 1),
+            (canvasSize.h - 64) / simpleScale,
+          ),
+        ),
+      )
+    : device === "desktop"
+      ? Math.round(screenHeight * 1.4)
+      : screenHeight;
   // Fit sizes by the device screen: canvas padding (48), title bar (28) and bottom bar room (56).
-  const scale =
-    zoom === "fit"
+  const scale = simple
+    ? simpleScale
+    : zoom === "fit"
       ? Math.min(
           1,
           Math.max(
@@ -1771,47 +1842,81 @@ export function VisualEditor({
     insertSvg: (svg) => insertBlock(svg, false),
   };
 
+  const simpleActions: SimpleActions = {
+    editText: () => selectedRef.current && startEditing(selectedRef.current),
+    setText,
+    style: applyStyle,
+    setFont,
+    setLink,
+    removeLink,
+    replaceImage: () => openUpload("img"),
+    replaceBackground: () => openUpload("bg"),
+    setAlt,
+    duplicate: duplicateSelected,
+    toggleHidden,
+    remove: deleteSelected,
+    selectParent: () => selectAncestor(1),
+    deselect: () => {
+      commitEditing();
+      select(null);
+    },
+    applyTheme: (id) => void onApplyTheme(id),
+  };
+
   /* ---------------------------------------------------------------- view */
 
   return (
-    <div className="flex h-[calc(100vh-1rem)] min-h-[640px] flex-col overflow-hidden rounded-2xl border border-border bg-background">
+    <div
+      className={`flex flex-col overflow-hidden bg-background ${onboarding ? "h-full" : "h-dvh"}`}
+    >
       {/* Top bar */}
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-2">
-        <Link to="/dashboard/library" className={TOP_BTN} title="Back to library">
-          <ArrowLeft size={14} />
-        </Link>
-        <div className="mr-2 min-w-0">
+        {!onboarding && (
+          <Link
+            to="/dashboard"
+            className={TOP_BTN}
+            title="Back to dashboard"
+            aria-label="Back to dashboard"
+          >
+            <ArrowLeft size={14} />
+          </Link>
+        )}
+        <div className="mr-1 min-w-0 max-w-[40vw] sm:max-w-[260px]">
           <p className="flex items-center gap-2 text-sm font-semibold">
-            <span className="rounded-md bg-emerald-400 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
-              Studio
-            </span>
+            {!simple && (
+              <span className="rounded-md bg-emerald-400 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+                Studio
+              </span>
+            )}
             <span className="truncate">{host}</span>
           </p>
           <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <span
               className={`h-1.5 w-1.5 rounded-full ${dirty ? "bg-amber-400" : "bg-emerald-400"}`}
             />
-            {busy === "save" ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}
+            {busy === "save" ? "Saving…" : dirty ? "Unsaved changes" : "All changes saved"}
           </p>
         </div>
-        <select
-          className="h-8 max-w-[180px] rounded-lg border border-border bg-background px-2 text-xs"
-          value={route}
-          onChange={(e) => void onRouteChange(e.target.value)}
-          disabled={loading || !!busy}
-          aria-label="Page"
-        >
-          {routes.map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
+        {(!simple || routes.length > 1) && (
+          <select
+            className="h-8 max-w-[160px] rounded-lg border border-border bg-background px-2 text-xs"
+            value={route}
+            onChange={(e) => void onRouteChange(e.target.value)}
+            disabled={loading || !!busy}
+            aria-label="Page"
+          >
+            {routes.map((r) => (
+              <option key={r} value={r}>
+                {r === "/" ? "Home page" : r}
+              </option>
+            ))}
+          </select>
+        )}
 
         <div
           className="mx-auto flex items-center gap-0.5 rounded-xl border border-border p-0.5"
           role="group"
-          aria-label="Device"
+          aria-label="Screen size"
         >
           {DEVICES.map(({ id, label, Icon }) => (
             <button
@@ -1819,9 +1924,11 @@ export function VisualEditor({
               type="button"
               onClick={() => setDevice(id)}
               aria-pressed={device === id}
+              aria-label={label}
+              title={label}
               className={`flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors ${device === id ? "bg-accent text-foreground shadow-[inset_0_0_0_1px_var(--border)]" : "text-muted-foreground hover:text-foreground"}`}
             >
-              <Icon size={13} /> {label}
+              <Icon size={13} /> <span className="hidden md:inline">{label}</span>
             </button>
           ))}
         </div>
@@ -1832,6 +1939,7 @@ export function VisualEditor({
           onClick={undo}
           disabled={loading || !history.undo}
           title="Undo (Ctrl+Z)"
+          aria-label="Undo"
         >
           <Undo2 size={14} />
         </button>
@@ -1841,35 +1949,59 @@ export function VisualEditor({
           onClick={redo}
           disabled={loading || !history.redo}
           title="Redo (Ctrl+Shift+Z)"
+          aria-label="Redo"
         >
           <Redo2 size={14} />
         </button>
-        <button
-          type="button"
-          className={TOP_BTN}
-          onClick={() => setStyleOpen(true)}
-          disabled={loading || !html}
-        >
-          <Palette size={14} /> Site style
-        </button>
+        {!simple && (
+          <button
+            type="button"
+            className={TOP_BTN}
+            onClick={() => setStyleOpen(true)}
+            disabled={loading || !html}
+          >
+            <Palette size={14} /> Site style
+          </button>
+        )}
         <button
           type="button"
           className={TOP_BTN}
           onClick={() => void openLivePreview()}
           disabled={loading || !html}
+          title="Open the website in a new tab"
         >
-          <ExternalLink size={14} /> Live preview
+          <ExternalLink size={14} /> <span className="hidden lg:inline">Preview</span>
         </button>
-        <button type="button" className={TOP_BTN} onClick={exportHtml} disabled={loading || !html}>
-          <Download size={14} /> Export HTML
-        </button>
+        {!onboarding && (
+          <button
+            type="button"
+            className={TOP_BTN}
+            onClick={() => setUiMode(simple ? "advanced" : "simple")}
+            title={
+              simple
+                ? "Layers, layout, motion and code — for experienced users"
+                : "Back to the simple click-and-type editor"
+            }
+          >
+            <SlidersHorizontal size={14} />
+            <span className="hidden lg:inline">{simple ? "Advanced editor" : "Simple editor"}</span>
+          </button>
+        )}
         <button
           type="button"
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-400 px-3 text-xs font-semibold text-black transition-colors hover:bg-emerald-300 disabled:opacity-50"
+          className={TOP_BTN}
           onClick={() => void onSave()}
           disabled={loading || busy === "save"}
         >
           <Save size={14} /> {busy === "save" ? "Saving…" : "Save"}
+        </button>
+        <button
+          type="button"
+          className="inline-flex h-9 items-center gap-2 rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-black shadow-[0_0_0_1px_rgba(0,0,0,0.1)] transition-colors hover:bg-emerald-300 disabled:opacity-50"
+          onClick={() => void onExportClick()}
+          disabled={loading || !html || busy === "save"}
+        >
+          <Download size={15} /> Export
         </button>
         <input
           ref={fileRef}
@@ -1880,59 +2012,69 @@ export function VisualEditor({
         />
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_340px]">
-        <div className="min-h-0 border-r border-hairline">
-          <StudioLeftPanel
-            doc={docRef.current}
-            sections={sections}
-            selected={selectedRef.current}
-            version={version + selKey}
-            outDir={outDir}
-            uploading={busy === "asset"}
-            actions={leftActions}
-          />
-        </div>
+      <div
+        className={
+          simple
+            ? "flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_360px]"
+            : "grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_340px]"
+        }
+      >
+        {!simple && (
+          <div className="min-h-0 border-r border-hairline">
+            <StudioLeftPanel
+              doc={docRef.current}
+              sections={sections}
+              selected={selectedRef.current}
+              version={version + selKey}
+              outDir={outDir}
+              uploading={busy === "asset"}
+              actions={leftActions}
+            />
+          </div>
+        )}
 
         {/* Canvas */}
-        <div className="flex min-h-0 flex-col bg-[#101010]">
-          <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1.5 text-[11px]">
-            <div className="flex rounded-lg border border-border p-0.5">
-              {(
-                [
-                  ["edit", "Edit", MousePointer2],
-                  ["preview", "Preview", Eye],
-                  ["source", "Source", Code2],
-                ] as const
-              ).map(([id, label, Icon]) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => switchMode(id)}
-                  className={`flex h-6 items-center gap-1 rounded-md px-2.5 transition-colors ${mode === id ? "bg-emerald-400 font-semibold text-black" : "text-muted-foreground hover:text-foreground"}`}
-                >
-                  <Icon size={12} /> {label}
-                </button>
-              ))}
+        <div className="flex min-h-0 flex-1 flex-col bg-[#101010]">
+          {!simple && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1.5 text-[11px]">
+              <div className="flex rounded-lg border border-border p-0.5">
+                {(
+                  [
+                    ["edit", "Edit", MousePointer2],
+                    ["preview", "Preview", Eye],
+                    ["source", "Source", Code2],
+                  ] as const
+                ).map(([id, label, Icon]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => switchMode(id)}
+                    className={`flex h-6 items-center gap-1 rounded-md px-2.5 transition-colors ${mode === id ? "bg-emerald-400 font-semibold text-black" : "text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <Icon size={12} /> {label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-muted-foreground">
+                {DEVICES.find((d) => d.id === device)!.label} · {deviceWidth}px ·{" "}
+                {Math.round(scale * 100)}%
+              </span>
+              <span className="text-muted-foreground">· {sections.length} sections</span>
+              <select
+                className="ml-auto h-6 rounded-md border border-border bg-background px-1.5 text-[11px]"
+                value={String(zoom)}
+                onChange={(e) =>
+                  setZoom(e.target.value === "fit" ? "fit" : (Number(e.target.value) as Zoom))
+                }
+                aria-label="Zoom"
+              >
+                <option value="fit">Fit</option>
+                <option value="1">100%</option>
+                <option value="0.75">75%</option>
+                <option value="0.5">50%</option>
+              </select>
             </div>
-            <span className="text-muted-foreground">
-              {DEVICES.find((d) => d.id === device)!.label} · {deviceWidth}px ·{" "}
-              {Math.round(scale * 100)}%
-            </span>
-            <span className="text-muted-foreground">· {sections.length} sections</span>
-            <select
-              className="ml-auto h-6 rounded-md border border-border bg-background px-1.5 text-[11px]"
-              value={String(zoom)}
-              onChange={(e) =>
-                setZoom(e.target.value === "fit" ? "fit" : (Number(e.target.value) as Zoom))
-              }
-              aria-label="Zoom"
-            >
-              <option value="fit">Fit</option>
-              <option value="1">100%</option>
-              <option value="0.75">75%</option>
-              <option value="0.5">50%</option>
-            </select>
-          </div>
+          )}
 
           <div ref={canvasRef} className="relative min-h-0 flex-1 overflow-auto">
             {loading && (
@@ -1952,7 +2094,9 @@ export function VisualEditor({
             )}
             {/* The canvas stays mounted while a page reloads, so the editor never loses its document. */}
             {!html && loading ? null : html ? (
-              <div className="flex min-h-full justify-center p-6 pb-14">
+              <div
+                className={`flex min-h-full justify-center ${simple ? "p-4 pb-12" : "p-6 pb-14"}`}
+              >
                 <div
                   className="shrink-0 self-start overflow-hidden rounded-xl border border-white/10 bg-white shadow-2xl shadow-black/50 transition-[width] duration-200"
                   style={{ width: deviceWidth * scale }}
@@ -2007,32 +2151,78 @@ export function VisualEditor({
             )}
             {mode !== "source" && !loading && html && (
               <div className="pointer-events-none sticky bottom-3 flex justify-center">
-                <span className="rounded-full border border-white/10 bg-black/80 px-3 py-1 text-[11px] text-white/70 backdrop-blur">
-                  {mode === "edit"
-                    ? "Click to select · Double-click to write · Drag to move · Arrow keys nudge"
-                    : "Preview — hover effects and animations are live. Switch to Edit to change things."}
+                <span
+                  className={`rounded-full border border-white/10 bg-black/80 px-3 py-1 text-white/80 backdrop-blur ${simple ? "text-xs" : "text-[11px]"}`}
+                >
+                  {simple
+                    ? editingText
+                      ? "Type your text · Click outside or press Esc when you're done"
+                      : "Click any text to edit it · Click an image to replace it"
+                    : mode === "edit"
+                      ? "Click to select · Double-click to write · Drag to move · Arrow keys nudge"
+                      : "Preview — hover effects and animations are live. Switch to Edit to change things."}
                 </span>
               </div>
             )}
           </div>
         </div>
 
-        <div className="min-h-0 border-l border-hairline">
-          <StudioInspector
-            sel={mode === "edit" ? sel : null}
-            studio={mode === "edit" ? studio : null}
-            selKey={selKey}
-            section={section}
-            pageLook={pageLook}
-            scope={scope}
-            editingText={editingText}
-            dirty={dirty}
-            uploading={busy === "asset"}
-            palette={palette}
-            actions={studioActions}
-          />
+        <div
+          className={
+            simple
+              ? "max-h-[46dvh] min-h-0 shrink-0 border-t border-hairline lg:max-h-none lg:border-l lg:border-t-0"
+              : "min-h-0 border-l border-hairline"
+          }
+        >
+          {simple ? (
+            <SimplePanel
+              sel={sel}
+              selKey={selKey}
+              editingText={editingText}
+              palette={palette}
+              themeModels={themeModels}
+              themeId={themeId}
+              themePending={themePending}
+              themeError={themeError}
+              disabled={loading || !html}
+              actions={simpleActions}
+            />
+          ) : (
+            <StudioInspector
+              sel={mode === "edit" ? sel : null}
+              studio={mode === "edit" ? studio : null}
+              selKey={selKey}
+              section={section}
+              pageLook={pageLook}
+              scope={scope}
+              editingText={editingText}
+              dirty={dirty}
+              uploading={busy === "asset"}
+              palette={palette}
+              actions={studioActions}
+            />
+          )}
         </div>
       </div>
+
+      {paywall && (
+        <HardPaywall
+          source="editor_export"
+          initialPlan={paywall}
+          onClose={() => setPaywall(null)}
+        />
+      )}
+      {paid && (
+        <EditorExportDialog
+          open={exportOpen}
+          onOpenChange={setExportOpen}
+          outDir={outDir}
+          domain={host}
+          route={route}
+          figmaIncluded={plan !== "starter"}
+          onUpgradeForFigma={() => setPaywall("growth")}
+        />
+      )}
 
       <Sheet open={styleOpen} onOpenChange={setStyleOpen}>
         <SheetContent side="top" className="max-h-[80vh] overflow-y-auto">

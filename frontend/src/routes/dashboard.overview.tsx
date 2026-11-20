@@ -3,11 +3,10 @@ import { useState, type ReactNode } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
-import { Bell, Check, Download, Grid2X2, List, Pencil, Plus, Search, Pin } from "lucide-react";
+import { Bell, Download, Grid2X2, List, Plus, Search } from "lucide-react";
 import type { CloneJob } from "@/components/dashboard/data";
 import { CaptureDetails, downloadCaptureReport } from "@/components/dashboard/captures";
-import { TaskEditor, newTask } from "@/components/dashboard/planner";
-import { useDashboardWorkspace, type WorkspaceTask } from "@/components/dashboard/workspace";
+import { useDashboardWorkspace } from "@/components/dashboard/workspace";
 import { CountUp } from "@/components/anim";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -29,22 +28,22 @@ function Card({ children, delay = 0 }: { children: ReactNode; delay?: number }) 
   );
 }
 function OverviewPage() {
-  const { user } = useAuth();
-  const { jobs, tasks, saveTask, refreshJobs } = useDashboardWorkspace();
+  const { user, usage } = useAuth();
+  const { jobs, refreshJobs } = useDashboardWorkspace();
   const reduceMotion = useReducedMotion();
   const [view, setView] = useState("grid");
   const [sort, setSort] = useState("recent");
-  const [editing, setEditing] = useState<WorkspaceTask | null>(null);
   const [selected, setSelected] = useState<CloneJob | null>(null);
   const complete = jobs.filter((job) => job.status === "done").length;
   const running = jobs.filter((job) => job.status === "running").length;
-  const active = tasks.filter((task) => !task.archived);
-  const pending = active
-    .filter((task) => !task.done)
-    .sort((a, b) => Number(b.pinned) - Number(a.pinned));
-  const goalProgress = active.length
-    ? Math.round((active.filter((task) => task.done).length / active.length) * 100)
-    : 0;
+  const totalPages = jobs.reduce((sum, job) => sum + job.pages, 0);
+  // This month's clones against the plan's allowance (no limit = unlimited).
+  const clonesUsed = usage?.clonesThisMonth ?? 0;
+  const clonesLimit = usage?.limits?.clonesPerMonth ?? usage?.limitThisMonth ?? null;
+  const unlimited = clonesLimit == null || !Number.isFinite(Number(clonesLimit));
+  const usagePct = unlimited
+    ? 0
+    : Math.min(100, Math.round((clonesUsed / Math.max(1, Number(clonesLimit))) * 100));
   const projects = [...jobs].sort((a, b) =>
     sort === "name" ? a.domain.localeCompare(b.domain) : 0,
   );
@@ -75,7 +74,7 @@ function OverviewPage() {
             <Plus size={16} />
             Create
           </Link>
-          <Link to="/dashboard/library" aria-label="Search projects" className="task-icon">
+          <Link to="/dashboard/activity" aria-label="Search clones" className="task-icon">
             <Search size={16} />
           </Link>
           <Link
@@ -114,7 +113,7 @@ function OverviewPage() {
           <div className="mt-6 grid grid-cols-3 gap-3">
             {[
               ["Projects", jobs.length],
-              ["Tasks", pending.length],
+              ["Pages", totalPages],
               ["Complete", complete],
             ].map(([label, value]) => (
               <div key={label} className="rounded-2xl border border-border px-2 py-4 text-center">
@@ -187,17 +186,25 @@ function OverviewPage() {
           </Link>
         </Card>
         <Card delay={0.1}>
-          <h2 className="text-base">Month progress</h2>
-          <p className="mt-2 text-xs text-muted-foreground">Your active workspace tasks</p>
+          <h2 className="text-base">This month</h2>
+          <p className="mt-2 text-xs text-muted-foreground">Website clones used on your plan</p>
           <div className="my-5 flex items-center justify-center gap-5">
             <div className="text-xs leading-7 text-muted-foreground">
-              <p>{active.filter((task) => task.done).length} complete</p>
-              <p>{pending.length} to go</p>
+              <p>{clonesUsed} used</p>
+              <p>
+                {unlimited
+                  ? "Unlimited"
+                  : `${Math.max(0, Number(clonesLimit) - clonesUsed)} left`}
+              </p>
             </div>
             <div className="relative h-32 w-32 shrink-0">
               <svg
                 viewBox="0 0 128 128"
-                aria-label={`${goalProgress}% of tasks complete`}
+                aria-label={
+                  unlimited
+                    ? `${clonesUsed} clones this month, unlimited plan`
+                    : `${usagePct}% of this month's clones used`
+                }
                 role="img"
               >
                 <circle
@@ -217,12 +224,12 @@ function OverviewPage() {
                   fill="none"
                   strokeLinecap="round"
                   strokeDasharray="314.16"
-                  strokeDashoffset={314.16 * (1 - goalProgress / 100)}
+                  strokeDashoffset={314.16 * (1 - (unlimited ? 1 : usagePct / 100))}
                   transform="rotate(-90 64 64)"
                 />
               </svg>
               <span className="absolute inset-0 grid place-items-center font-display text-2xl">
-                {goalProgress}%
+                {unlimited ? "∞" : `${usagePct}%`}
               </span>
             </div>
           </div>
@@ -230,89 +237,6 @@ function OverviewPage() {
             <Download size={16} />
             Download capture report
           </button>
-        </Card>
-      </div>
-      <div className="grid gap-6 xl:grid-cols-[1fr_1.6fr]">
-        <Card delay={0.15}>
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-base">Month goals</h2>
-            <Link to="/dashboard/tasks" className="task-icon" aria-label="Edit goals and tasks">
-              <Pencil size={16} />
-            </Link>
-          </div>
-          <ul className="mt-4 space-y-2">
-            {active.slice(0, 4).map((task) => (
-              <li key={task.id}>
-                <button
-                  className="flex min-h-11 w-full items-center gap-3 rounded-xl px-2 py-3 text-left hover:bg-accent"
-                  aria-pressed={task.done}
-                  onClick={() => saveTask({ ...task, done: !task.done })}
-                >
-                  <span
-                    className={`grid h-5 w-5 shrink-0 place-items-center rounded border border-border ${task.done ? "bg-primary text-primary-foreground" : ""}`}
-                  >
-                    {task.done && <Check size={14} />}
-                  </span>
-                  <span
-                    className={`text-sm ${task.done ? "text-muted-foreground line-through" : ""}`}
-                  >
-                    {task.title}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          {!active.length && (
-            <p className="mt-5 text-sm text-muted-foreground">Add a task to set your next goal.</p>
-          )}
-          <Link
-            to="/dashboard/calendar"
-            className="mt-5 block rounded-2xl border border-border p-4 text-xs text-muted-foreground"
-          >
-            Plan the week in Calendar ↗
-          </Link>
-        </Card>
-        <Card delay={0.2}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-base">Tasks in process ({pending.length})</h2>
-            <Link to="/dashboard/tasks" className="py-3 text-xs text-muted-foreground">
-              All tasks & archive ↗
-            </Link>
-          </div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
-            {pending.slice(0, 2).map((task) => (
-              <article key={task.id} className="rounded-2xl border border-border p-4">
-                <div className="flex items-center justify-between">
-                  <button
-                    className="task-icon"
-                    aria-label={`Pin ${task.title}`}
-                    aria-pressed={task.pinned}
-                    onClick={() => saveTask({ ...task, pinned: !task.pinned })}
-                  >
-                    <Pin size={15} />
-                  </button>
-                  <button
-                    className="task-icon"
-                    aria-label={`Edit ${task.title}`}
-                    onClick={() => setEditing(task)}
-                  >
-                    <Pencil size={15} />
-                  </button>
-                </div>
-                <p className="mt-5 text-sm">{task.title}</p>
-                <p className="mt-4 text-xs text-muted-foreground">{task.date}</p>
-              </article>
-            ))}
-            <button
-              className="grid min-h-40 place-items-center rounded-2xl border border-dashed border-border text-sm text-muted-foreground hover:bg-accent"
-              onClick={() => setEditing(newTask())}
-            >
-              <span className="flex items-center gap-2">
-                <Plus size={16} />
-                Add task
-              </span>
-            </button>
-          </div>
         </Card>
       </div>
       <Card delay={0.25}>
@@ -372,7 +296,6 @@ function OverviewPage() {
           )}
         </div>
       </Card>
-      {editing && <TaskEditor key={editing.id} task={editing} onClose={() => setEditing(null)} />}
       <CaptureDetails
         job={selected}
         onClose={() => setSelected(null)}

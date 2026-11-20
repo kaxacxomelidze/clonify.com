@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Check, Download, Figma, Github, Globe, Pencil, Play, RotateCcw } from "lucide-react";
+import { Download, Figma, Github, Globe, Pencil, Play, RotateCcw } from "lucide-react";
 import { CapturePipeline } from "@/components/dashboard/pipeline";
-import { ScanningBrowser } from "@/components/dashboard/demo-preview";
+import { CloneProgress } from "@/components/dashboard/clone-progress";
 import { ExportFigmaDialog } from "@/components/dashboard/export-figma-dialog";
 import { GitHubPushDialog } from "@/components/dashboard/github-push-dialog";
 import { useDashboardWorkspace } from "@/components/dashboard/workspace";
@@ -11,7 +11,6 @@ import {
   ApiError,
   downloadZipBlob,
   syncWhopCheckout,
-  track,
   triggerBrowserDownload,
   type CloneJobResponse,
 } from "@/lib/api";
@@ -34,29 +33,6 @@ export const Route = createFileRoute("/dashboard/")({
   component: ClonePage,
 });
 
-const STAGES = [
-  { title: "Connect to source", detail: "Resolve the URL and prepare a browser session.", at: 0 },
-  {
-    title: "Explore every page",
-    detail: "Scroll through sections and discover linked pages.",
-    at: 12,
-  },
-  {
-    title: "Collect the assets",
-    detail: "Gather images, type, styles and responsive details.",
-    at: 40,
-  },
-  {
-    title: "Build the starting point",
-    detail: "Write captured HTML and persist for preview.",
-    at: 64,
-  },
-  {
-    title: "Prepare your workspace",
-    detail: "Finalize storage so editor and exports unlock.",
-    at: 84,
-  },
-];
 
 const HELPER_RESUME_KEY = "clonyfy_helper_resume";
 
@@ -119,7 +95,6 @@ function ClonePage() {
   const [zipProgress, setZipProgress] = useState<{ pct: number; stage: string } | null>(null);
   const { src: previewSrc } = useInteractivePreview(run?.outDir, phase === "done");
   const busy = phase === "running";
-  const stage = STAGES.reduce((active, item, index) => (progress >= item.at ? index : active), 0);
   const fullSiteAllowed =
     user?.planLimits?.fullSiteAllowed === true || usage?.limits?.fullSiteAllowed === true;
   const useMax = fullSiteAllowed && maxMode;
@@ -135,11 +110,6 @@ function ClonePage() {
     cloneLimit != null &&
     (usage?.clonesThisMonth ?? 0) >= cloneLimit &&
     credits <= 0;
-
-  // Reaching the dashboard is the onboarding step of the funnel.
-  useEffect(() => {
-    if (user) track("onboarding");
-  }, [user]);
 
   // Back from the add-on checkout: settle the credit now instead of waiting for the webhook.
   useEffect(() => {
@@ -607,61 +577,13 @@ function ClonePage() {
               )}
             </div>
           </div>
-          <div className="demo-process-grid">
-            <ScanningBrowser domain={run.domain} running={phase === "running"} />
-            <div className="surface rounded-3xl p-5 md:p-6">
-              <div className="mb-5 flex items-center justify-between gap-4">
-                <h3 className="text-sm">
-                  {phase === "error"
-                    ? "Failed"
-                    : phase === "done"
-                      ? "Capture complete"
-                      : run.status === "saving"
-                        ? "Saving to storage…"
-                        : "Building your starting point"}
-                </h3>
-                <span className="text-sm tabular-nums">{progress}%</span>
-              </div>
-              <div
-                role="progressbar"
-                aria-label="Clone progress"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={progress}
-                className="h-1 overflow-hidden rounded-full bg-accent"
-              >
-                <div className="h-full bg-primary" style={{ width: `${progress}%` }} />
-              </div>
-              <ol className="mt-6 space-y-5">
-                {STAGES.map((item, i) => (
-                  <li
-                    key={item.title}
-                    className="flex gap-3"
-                    aria-current={stage === i && busy ? "step" : undefined}
-                  >
-                    <span
-                      className={`grid h-7 w-7 shrink-0 place-items-center rounded-full border border-border text-xs ${i < stage || phase === "done" ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}
-                    >
-                      {i < stage || phase === "done" ? <Check size={14} /> : `0${i + 1}`}
-                    </span>
-                    <div>
-                      <p className={`text-sm ${stage < i ? "text-muted-foreground" : ""}`}>
-                        {item.title}
-                      </p>
-                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                        {item.detail}
-                      </p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-              {logTail.length > 0 && (
-                <pre className="mt-6 max-h-40 overflow-auto rounded-xl border border-border bg-background p-3 text-[11px] leading-relaxed text-muted-foreground">
-                  {logTail.join("\n")}
-                </pre>
-              )}
-            </div>
-          </div>
+          <CloneProgress
+            domain={run.domain}
+            progress={progress}
+            phase={phase === "error" ? "error" : phase === "done" ? "done" : "running"}
+            status={run.status}
+            logTail={logTail}
+          />
           {(phase === "done" || phase === "running") && (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {[
@@ -694,8 +616,8 @@ function ClonePage() {
               <p className="eyebrow">Your creative workspace</p>
               <h2 className="mt-2 font-display text-2xl">Edit, export, and publish.</h2>
             </div>
-            <Link to="/dashboard/library" className="dashboard-button">
-              Open library ↗
+            <Link to="/dashboard/activity" className="dashboard-button">
+              Open activity ↗
             </Link>
           </div>
           <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
