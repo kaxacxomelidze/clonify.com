@@ -13682,6 +13682,36 @@ function startLocalePrefix(startUrl) {
   }
   return null;
 }
+function dominantLocalePrefix(links, origin, minLinks = 3, minShare = 0.5) {
+  const counts = /* @__PURE__ */ new Map();
+  let total = 0;
+  for (const link of links) {
+    let url;
+    try {
+      url = new URL(link);
+    } catch {
+      continue;
+    }
+    if (url.origin !== origin) continue;
+    const segs = pathSegments(url.pathname);
+    if (!segs.length) continue;
+    total++;
+    if (isLocaleSegment(segs[0])) {
+      const key = segs[0].toLowerCase().replace(/_/g, "-");
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [key, count] of counts) {
+    if (count > bestCount) {
+      best = key;
+      bestCount = count;
+    }
+  }
+  if (!best || bestCount < minLinks || bestCount / Math.max(1, total) < minShare) return null;
+  return best;
+}
 function shouldSkipLocaleVariant(url, startUrl, fullSite = false) {
   if (fullSite) return false;
   let path;
@@ -13949,13 +13979,14 @@ function looksLikePageHref(value) {
   if (/^[a-z0-9._~/-]+(?:[?#][^\s]*)?$/i.test(clean)) return true;
   return false;
 }
-function linkEnqueuePriority(url, fromNav = false) {
+function linkEnqueuePriority(url, fromNav = false, siteLocale = null) {
   let score = fromNav ? 200 : 10;
   try {
     const path = new URL(url).pathname || "/";
+    const ownLocale = !!siteLocale && (pathSegments(path)[0] || "").toLowerCase() === siteLocale;
     if (LOW_PRIORITY_PATH_RE.test(path)) score -= 120;
     if (isLocaleOnlyPath(path)) score -= 500;
-    if (isLocalePrefixedPath(path)) score -= 400;
+    if (!ownLocale && isLocalePrefixedPath(path)) score -= 400;
     const depth = path.split("/").filter(Boolean).length;
     score -= depth * 3;
   } catch {
@@ -14208,6 +14239,7 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
   logger.warn(`  [FALLBACK] Using static HTML crawler (${reason})`);
   const staticQueue = [];
   const queryVariants = createQueryVariantLimiter();
+  let localeStartUrl = opts.url;
   const enqueueStatic = (url, currentDepth) => {
     const clean = normalizePageUrl(url);
     if (!clean) return;
@@ -14216,7 +14248,7 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
     } catch {
       return;
     }
-    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
+    if (shouldSkipPageUrl(clean, localeStartUrl, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
@@ -14243,6 +14275,13 @@ async function crawlStatic(opts, origin, assetsDir, visited, records, onPage, re
         logger.warn(`  [FALLBACK SKIP] ${item.url}: static HTML is a thin SPA shell`);
       } else {
         records.push(record);
+        if (index === 0 && !opts.fullSite && !startLocalePrefix(opts.url)) {
+          const own = dominantLocalePrefix(links, origin);
+          if (own) {
+            localeStartUrl = new URL(`/${own}`, origin).href;
+            logger.info(`  Site links live under /${own}/ \u2014 crawling that locale as the site's own pages`);
+          }
+        }
         if (item.depth < opts.depth) {
           for (const link of links) enqueueStatic(link, item.depth + 1);
         }
@@ -14308,6 +14347,8 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
     await relaunching;
   };
   const startNorm = normalizePageUrl(opts.url);
+  let siteLocale = startLocalePrefix(opts.url);
+  let localeStartUrl = opts.url;
   let sitemapUrls = [];
   let startUrlFinished = false;
   let sitemapFetchDone = false;
@@ -14383,12 +14424,12 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
     } catch {
       return;
     }
-    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
+    if (shouldSkipPageUrl(clean, localeStartUrl, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (budgetUsed() >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
     visited.add(clean);
-    const priority = linkEnqueuePriority(clean, fromNav);
+    const priority = linkEnqueuePriority(clean, fromNav, siteLocale);
     let retryingAfterCrash = false;
     const task = async () => {
       retryingAfterCrash = false;
@@ -14470,6 +14511,14 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
         const { record, links, navLinks = [] } = result;
         records.push(record);
         await Promise.resolve(onPage(record));
+        if (startNorm && clean === startNorm && !siteLocale && !opts.fullSite) {
+          const own = dominantLocalePrefix(navLinks.length >= 3 ? navLinks : links, origin);
+          if (own) {
+            siteLocale = own;
+            localeStartUrl = new URL(`/${own}`, origin).href;
+            logger.info(`  Site links live under /${own}/ \u2014 crawling that locale as the site's own pages`);
+          }
+        }
         if (currentDepth < opts.depth) {
           const navSet = new Set(navLinks);
           for (const link of navLinks) enqueue(link, currentDepth + 1, true);
@@ -16334,4 +16383,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-LTMJQPS5.js.map
+//# sourceMappingURL=chunk-CJEV6NZQ.js.map

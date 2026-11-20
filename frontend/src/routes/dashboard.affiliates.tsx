@@ -151,7 +151,10 @@ function AffiliatesPage() {
               <label className="mt-5 block text-sm" htmlFor="whop-username">
                 Whop username
               </label>
-              <div className="mt-2 flex items-center rounded-xl border border-border bg-background focus-within:ring-2 focus-within:ring-ring">
+              <div
+                data-field
+                className="mt-2 flex items-center rounded-xl border border-border bg-background"
+              >
                 <span className="pl-3 text-sm text-muted-foreground">@</span>
                 <input
                   id="whop-username"

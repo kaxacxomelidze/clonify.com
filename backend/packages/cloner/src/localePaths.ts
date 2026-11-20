@@ -122,6 +122,50 @@ export function startLocalePrefix(startUrl: string): string | null {
 }
 
 /**
+ * The locale prefix a geo-localized site puts on its *own* navigation, or null.
+ * Stripe serves `/` to a visitor in Germany with every menu link under `/en-de/…`
+ * (`/en-de/pricing`, `/en-de/payments`). Those are the site's real pages for that visitor,
+ * not foreign-language copies — skipping them left clones without Pricing & co.
+ * A prefix counts when it covers at least `minLinks` links and `minShare` of the
+ * same-origin, non-root links.
+ */
+export function dominantLocalePrefix(
+  links: string[],
+  origin: string,
+  minLinks = 3,
+  minShare = 0.5,
+): string | null {
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const link of links) {
+    let url: URL;
+    try {
+      url = new URL(link);
+    } catch {
+      continue;
+    }
+    if (url.origin !== origin) continue;
+    const segs = pathSegments(url.pathname);
+    if (!segs.length) continue;
+    total++;
+    if (isLocaleSegment(segs[0])) {
+      const key = segs[0].toLowerCase().replace(/_/g, '-');
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [key, count] of counts) {
+    if (count > bestCount) {
+      best = key;
+      bestCount = count;
+    }
+  }
+  if (!best || bestCount < minLinks || bestCount / Math.max(1, total) < minShare) return null;
+  return best;
+}
+
+/**
  * Skip locale market variants that are not part of the site we're cloning.
  * - Cloning `https://stripe.com/` → skip `/es-us`, `/ae`, `/fr/payments`
  * - Cloning `https://stripe.com/es-us` → keep `/es-us…`, skip other locales

@@ -168,6 +168,38 @@ function navigationRuntime(CFG) {
     var key = norm(CFG.routes[i]);
     if (!Object.prototype.hasOwnProperty.call(routeIndex, key)) routeIndex[key] = CFG.routes[i];
   }
+  // Geo-localized sites link the same page under a locale prefix (/en-de/pricing vs
+  // /pricing, depending on where the clone was made). Match across that prefix.
+  // `en-de`, `pt_br`, `zh-hans`, or a bare common language code — never any 2-letter
+  // route (`/ai`, `/go` are pages, not locales).
+  var LANG_PREFIXES = { en: 1, de: 1, fr: 1, es: 1, it: 1, pt: 1, nl: 1, ja: 1, zh: 1, ko: 1, ru: 1, pl: 1, sv: 1, da: 1, fi: 1, nb: 1, cs: 1, tr: 1, ar: 1, he: 1, el: 1, hu: 1, ro: 1, uk: 1, id: 1, th: 1, vi: 1 };
+  function isLocaleSeg(seg) {
+    var s = String(seg || '').toLowerCase();
+    var m = /^([a-z]{2})(?:[-_]([a-z]{2,4}))?$/.exec(s);
+    return !!m && !!LANG_PREFIXES[m[1]];
+  }
+  function stripLocale(p) {
+    var segs = String(p || '/').split('/');
+    if (segs.length >= 2 && isLocaleSeg(segs[1])) {
+      var rest = segs.slice(2).join('/');
+      return rest ? '/' + rest : '/';
+    }
+    return null;
+  }
+  var strippedIndex = {};
+  for (var key2 in routeIndex) {
+    if (!Object.prototype.hasOwnProperty.call(routeIndex, key2)) continue;
+    var bare = stripLocale(key2);
+    if (!bare) continue;
+    // Two locale copies of one page → ambiguous, don't guess.
+    strippedIndex[bare] = Object.prototype.hasOwnProperty.call(strippedIndex, bare) ? null : routeIndex[key2];
+  }
+  function localeAlternate(n) {
+    var bare = stripLocale(n);
+    if (bare && Object.prototype.hasOwnProperty.call(routeIndex, bare)) return routeIndex[bare];
+    var alt = strippedIndex[bare || n];
+    return alt || null;
+  }
 
   var params = new URLSearchParams(location.search);
   var currentRoute = params.get('route') || CFG.defaultRoute || '/';
@@ -196,7 +228,9 @@ function navigationRuntime(CFG) {
     return d.url;
   }
   function lookup(route, hash) {
-    var k = routeIndex[norm(route)];
+    var n = norm(route);
+    var k = Object.prototype.hasOwnProperty.call(routeIndex, n) ? routeIndex[n] : null;
+    if (k == null) k = localeAlternate(n);
     if (k == null) return { kind: 'missing', route: String(route).split('?')[0] || '/' };
     if (hash && norm(k) === norm(currentRoute)) return { kind: 'hash', hash: hash };
     return { kind: 'cloned', route: k, hash: hash || '', url: pageUrl(k, hash) };

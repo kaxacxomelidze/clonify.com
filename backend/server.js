@@ -9450,6 +9450,20 @@ ensureInit().then(() => {
     console.log(
       `Hosted=${IS_HOSTED} serverless=${IS_SERVERLESS} lowMemory=${IS_LOW_MEMORY} cloneConcurrency=${CLONE_CONCURRENCY} deadlineMs=${CLONE_DEADLINE_MS}\n`,
     );
+    // Same origin for the app and the API, and no separate preview host: every preview
+    // then runs WITHOUT the cloned site's JavaScript (carousels, menus, animations,
+    // WebGL backgrounds stay frozen and buttons say "not cloned yet").
+    try {
+      const apiOrigin = new URL(publicUrl).origin;
+      const appOrigin = frontendAppOrigin();
+      if (!previewOriginUrl() && appOrigin && appOrigin === apiOrigin) {
+        console.warn(
+          '[WARN] PREVIEW_ORIGIN is not set and the app shares its origin with the API, so clone previews '
+          + "run without the original site's JavaScript. Point a subdomain (e.g. preview.clonyfy.com) at this "
+          + 'server and set PREVIEW_ORIGIN=https://preview.clonyfy.com (see nginx/default.conf).',
+        );
+      }
+    } catch {}
   });
 });
 
