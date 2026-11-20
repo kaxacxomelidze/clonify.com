@@ -380,7 +380,10 @@ function StartPage() {
                 Paste a URL. Clonyfy rebuilds it into a website you can customize and export.
               </p>
               <form onSubmit={generate} className="mt-9 w-full">
-                <div className="flex items-center gap-2 rounded-2xl border border-border bg-accent/30 p-2 pl-5 focus-within:border-foreground/40">
+                <div
+                  data-field
+                  className="flex items-center gap-2 rounded-2xl border border-border bg-accent/30 p-2 pl-5 transition-[border-color,box-shadow]"
+                >
                   <input
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}

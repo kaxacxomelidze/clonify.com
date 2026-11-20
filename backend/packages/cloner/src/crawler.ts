@@ -9,9 +9,12 @@ import { logger } from './logger.js';
 import { safeFetch } from './ssrfGuard.js';
 import { normalizePageUrl } from './pageUrls.js';
 import {
+  dominantLocalePrefix,
   isLocaleOnlyPath,
   isLocalePrefixedPath,
+  pathSegments,
   shouldSkipLocaleVariant,
+  startLocalePrefix,
 } from './localePaths.js';
 import {
   IS_FAST_CLONE,
@@ -326,14 +329,18 @@ function looksLikePageHref(value: string): boolean {
   return false;
 }
 
-function linkEnqueuePriority(url: string, fromNav = false): number {
+function linkEnqueuePriority(url: string, fromNav = false, siteLocale: string | null = null): number {
   // Primary header/nav links must outrank sitemap filler and footer noise.
   let score = fromNav ? 200 : 10;
   try {
     const path = new URL(url).pathname || '/';
+    // The site's own locale tree (e.g. Stripe's /en-de/… for a visitor in Germany) is not
+    // a foreign-language copy: rank it like any other page.
+    const ownLocale = !!siteLocale && (pathSegments(path)[0] || '').toLowerCase() === siteLocale;
     if (LOW_PRIORITY_PATH_RE.test(path)) score -= 120;
+    // A locale root (`/en-de`) is the home page again — keep it last either way.
     if (isLocaleOnlyPath(path)) score -= 500;
-    if (isLocalePrefixedPath(path)) score -= 400;
+    if (!ownLocale && isLocalePrefixedPath(path)) score -= 400;
     const depth = path.split('/').filter(Boolean).length;
     score -= depth * 3;
   } catch {}
@@ -655,11 +662,13 @@ async function crawlStatic(
 
   const staticQueue: Array<{ url: string; depth: number }> = [];
   const queryVariants = createQueryVariantLimiter();
+  // Locale tree the site serves its own pages under (see dominantLocalePrefix).
+  let localeStartUrl = opts.url;
   const enqueueStatic = (url: string, currentDepth: number) => {
     const clean = normalizePageUrl(url);
     if (!clean) return;
     try { if (new URL(clean).origin !== origin) return; } catch { return; }
-    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
+    if (shouldSkipPageUrl(clean, localeStartUrl, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (visited.size >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
@@ -688,6 +697,13 @@ async function crawlStatic(
         logger.warn(`  [FALLBACK SKIP] ${item.url}: static HTML is a thin SPA shell`);
       } else {
         records.push(record);
+        if (index === 0 && !opts.fullSite && !startLocalePrefix(opts.url)) {
+          const own = dominantLocalePrefix(links, origin);
+          if (own) {
+            localeStartUrl = new URL(`/${own}`, origin).href;
+            logger.info(`  Site links live under /${own}/ — crawling that locale as the site's own pages`);
+          }
+        }
         if (item.depth < opts.depth) {
           for (const link of links) enqueueStatic(link, item.depth + 1);
         }
@@ -772,6 +788,10 @@ export async function crawl(
   };
 
   const startNorm = normalizePageUrl(opts.url);
+  // Geo-localized sites (Stripe from a German server) put their own menu under a locale
+  // prefix (/en-de/pricing). Once the start page shows that, crawl the prefix as the site.
+  let siteLocale: string | null = startLocalePrefix(opts.url);
+  let localeStartUrl = opts.url;
   let sitemapUrls: string[] = [];
   let startUrlFinished = false;
   let sitemapFetchDone = false;
@@ -853,13 +873,13 @@ export async function crawl(
     const clean = normalizePageUrl(url);
     if (!clean) return;
     try { if (new URL(clean).origin !== origin) return; } catch { return; }
-    if (shouldSkipPageUrl(clean, opts.url, !!opts.fullSite)) return;
+    if (shouldSkipPageUrl(clean, localeStartUrl, !!opts.fullSite)) return;
     if (visitedPageVariants(clean).some((variant) => visited.has(variant))) return;
     if (budgetUsed() >= opts.maxPages) return;
     if (!queryVariants.allow(clean)) return;
     visited.add(clean);
 
-    const priority = linkEnqueuePriority(clean, fromNav);
+    const priority = linkEnqueuePriority(clean, fromNav, siteLocale);
     let retryingAfterCrash = false;
     const task = async () => {
       retryingAfterCrash = false;
@@ -955,6 +975,15 @@ export async function crawl(
         const { record, links, navLinks = [] } = result;
         records.push(record);
         await Promise.resolve(onPage(record));
+
+        if (startNorm && clean === startNorm && !siteLocale && !opts.fullSite) {
+          const own = dominantLocalePrefix(navLinks.length >= 3 ? navLinks : links, origin);
+          if (own) {
+            siteLocale = own;
+            localeStartUrl = new URL(`/${own}`, origin).href;
+            logger.info(`  Site links live under /${own}/ — crawling that locale as the site's own pages`);
+          }
+        }
 
         if (currentDepth < opts.depth) {
           const navSet = new Set(navLinks);

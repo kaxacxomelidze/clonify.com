@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  dominantLocalePrefix,
   isLocaleOnlyPath,
   isLocalePrefixedPath,
   isLocaleSegment,
@@ -50,6 +51,41 @@ describe('locale path detection', () => {
     expect(shouldSkipLocaleVariant('https://stripe.com/es-us/payments', start)).toBe(false);
     expect(shouldSkipLocaleVariant('https://stripe.com/fr-be', start)).toBe(true);
     expect(shouldSkipLocaleVariant('https://stripe.com/payments', start)).toBe(false);
+  });
+
+  it("finds the locale a geo-localized site serves its own menu under (Stripe from Germany)", () => {
+    const origin = 'https://stripe.com';
+    const nav = [
+      'https://stripe.com/en-de/payments',
+      'https://stripe.com/en-de/billing',
+      'https://stripe.com/en-de/pricing',
+      'https://stripe.com/en-de/customers',
+      'https://stripe.com/en-de/contact/sales',
+      'https://stripe.com/blog',
+      'https://dashboard.stripe.com/login',
+      'https://stripe.com/',
+    ];
+    expect(dominantLocalePrefix(nav, origin)).toBe('en-de');
+    // Once known, the site's own locale tree is crawled; other locales stay skipped.
+    const start = `${origin}/en-de`;
+    expect(shouldSkipLocaleVariant('https://stripe.com/en-de/pricing', start)).toBe(false);
+    expect(shouldSkipLocaleVariant('https://stripe.com/pricing', start)).toBe(false);
+    expect(shouldSkipLocaleVariant('https://stripe.com/fr-be/pricing', start)).toBe(true);
+  });
+
+  it('does not invent a site locale from a footer language picker', () => {
+    const origin = 'https://example.com';
+    const links = [
+      'https://example.com/pricing',
+      'https://example.com/features',
+      'https://example.com/blog',
+      'https://example.com/about',
+      'https://example.com/fr',
+      'https://example.com/de',
+      'https://example.com/es',
+    ];
+    expect(dominantLocalePrefix(links, origin)).toBeNull();
+    expect(dominantLocalePrefix(['https://example.com/en-de/pricing'], origin)).toBeNull();
   });
 
   it('keeps other-locale variants when fullSite/Max is enabled', () => {

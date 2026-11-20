@@ -294,6 +294,9 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted-foreground);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 .dashboard-search input {
   width: 100%;
@@ -304,9 +307,16 @@
   font-size: 14px;
   outline: none;
 }
-.dashboard-search:focus-within {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+/* Rounded fields (clone URL, search, onboarding URL) show focus on the whole field. The bare
+   input inside must not draw its own ring: the app-wide focus outline drew a square box
+   around it that stuck out of the field's rounded end. */
+.dashboard-shell :is(.dashboard-search, [data-field]) input:focus-visible {
+  outline: none;
+}
+.dashboard-search:focus-within,
+.dashboard-shell [data-field]:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 24%, transparent);
 }
 .dashboard-toolbar {
   display: flex;
