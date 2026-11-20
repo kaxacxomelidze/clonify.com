@@ -11,6 +11,7 @@ import {
   fetchMe,
   getAuthToken,
   loginRequest,
+  loginVerifyRequest,
   logoutRequest,
   registerRequest,
   verifyCodeRequest,
@@ -26,7 +27,13 @@ type AuthContextValue = {
   usage: UsageSummary | null;
   loading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string, turnstileToken?: string) => Promise<void>;
+  /** Resolves with needsCode when a login code was emailed (finish with verifyLogin). */
+  login: (
+    email: string,
+    password: string,
+    turnstileToken?: string,
+  ) => Promise<{ needsCode: boolean; email?: string; challenge?: string }>;
+  verifyLogin: (challenge: string, code: string) => Promise<void>;
   register: (
     name: string,
     email: string,
@@ -94,6 +101,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(
     async (email: string, password: string, turnstileToken = "") => {
       const data = await loginRequest(email, password, true, turnstileToken);
+      if ("needsCode" in data && data.needsCode) {
+        return { needsCode: true, email: data.email, challenge: data.challenge };
+      }
+      if ("token" in data) applySession(data.token, data.user, data.usage);
+      return { needsCode: false };
+    },
+    [applySession],
+  );
+
+  const verifyLogin = useCallback(
+    async (challenge: string, code: string) => {
+      const data = await loginVerifyRequest(challenge, code);
       applySession(data.token, data.user, data.usage);
     },
     [applySession],
@@ -105,7 +124,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if ("needsCode" in data && data.needsCode) {
         return { needsCode: true as const, email: data.email };
       }
-      applySession(data.token, data.user, data.usage);
+      if ("token" in data) applySession(data.token, data.user, data.usage);
       return { needsCode: false as const };
     },
     [applySession],
@@ -141,13 +160,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       isAuthenticated: !!user,
       login,
+      verifyLogin,
       register,
       verifyCode,
       logout,
       refresh,
       acceptToken,
     }),
-    [user, usage, loading, login, register, verifyCode, logout, refresh, acceptToken],
+    [user, usage, loading, login, verifyLogin, register, verifyCode, logout, refresh, acceptToken],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

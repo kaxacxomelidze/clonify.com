@@ -66,7 +66,7 @@ export function CloneEngine({ domain, running }: { domain: string; running: bool
       <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
         <span className="min-w-0 truncate text-xs text-muted-foreground">{domain}</span>
         <span className="shrink-0 text-[10px] uppercase tracking-widest text-muted-foreground">
-          AI process · demo
+          {running ? "AI rebuild · live" : "AI rebuild"}
         </span>
       </div>
       <svg

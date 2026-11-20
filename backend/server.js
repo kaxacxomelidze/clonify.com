@@ -42,6 +42,7 @@ import {
   retrieveWhopMembership, cancelWhopMembership, whopManageUrl, verifyWhopWebhook,
   listRecentWhopPayments, retrieveWhopPayment, cleanWhopAffiliateCode, WHOP_AFFILIATE_WINDOW_MS, lookupWhopUser,
   whopAddonPlanId, whopDownsellPlanId, ADDON_CLONE_CREDITS,
+  whopPlanIdOf, whopMembershipIdOf, whopEmailOf, whopUserIdOf, whopPeriodEndOf,
 } from './lib/whop.js';
 
 const _cjsRequire = createRequire(import.meta.url);
@@ -246,7 +247,7 @@ setInterval(() => {
 
 // ── Plan limits ────────────────────────────────────────────────────────────────
 const PLAN_LIMITS = {
-  free:       { clonesPerMonth: 3,        maxPages: 20,  fullSite: false, editsPerMonth: 2,  savesPerMonth: 2,  sharesPerMonth: 2  },
+  free:       { clonesPerMonth: 3,        maxPages: 20,  fullSite: false, editsPerMonth: 50, savesPerMonth: 50, sharesPerMonth: 2  },
   starter:    { clonesPerMonth: 10,       maxPages: 500, fullSite: false, editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: 25 },
   growth:     { clonesPerMonth: 30,       maxPages: 500, fullSite: false, editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: Infinity },
   unlimited:  { clonesPerMonth: Infinity, maxPages: 500, fullSite: true,  editsPerMonth: Infinity, savesPerMonth: Infinity, sharesPerMonth: Infinity },
@@ -258,7 +259,7 @@ const PLAN_RANK = { free: 0, starter: 1, growth: 2, unlimited: 3 };
 function planRank(plan) {
   return PLAN_RANK[normalizePlan(plan)] ?? 0;
 }
-/** Figma export and templates are Growth and Pro features. */
+/** Figma export is a Growth and Pro feature (pricing table: Starter ❌ Figma Export). */
 function hasGrowthFeatures(plan) {
   return planRank(plan) >= PLAN_RANK.growth;
 }
@@ -507,13 +508,13 @@ async function resolveWhopUser(obj, membershipId) {
     if (pending?.user_id) { const u = await getUserById(pending.user_id); if (u) return { user: u, pending }; }
   }
   if (membershipId) { const u = await getUserByWhopMembershipId(membershipId); if (u) return { user: u, pending: null }; }
-  const email = obj?.user?.email || obj?.member?.email;
-  if (email) { const u = await getUserByEmail(String(email).toLowerCase()); if (u) return { user: u, pending: null }; }
+  const email = whopEmailOf(obj);
+  if (email) { const u = await getUserByEmail(email); if (u) return { user: u, pending: null }; }
   return { user: null, pending: null };
 }
 
 function whopPlanFor(obj, fallbackPlan, fallbackInterval) {
-  const mapped = planFromWhopPlanId(obj?.plan?.id);
+  const mapped = planFromWhopPlanId(whopPlanIdOf(obj));
   if (mapped) return mapped;
   const metaPlan = normalizePlan(obj?.metadata?.plan || fallbackPlan);
   return { plan: metaPlan, interval: obj?.metadata?.interval || fallbackInterval || 'monthly' };
@@ -554,8 +555,8 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   if (!user) ({ user, pending } = await resolveWhopUser(m, m.id));
   if (!user) throw new Error(`No Clonyfy user for Whop membership ${m.id}`);
   const { plan, interval } = whopPlanFor(m, fallbackPlan || pending?.plan, fallbackInterval || pending?.interval);
-  if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${m?.plan?.id})`);
-  const renewsAt = m.renewal_period_end ? new Date(m.renewal_period_end) : null;
+  if (!isPaidPlan(plan)) throw new Error(`Unknown plan for Whop membership ${m.id} (plan ${whopPlanIdOf(m)})`);
+  const renewsAt = whopPeriodEndOf(m);
   const previousMembershipId = user.whop_membership_id && user.whop_membership_id !== m.id ? user.whop_membership_id : null;
   // An older, lower membership (e.g. the one replaced by an upgrade) must never pull the user back down.
   if (previousMembershipId && isPaidPlan(user.plan) && planRank(plan) < planRank(user.plan)) {
@@ -564,7 +565,7 @@ async function applyWhopMembership(m, { userId = null, fallbackPlan = null, fall
   }
   await activatePaidPlanForUser(user.id, {
     plan, interval, renewsAt,
-    whopMembershipId: m.id, whopUserId: m.user?.id || null,
+    whopMembershipId: m.id, whopUserId: whopUserIdOf(m),
     cancelAtPeriodEnd: m.cancel_at_period_end ? 1 : 0,
   });
   if (previousMembershipId) await retireReplacedWhopMembership(user, previousMembershipId, m.id);
@@ -605,75 +606,24 @@ async function handleWhopEvent(event) {
   }
 
   if (type === 'payment.succeeded') {
-    const membershipId = data.membership?.id || null;
-    const amount = whopAmount(data.total, data.usd_total, data.subtotal);
-    // Only money that actually arrived upgrades anyone: paid status, a real amount, one of our plans.
-    const settled = (data.status ? data.status === 'paid' : true) && (data.substatus ? data.substatus === 'succeeded' : true);
-    // One-time "Extra Website Clones" add-on: grant clone credits instead of a plan.
-    const addonPlanId = whopAddonPlanId();
-    if (settled && amount > 0 && addonPlanId && data.plan?.id === addonPlanId) {
-      if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
-      const { user } = await resolveWhopUser(data, membershipId);
-      if (!user) throw new Error(`No Clonyfy user for Whop add-on payment ${data.id}`);
-      await insertPayment({
-        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-        plan: normalizePlan(user.plan), amount, currency: whopCurrency(data), method: 'whop',
-        txId: data.id || null, note: `Add-on: +${ADDON_CLONE_CREDITS} clones`,
-        promoCode: null, discountPercent: 0, interval: 'one_time', status: 'confirmed',
-        submittedAt: new Date().toISOString(),
-      });
-      await updateUser(user.id, { clone_credits: (user.clone_credits || 0) + ADDON_CLONE_CREDITS });
-      _invalidateUserSessions(user.id);
-      audit(user.id, user.name, 'whop_addon_clones', `payment=${data.id} credits=+${ADDON_CLONE_CREDITS}`, null);
-      return;
-    }
-    const mappedPlan = planFromWhopPlanId(data.plan?.id);
-    if (!settled || amount <= 0 || !mappedPlan) {
-      console.log(`[whop] payment ${data.id} ignored (status=${data.status}/${data.substatus} amount=${amount} plan=${data.plan?.id})`);
-      return;
-    }
-    const { user } = await resolveWhopUser(data, membershipId);
-    if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
-    if (data.id && await getPaymentByTxId(data.id)) return; // already recorded
-    const { plan, interval } = mappedPlan;
-    const note = membershipId ? `Whop membership ${membershipId}` : '';
-    // First payment of a checkout: complete that checkout's row instead of adding a second one.
-    const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
-    if (checkoutRow && checkoutRow.user_id === user.id) {
-      await updatePaymentFields(checkoutRow.id, {
-        status: 'confirmed', amount, currency: whopCurrency(data), tx_id: data.id || checkoutRow.tx_id,
-        processed_at: new Date().toISOString(), note,
-      });
-    } else {
-      await insertPayment({
-        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-        plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
-        amount, currency: whopCurrency(data), method: 'whop',
-        txId: data.id || null, note,
-        promoCode: null, discountPercent: 0, interval, status: 'confirmed',
-        submittedAt: new Date().toISOString(),
-      });
-    }
-    // Paid: grant/extend the plan. Prefer the membership's own dates; if Whop hasn't
-    // exposed it yet, use the payment (applyWhopMembership never lowers a plan).
-    if (membershipId) {
-      let m = null;
-      try { m = await retrieveWhopMembership(membershipId); } catch (err) { console.error('[whop] membership fetch failed:', err.message); }
-      if (!m || !['active', 'trialing'].includes(m.status)) {
-        m = { id: membershipId, status: 'active', plan: data.plan, user: data.user, metadata: data.metadata,
-          checkout_configuration_id: data.checkout_configuration_id, renewal_period_end: null, cancel_at_period_end: false };
-      }
-      await applyWhopMembership(m, { userId: user.id, fallbackPlan: plan, fallbackInterval: interval });
-    }
-    audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${whopAmount(data.total, data.usd_total, data.subtotal)}`, null);
-    return;
+    // The webhook and /sync can deliver the same payment at the same moment: one at a time.
+    return withPaymentLock(data.id, () => handleWhopPaymentSucceeded(data));
   }
 
   if (type === 'membership.cancel_at_period_end_changed') {
     const user = data.id ? await getUserByWhopMembershipId(data.id) : null;
     if (user) {
-      await updateUser(user.id, { cancel_at_period_end: data.cancel_at_period_end ? 1 : 0 });
+      const cancelling = !!data.cancel_at_period_end;
+      const was = !!user.cancel_at_period_end;
+      await updateUser(user.id, { cancel_at_period_end: cancelling ? 1 : 0 });
       _invalidateUserSessions(user.id);
+      if (cancelling !== was) {
+        // Churn = the subscriber cancelled (access runs to the end of the paid period).
+        void trackServerEvent(cancelling ? 'churn' : 'churn_reverted', {
+          user, insertId: `${data.id}-${cancelling ? 'c' : 'r'}-${Date.now()}`,
+          props: { plan: normalizePlan(user.plan), interval: user.billing_interval || null, source: 'whop' },
+        });
+      }
     }
     return;
   }
@@ -687,21 +637,29 @@ async function handleWhopEvent(event) {
       renderEmail('downgraded', { SUBJECT: 'Account downgraded to Free', NAME: user.name })
     ).catch(() => {});
     audit(user.id, user.name, 'whop_membership_deactivated', `membership=${data.id}`, null);
+    void trackServerEvent('subscription_ended', {
+      user, insertId: `${data.id}-end`,
+      props: { plan: normalizePlan(user.plan), interval: user.billing_interval || null, source: 'whop' },
+    });
     return;
   }
 
   if (type === 'payment.failed') {
-    const membershipId = data.membership?.id || null;
+    const membershipId = whopMembershipIdOf(data);
+    const existing = data.id ? await getPaymentByTxId(data.id) : null;
+    if (existing?.status === 'confirmed') return; // a late failure event for a payment that went through
     const { user } = await resolveWhopUser(data, membershipId);
     if (!user) return;
-    await insertPayment({
-      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
-      plan: (() => { const p = whopPlanFor(data, user.plan, user.billing_interval).plan; return isPaidPlan(p) ? p : normalizePlan(user.plan); })(),
-      amount: whopAmount(data.total, data.usd_total, data.subtotal),
-      currency: whopCurrency(data), method: 'whop',
-      txId: data.id || null, note: data.failure_message ? `Payment failed: ${String(data.failure_message).slice(0, 200)}` : 'Payment failed', promoCode: null, discountPercent: 0,
-      interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
-    }).catch(() => {});
+    if (!existing) {
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: (() => { const p = whopPlanFor(data, user.plan, user.billing_interval).plan; return isPaidPlan(p) ? p : normalizePlan(user.plan); })(),
+        amount: whopAmount(data.total, data.usd_total, data.subtotal),
+        currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note: data.failure_message ? `Payment failed: ${String(data.failure_message).slice(0, 200)}` : 'Payment failed', promoCode: null, discountPercent: 0,
+        interval: user.billing_interval || 'monthly', status: 'failed', submittedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
     let portalUrl = publicAppUrl() + '/dashboard/billing';
     if (membershipId) { try { portalUrl = whopManageUrl(await retrieveWhopMembership(membershipId)); } catch {} }
     sendEmail(user.email, 'Payment failed — action required',
@@ -709,6 +667,122 @@ async function handleWhopEvent(event) {
     ).catch(() => {});
     audit(user.id, user.name, 'whop_payment_failed', `payment=${data.id}`, null);
   }
+}
+
+const _paymentLocks = new Map();
+/** Runs fn for one Whop payment at a time (single API process). */
+async function withPaymentLock(key, fn) {
+  if (!key) return fn();
+  while (_paymentLocks.has(key)) await _paymentLocks.get(key).catch(() => {});
+  const run = Promise.resolve().then(fn);
+  _paymentLocks.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (_paymentLocks.get(key) === run) _paymentLocks.delete(key);
+  }
+}
+
+/**
+ * payment.succeeded. Idempotent: a payment already recorded as confirmed is skipped, and a
+ * payment first reported as failed and then paid on Whop's retry (same pay_ id) upgrades
+ * its row instead of being ignored.
+ */
+async function handleWhopPaymentSucceeded(data) {
+  const membershipId = whopMembershipIdOf(data);
+  const whopPlan = whopPlanIdOf(data);
+  const amount = whopAmount(data.total, data.usd_total, data.subtotal, data.final_amount);
+  // Only money that actually arrived upgrades anyone: paid status, a real amount, one of our plans.
+  const settled = (data.status ? data.status === 'paid' : true) && (data.substatus ? data.substatus === 'succeeded' : true);
+  const existing = data.id ? await getPaymentByTxId(data.id) : null;
+  if (existing?.status === 'confirmed') return; // already processed
+  // One-time "Extra Website Clones" add-on: grant clone credits instead of a plan.
+  const addonPlanId = whopAddonPlanId();
+  if (settled && amount > 0 && addonPlanId && whopPlan === addonPlanId) {
+    const { user } = await resolveWhopUser(data, membershipId);
+    if (!user) throw new Error(`No Clonyfy user for Whop add-on payment ${data.id}`);
+    const addonNote = `Add-on: +${ADDON_CLONE_CREDITS} clones`;
+    if (existing) {
+      await updatePaymentFields(existing.id, { status: 'confirmed', amount, currency: whopCurrency(data), processed_at: new Date().toISOString(), note: addonNote });
+    } else {
+      await insertPayment({
+        id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+        plan: normalizePlan(user.plan), amount, currency: whopCurrency(data), method: 'whop',
+        txId: data.id || null, note: addonNote,
+        promoCode: null, discountPercent: 0, interval: 'one_time', status: 'confirmed',
+        submittedAt: new Date().toISOString(),
+      });
+    }
+    // Re-read right before adding so credits spent by a clone a moment ago aren't overwritten.
+    const fresh = await getUserById(user.id);
+    await updateUser(user.id, { clone_credits: Math.max(0, Number(fresh?.clone_credits) || 0) + ADDON_CLONE_CREDITS });
+    _invalidateUserSessions(user.id);
+    audit(user.id, user.name, 'whop_addon_clones', `payment=${data.id} credits=+${ADDON_CLONE_CREDITS}`, null);
+    void trackServerEvent('purchase_completed', {
+      user, insertId: data.id,
+      props: { product: 'addon_clones15', amount, currency: whopCurrency(data), source: 'whop' },
+    });
+    return;
+  }
+  const mappedPlan = planFromWhopPlanId(whopPlan);
+  if (!settled || amount <= 0 || !mappedPlan) {
+    console.log(`[whop] payment ${data.id} ignored (status=${data.status}/${data.substatus} amount=${amount} plan=${whopPlan})`);
+    return;
+  }
+  const { user } = await resolveWhopUser(data, membershipId);
+  if (!user) throw new Error(`No Clonyfy user for Whop payment ${data.id}`);
+  const { plan, interval } = mappedPlan;
+  // A membership that already had a confirmed payment is renewing, not a new purchase.
+  const renewal = data.billing_reason === 'subscription_cycle'
+    || (!!membershipId && await hasPaidWhopPayment(user.id, membershipId));
+  // Keep "Downsell" on the first payment's note: it marks the one-time offer as used and
+  // feeds the admin stats (renewals at the standard price don't carry it).
+  const offerNote = !renewal && whopPlan && whopPlan === whopDownsellPlanId() ? 'Downsell (Growth, 50% first year) · ' : '';
+  const note = `${offerNote}${membershipId ? `Whop membership ${membershipId}` : ''}`.replace(/ · $/, '');
+  // First payment of a checkout: complete that checkout's row instead of adding a second one.
+  const checkoutRow = data.checkout_configuration_id ? await getPaymentByTxId(data.checkout_configuration_id) : null;
+  if (existing) {
+    // Failed first, paid on Whop's retry: the same row becomes the confirmed payment.
+    await updatePaymentFields(existing.id, {
+      status: 'confirmed', amount, currency: whopCurrency(data),
+      processed_at: new Date().toISOString(), note,
+    });
+  } else if (checkoutRow && checkoutRow.user_id === user.id) {
+    await updatePaymentFields(checkoutRow.id, {
+      status: 'confirmed', amount, currency: whopCurrency(data), tx_id: data.id || checkoutRow.tx_id,
+      processed_at: new Date().toISOString(), note,
+    });
+  } else {
+    await insertPayment({
+      id: randomUUID(), userId: user.id, userName: user.name, userEmail: user.email,
+      plan: isPaidPlan(plan) ? plan : normalizePlan(user.plan),
+      amount, currency: whopCurrency(data), method: 'whop',
+      txId: data.id || null, note,
+      promoCode: null, discountPercent: 0, interval, status: 'confirmed',
+      submittedAt: new Date().toISOString(),
+    });
+  }
+  // Paid: grant/extend the plan. Prefer the membership's own dates; if Whop hasn't
+  // exposed it yet, use the payment (applyWhopMembership never lowers a plan).
+  if (membershipId) {
+    let m = null;
+    try { m = await retrieveWhopMembership(membershipId); } catch (err) { console.error('[whop] membership fetch failed:', err.message); }
+    if (!m || !['active', 'trialing'].includes(m.status)) {
+      m = { id: membershipId, status: 'active', plan: data.plan, user: data.user, metadata: data.metadata,
+        checkout_configuration_id: data.checkout_configuration_id, renewal_period_end: null, cancel_at_period_end: false };
+    }
+    await applyWhopMembership(m, { userId: user.id, fallbackPlan: plan, fallbackInterval: interval });
+  }
+  audit(user.id, user.name, 'whop_payment_succeeded', `payment=${data.id} amount=${amount}`, null);
+  const fresh = await getUserById(user.id).catch(() => null);
+  void trackServerEvent(renewal ? 'subscription_renewed' : 'purchase_completed', {
+    user: fresh || user, insertId: data.id,
+    props: {
+      product: 'plan', plan, interval, amount, currency: whopCurrency(data), source: 'whop',
+      offer: whopPlan && whopPlan === whopDownsellPlanId() ? 'downsell' : 'standard',
+    },
+  });
+  if (!renewal) mixpanelProfile(fresh || user);
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -1093,6 +1167,120 @@ async function sendEmail(to, subject, html) {
   }
 }
 
+// ── Funnel analytics: own database + Mixpanel ────────────────────────────────
+// Every event lands in the events table (admin funnel) and, when MIXPANEL_TOKEN is set, in
+// Mixpanel. Browser events are relayed by /api/track; money and churn events are sent from
+// here because only Whop's webhooks can confirm them. distinct_id is the user id once known
+// ($device_id = the browser's anonymous id, $user_id = user id → Mixpanel merges the two).
+function mixpanelToken() {
+  return String(process.env.MIXPANEL_TOKEN || '').trim();
+}
+function mixpanelInsertId(value) {
+  return String(value || randomUUID()).replace(/[^A-Za-z0-9-]/g, '').slice(0, 36) || randomUUID();
+}
+function forwardToMixpanel(name, { userId = null, anonId = null, insertId = null, props = {}, ip = null } = {}) {
+  const token = mixpanelToken();
+  const distinctId = userId || anonId;
+  if (!token || !distinctId) return;
+  const properties = {
+    token, distinct_id: distinctId, time: Date.now(), $insert_id: mixpanelInsertId(insertId), ...props,
+  };
+  if (anonId) properties.$device_id = anonId;
+  if (userId) properties.$user_id = userId;
+  if (ip) properties.ip = ip;
+  fetch('https://api.mixpanel.com/track', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/plain' },
+    body: JSON.stringify([{ event: name, properties }]),
+    signal: AbortSignal.timeout(8000),
+  }).catch(() => {});
+}
+/** Mixpanel user profile (name, email, plan) so people can be looked up in reports. */
+function mixpanelProfile(user) {
+  const token = mixpanelToken();
+  if (!token || !user?.id) return;
+  fetch('https://api.mixpanel.com/engage#profile-set', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/plain' },
+    body: JSON.stringify([{
+      $token: token, $distinct_id: user.id,
+      $set: { $name: user.name || '', $email: user.email || '', plan: normalizePlan(user.plan), $created: user.created_at || user.createdAt || undefined },
+    }]),
+    signal: AbortSignal.timeout(8000),
+  }).catch(() => {});
+}
+async function trackServerEvent(name, { user = null, anonId = null, props = null, path = null, referrer = null, ip = null, insertId = null } = {}) {
+  try {
+    await insertTrackEvent({ id: randomUUID(), userId: user?.id || null, anonId, name, props, path, referrer, ip });
+  } catch (err) {
+    console.error('[track] insert failed:', err.message);
+  }
+  forwardToMixpanel(name, {
+    userId: user?.id || null, anonId, insertId, ip,
+    props: { ...(user?.plan ? { plan: normalizePlan(user.plan) } : {}), ...(props || {}), ...(path ? { path } : {}) },
+  });
+}
+
+// ── Login codes (anti-bot) ────────────────────────────────────────────────────
+// After a correct password, a 6-digit code is emailed and the session starts only once it is
+// entered. Pending logins live in memory (10 min); only a keyed hash of the code is kept.
+// On whenever SMTP works. Without SMTP, logins fall back to password-only (with a warning);
+// CLONYFY_AUTH_CODES_DEV_LOG=1 (non-production) turns codes on and prints them to the log.
+// CLONYFY_LOGIN_CODES=0 turns the step off.
+const LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
+const LOGIN_CODE_RESEND_MS = 60 * 1000;
+const LOGIN_CODE_MAX_ATTEMPTS = 5;
+const LOGIN_CODE_MAX_RESENDS = 3;
+const loginChallenges = new Map();
+let _loginCodesWarned = false;
+
+function loginCodesDevLog() {
+  return process.env.CLONYFY_AUTH_CODES_DEV_LOG === '1' && process.env.NODE_ENV !== 'production';
+}
+function loginCodesEnabled() {
+  if (process.env.CLONYFY_LOGIN_CODES === '0') return false;
+  if (getMailSettings().smtp_host && nodemailer) return true;
+  if (loginCodesDevLog()) return true;
+  if (!_loginCodesWarned) {
+    _loginCodesWarned = true;
+    console.warn('[Auth] Login codes are OFF: SMTP is not configured, so a password alone signs users in. Configure SMTP to enable them.');
+  }
+  return false;
+}
+function loginCodeHash(challengeId, code) {
+  return createHmac('sha256', `login-code:${PASSWORD_PEPPER}:${challengeId}`).update(String(code)).digest('hex');
+}
+function newLoginCode() {
+  // Uniform 000000–999999 from a CSPRNG (no modulo bias worth caring about at 2^32).
+  return String(randomBytes(4).readUInt32BE(0) % 1000000).padStart(6, '0');
+}
+function refreshLoginChallenge(challenge) {
+  const code = newLoginCode();
+  challenge.code = code; // kept only until it is sent (see sendLoginCode)
+  challenge.codeHash = loginCodeHash(challenge.id, code);
+  challenge.attempts = 0;
+  challenge.lastSentAt = Date.now();
+  challenge.expiresAt = Date.now() + LOGIN_CODE_TTL_MS;
+}
+function createLoginChallenge(user, remember) {
+  const now = Date.now();
+  for (const [id, c] of loginChallenges) if (c.expiresAt < now || c.userId === user.id) loginChallenges.delete(id);
+  const challenge = { id: randomBytes(24).toString('hex'), userId: user.id, remember, resends: 0 };
+  refreshLoginChallenge(challenge);
+  loginChallenges.set(challenge.id, challenge);
+  return challenge;
+}
+async function sendLoginCode(user, challenge) {
+  const code = challenge.code;
+  delete challenge.code;
+  if (getMailSettings().smtp_host && nodemailer) {
+    await sendEmail(user.email, 'Your Clonyfy login code',
+      renderEmail('login-code', { SUBJECT: 'Your login code', NAME: user.name, CODE: code }));
+  } else if (loginCodesDevLog()) {
+    console.log(`[Auth dev] login code for ${user.email}: ${code}`);
+  }
+}
+
 // ── Dunning / subscription expiry ─────────────────────────────────────────────
 async function runDunning() {
   try {
@@ -1104,11 +1292,22 @@ async function runDunning() {
       if (!u.plan_renews_at || u.plan === 'free') continue;
       const renewsAt = new Date(u.plan_renews_at).getTime();
       if (now < renewsAt) continue;
+      // Whop drives its own members: it retries failed renewals and sends membership.deactivated
+      // when access really ends. Ask Whop before treating the period as over.
+      if (u.whop_membership_id) {
+        let m = null;
+        try { m = await retrieveWhopMembership(u.whop_membership_id); } catch { continue; } // unsure → never downgrade
+        if (m && ['active', 'trialing', 'past_due'].includes(String(m.status))) {
+          const end = whopPeriodEndOf(m);
+          if (end && end.getTime() > now) await updateUser(u.id, { plan_renews_at: end.toISOString(), renewal_reminder_sent: 0 });
+          continue;
+        }
+      }
       const graceEnd = renewsAt + 7 * 24 * 3600 * 1000;
       if (!u.renewal_reminder_sent) {
         await updateUser(u.id, { renewal_reminder_sent: 1 });
         sendEmail(u.email, 'Your CLONYFY subscription has expired',
-          renderEmail('renewal-reminder', { SUBJECT: 'Your subscription has expired', NAME: u.name, PLAN: u.plan, EXPIRED_AT: new Date(renewsAt).toLocaleDateString() })
+          renderEmail('renewal-reminder', { SUBJECT: 'Your subscription has expired', NAME: u.name, PLAN: getPlanLabel(u.plan), EXPIRED_AT: new Date(renewsAt).toLocaleDateString() })
         ).catch(() => {});
       }
       if (u.cancel_at_period_end || now > graceEnd) {
@@ -5183,6 +5382,8 @@ async function handleRequest(req, res) {
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
     const freshUser = await getUserById(user.id);
+    void trackServerEvent('signup_completed', { user: freshUser, ip, insertId: `${user.id}-signup`, props: { method: 'email' } });
+    mixpanelProfile(freshUser);
     const usage = await getUserUsageSummary(freshUser);
     return json(res, { token, user: userPublic(freshUser), usage });
   }
@@ -5193,18 +5394,26 @@ async function handleRequest(req, res) {
     const { email, code } = await readJsonBody(req);
     const user = await getUserByEmail(String(email || '').toLowerCase().trim());
     if (!user) return json(res, { error: 'Enter the 6-digit code we emailed you.' }, 400);
-    if (!(user.email_verified === 1 || user.email_verified === true)) {
-      const ok = user.verify_token
-        && String(code || '').trim() === String(user.verify_token)
-        && Number(user.verify_expiry) > Date.now();
-      if (!ok) return json(res, { error: 'That code is wrong or expired. Request a new one.' }, 400);
-      await updateUser(user.id, { email_verified: 1, verify_token: null, verify_expiry: null });
+    // Only a pending sign-up can be confirmed here. An already-verified account must never get
+    // a session from this endpoint: that would let anyone who knows an email log in as them.
+    if (user.email_verified === 1 || user.email_verified === true) {
+      return json(res, { error: 'That code is wrong or expired. Request a new one.' }, 400);
     }
+    const expected = String(user.verify_token || '');
+    const given = String(code || '').trim();
+    const ok = expected.length === 6
+      && given.length === expected.length
+      && timingSafeEqual(Buffer.from(given), Buffer.from(expected))
+      && Number(user.verify_expiry) > Date.now();
+    if (!ok) return json(res, { error: 'That code is wrong or expired. Request a new one.' }, 400);
+    await updateUser(user.id, { email_verified: 1, verify_token: null, verify_expiry: null });
     if (user.blocked) return await blockedUserResponse(res, user);
     const token = randomUUID();
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + 30*24*60*60*1000, impersonatedBy: null });
     audit(user.id, user.name, 'register', null, ip);
     const freshUser = await getUserById(user.id);
+    void trackServerEvent('signup_completed', { user: freshUser, ip, insertId: `${user.id}-signup`, props: { method: 'email' } });
+    mixpanelProfile(freshUser);
     const usage = await getUserUsageSummary(freshUser);
     return json(res, { token, user: userPublic(freshUser), usage });
   }
@@ -5239,12 +5448,80 @@ async function handleRequest(req, res) {
     if (bcrypt && user.hash && !user.hash.startsWith('$2b$') && !user.hash.startsWith('$2a$')) {
       await updateUser(user.id, { hash: await bcrypt.hash(password, 12), salt: null });
     }
+    // Anti-bot: a correct password is not enough — a 6-digit code goes to the inbox and the
+    // session starts only after /api/auth/login/verify.
+    if (loginCodesEnabled()) {
+      const challenge = createLoginChallenge(user, remember !== false);
+      await sendLoginCode(user, challenge);
+      audit(user.id, user.name, 'login_code_sent', null, ip);
+      return json(res, { needsCode: true, email: user.email, challenge: challenge.id });
+    }
     const token = randomUUID();
     const ttl = remember === false ? 2 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000; // 2h or 30d
     await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + ttl, impersonatedBy: null });
     audit(user.id, user.name, 'login', null, ip);
     const usage = await getUserUsageSummary(user);
     return json(res, { token, user: userPublic(user), usage });
+  }
+
+  // POST /api/auth/login/verify — the emailed login code → session.
+  if (req.method === 'POST' && url.pathname === '/api/auth/login/verify') {
+    if (!checkRateLimit(`lcode:${ip}`, 20, 300000)) return json(res, { error: 'Too many attempts. Try again in a few minutes.' }, 429);
+    const { challenge: challengeId, code } = await readJsonBody(req);
+    const challenge = loginChallenges.get(String(challengeId || ''));
+    const wrong = { error: 'That code is wrong or expired. Request a new one.' };
+    if (!challenge || challenge.expiresAt < Date.now()) {
+      if (challenge) loginChallenges.delete(challenge.id);
+      return json(res, { ...wrong, expired: true }, 400);
+    }
+    const given = String(code || '').trim();
+    const givenHash = loginCodeHash(challenge.id, given);
+    const match = /^\d{6}$/.test(given)
+      && timingSafeEqual(Buffer.from(givenHash), Buffer.from(challenge.codeHash));
+    if (!match) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= LOGIN_CODE_MAX_ATTEMPTS) {
+        loginChallenges.delete(challenge.id);
+        return json(res, { error: 'Too many wrong codes. Log in again to get a new one.', expired: true }, 400);
+      }
+      return json(res, wrong, 400);
+    }
+    loginChallenges.delete(challenge.id);
+    const user = await getUserById(challenge.userId);
+    if (!user) return json(res, wrong, 400);
+    if (user.blocked) return await blockedUserResponse(res, user);
+    // The code reached the inbox: the address is proven.
+    if (!(user.email_verified === 1 || user.email_verified === true)) {
+      await updateUser(user.id, { email_verified: 1, verify_token: null, verify_expiry: null });
+    }
+    const token = randomUUID();
+    const ttl = challenge.remember ? 30 * 24 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000;
+    await insertSession({ token, userId: user.id, createdAt: new Date().toISOString(), expiresAt: Date.now() + ttl, impersonatedBy: null });
+    audit(user.id, user.name, 'login', null, ip);
+    const freshUser = await getUserById(user.id);
+    const usage = await getUserUsageSummary(freshUser);
+    return json(res, { token, user: userPublic(freshUser), usage });
+  }
+
+  // POST /api/auth/login/resend — a new code for the same login attempt (60s apart).
+  if (req.method === 'POST' && url.pathname === '/api/auth/login/resend') {
+    if (!checkRateLimit(`lcoderesend:${ip}`, 6, 3600000)) return json(res, { error: 'Too many requests. Try again later.' }, 429);
+    const { challenge: challengeId } = await readJsonBody(req);
+    const challenge = loginChallenges.get(String(challengeId || ''));
+    if (!challenge || challenge.expiresAt < Date.now()) {
+      return json(res, { error: 'This login attempt expired. Log in again.', expired: true }, 400);
+    }
+    const wait = Math.ceil((challenge.lastSentAt + LOGIN_CODE_RESEND_MS - Date.now()) / 1000);
+    if (wait > 0) return json(res, { error: `You can request a new code in ${wait}s.`, retryAfter: wait }, 429);
+    if (challenge.resends >= LOGIN_CODE_MAX_RESENDS) {
+      return json(res, { error: 'Too many codes sent. Log in again.', expired: true }, 429);
+    }
+    const user = await getUserById(challenge.userId);
+    if (!user) return json(res, { error: 'This login attempt expired. Log in again.', expired: true }, 400);
+    challenge.resends += 1;
+    refreshLoginChallenge(challenge);
+    await sendLoginCode(user, challenge);
+    return json(res, { ok: true });
   }
 
   if (req.method === 'GET' && (url.pathname === '/api/health' || url.pathname === '/health')) {
@@ -5316,8 +5593,8 @@ async function handleRequest(req, res) {
     readJsonBody(req).then(async ({ templateId }) => {
       const safeId = String(templateId || '').replace(/[^a-z0-9-]/gi, '');
       if (!safeId || !TEMPLATES_META[safeId]) return json(res, { error: 'Template not found' }, 404);
-      if (safeId !== 'blank' && !hasGrowthFeatures(templateUser.plan)) {
-        return json(res, { error: GROWTH_FEATURE_ERROR('Templates') }, 403);
+      if (safeId !== 'blank' && !isPaidPlan(templateUser.plan)) {
+        return json(res, { error: 'Templates are available on all paid plans. Upgrade to use them.' }, 403);
       }
       const templateFile = join(__dirname, 'templates', 'starter-pages', `${safeId}.html`);
       if (!existsSync(templateFile)) return json(res, { error: 'Template file missing' }, 404);
@@ -7369,6 +7646,9 @@ async function handleRequest(req, res) {
     if (!isAdmin(req)) return json(res, { error: 'Unauthorized' }, 401);
     const { totalUsers, blockedUsers, totalClones, totalErrors, pendingPayments, activePaidUsers, totalRevenue, monthRevenue } = await getAdminStats();
     const activeNow = [...jobs.values()].filter(isActiveJob).length;
+    const confirmedPayments = (await getAllPayments().catch(() => [])).filter(p => p.status === 'confirmed');
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const events30 = Object.fromEntries((await getFunnelCounts(since30).catch(() => [])).map(r => [r.name, r.total]));
     const mrr = activePaidUsers.reduce((s, u) => {
       const p = getPlanPrices(u.plan);
       return s + (u.billing_interval === 'annual' ? p.annual / 12 : p.monthly);
@@ -7381,8 +7661,13 @@ async function handleRequest(req, res) {
       growthUsers: activePaidUsers.filter(u => normalizePlan(u.plan) === 'growth').length,
       starterUsers: activePaidUsers.filter(u => normalizePlan(u.plan) === 'starter').length,
       unlimitedUsers: activePaidUsers.filter(u => normalizePlan(u.plan) === 'unlimited').length,
-      proUsers: activePaidUsers.filter(u => normalizePlan(u.plan) === 'growth').length,
-      enterpriseUsers: activePaidUsers.filter(u => normalizePlan(u.plan) === 'unlimited').length,
+      annualSubscribers: activePaidUsers.filter(u => u.billing_interval === 'annual').length,
+      cancellationsScheduled: activePaidUsers.filter(u => u.cancel_at_period_end === 1 || u.cancel_at_period_end === true).length,
+      addonSales: confirmedPayments.filter(p => /^Add-on/i.test(String(p.note || ''))).length,
+      downsellSales: confirmedPayments.filter(p => /downsell/i.test(String(p.note || ''))).length,
+      purchases30d: events30.purchase_completed || 0,
+      churn30d: events30.churn || 0,
+      subscriptionsEnded30d: events30.subscription_ended || 0,
     });
   }
 
@@ -7392,10 +7677,22 @@ async function handleRequest(req, res) {
     const days = Math.min(365, Math.max(1, parseInt(url.searchParams.get('days') || '30', 10) || 30));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const rows = await getFunnelCounts(since).catch(() => []);
-    const order = ['landing_view', 'signup_view', 'onboarding', 'paywall_view', 'purchase_view', 'churn'];
-    const byName = Object.fromEntries(rows.map(r => [r.name, { total: r.total, uniques: r.uniques }]));
+    // The client's funnel, in order. Older event names count toward their new step.
+    const order = [
+      'landing_view', 'signup_view', 'signup_completed', 'onboarding_started', 'onboarding_completed',
+      'paywall_viewed', 'purchase_view', 'checkout_started', 'purchase_completed',
+    ];
+    const LEGACY = { onboarding: 'onboarding_started', paywall_view: 'paywall_viewed' };
+    const byName = {};
+    for (const r of rows) {
+      const key = LEGACY[r.name] || r.name;
+      const cur = byName[key] || { total: 0, uniques: 0 };
+      byName[key] = { total: cur.total + r.total, uniques: cur.uniques + r.uniques };
+    }
     const funnel = order.map(name => ({ name, total: byName[name]?.total || 0, uniques: byName[name]?.uniques || 0 }));
-    return json(res, { days, since, funnel });
+    const retention = ['churn', 'churn_reverted', 'subscription_renewed', 'subscription_ended']
+      .map(name => ({ name, total: byName[name]?.total || 0, uniques: byName[name]?.uniques || 0 }));
+    return json(res, { days, since, funnel, retention });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/admin/users') {
@@ -7602,21 +7899,28 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/track') {
     if (!checkRateLimit(`track:${ip}`, 120, 60_000)) return json(res, { ok: true });
     const body = await readJsonBody(req).catch(() => ({}));
+    // Browser funnel events (the client's list). signup_completed, purchase_completed and churn
+    // are server-side only (sign-up, Whop webhooks) so they can't be faked or double counted.
     const ALLOWED = new Set([
-      'landing_view', 'signup_view', 'onboarding', 'paywall_view', 'purchase_view', 'churn',
+      'landing_view', 'signup_view', 'onboarding_started', 'onboarding_completed',
+      'paywall_viewed', 'checkout_started', 'purchase_view',
+      // older names, still accepted so history keeps reading
+      'onboarding', 'paywall_view',
     ]);
     const name = String(body.event || '').trim();
     if (!ALLOWED.has(name)) return json(res, { ok: false, error: 'unknown event' }, 400);
     const user = await getSessionUser(req).catch(() => null);
-    const anonId = String(body.anonId || '').slice(0, 64) || null;
-    const props = body.props && typeof body.props === 'object' ? body.props : null;
+    const anonId = String(body.anonId || '').replace(/[^\w-]/g, '').slice(0, 64) || null;
+    let props = body.props && typeof body.props === 'object' && !Array.isArray(body.props) ? body.props : null;
+    if (props) {
+      // Small, flat props only.
+      props = Object.fromEntries(Object.entries(props).slice(0, 20)
+        .filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v))
+        .map(([k, v]) => [String(k).slice(0, 40), typeof v === 'string' ? v.slice(0, 200) : v]));
+    }
     const path = typeof body.path === 'string' ? body.path.slice(0, 300) : null;
     const referrer = typeof body.referrer === 'string' ? body.referrer.slice(0, 300) : null;
-    try {
-      await insertTrackEvent({ id: randomUUID(), userId: user?.id || null, anonId, name, props, path, referrer, ip });
-    } catch (err) {
-      console.error('[track] insert failed:', err.message);
-    }
+    await trackServerEvent(name, { user, anonId, props, path, referrer, ip });
     return json(res, { ok: true });
   }
 
@@ -7634,6 +7938,8 @@ async function handleRequest(req, res) {
       affiliate_commission: String(process.env.WHOP_AFFILIATE_COMMISSION || '').trim(),
       email_enabled: !!getMailSettings().smtp_host,
       mixpanel_token: String(process.env.MIXPANEL_TOKEN || '').trim(),
+      // The hard paywall's exit offer shows only when its Whop plan can actually be bought.
+      downsell_enabled: !!whopDownsellPlanId() && !whopUnavailableReason(),
     });
   }
 
@@ -7889,7 +8195,10 @@ async function handleRequest(req, res) {
     if (!user) return json(res, { error: 'Reset link is invalid or expired' }, 400);
     const { hash: newHash, salt: newSalt } = await hashPw(password);
     await updateUser(user.id, { hash: newHash, salt: newSalt, reset_token: null, reset_expiry: null });
+    // A reset means the old password may be known: sign out every device and pending login.
+    await deleteUserSessions(user.id).catch(() => {});
     _invalidateUserSessions(user.id);
+    for (const [id, c] of loginChallenges) if (c.userId === user.id) loginChallenges.delete(id);
     audit(user.id, user.name, 'password_reset', null, ip);
     return json(res, { ok: true });
   }
@@ -7977,6 +8286,12 @@ async function handleRequest(req, res) {
       } catch (err) {
         return json(res, { error: `Stripe cancellation failed: ${err.message}` }, 502);
       }
+    }
+    if (!user.cancel_at_period_end) {
+      void trackServerEvent('churn', {
+        user, ip, insertId: `${user.id}-c-${Date.now()}`,
+        props: { plan: normalizePlan(user.plan), interval: user.billing_interval || null, source: 'app' },
+      });
     }
     await updateUser(user.id, { cancel_at_period_end: 1 });
     audit(user.id, user.name, 'cancel_subscription', user.plan, ip);
@@ -8174,6 +8489,8 @@ async function handleRequest(req, res) {
         await insertOAuthUser({ id: newId, name: googleName, email: googleEmail, googleId, createdAt: new Date().toISOString() });
         dbUser = await getUserById(newId);
         audit(newId, googleName, 'register_google', null, ip);
+        void trackServerEvent('signup_completed', { user: dbUser, ip, insertId: `${newId}-signup`, props: { method: 'google' } });
+        mixpanelProfile(dbUser);
       }
 
       await rememberSignupAffiliate(dbUser, oauthState.affiliate);
@@ -8330,6 +8647,8 @@ async function handleRequest(req, res) {
         });
         dbUser = await getUserById(newId);
         audit(newId, githubName, 'register_github', null, ip);
+        void trackServerEvent('signup_completed', { user: dbUser, ip, insertId: `${newId}-signup`, props: { method: 'github' } });
+        mixpanelProfile(dbUser);
       }
 
       await rememberSignupAffiliate(dbUser, oauthState.affiliate);
@@ -8403,6 +8722,14 @@ async function handleRequest(req, res) {
     return json(res, { ...view({ ...user, whop_username: whopUser.username }), whopName: whopUser.name });
   }
 
+  /** In-app page to return to after paying (no open redirects): /start… or /dashboard… only. */
+  const postPaymentUrl = (appUrl, rawReturnPath, fallbackPath) => {
+    const rp = String(rawReturnPath || '');
+    const safe = rp.length <= 400 && /^\/(start|dashboard)(\/[\w\-/]*)?(\?[\w.%=&\-/]*)?$/.test(rp);
+    if (!safe) return `${appUrl}${fallbackPath}`;
+    return `${appUrl}${rp}${rp.includes('?') ? '&' : '?'}whop=success`;
+  };
+
   if (req.method === 'POST' && url.pathname === '/api/payments/whop/checkout') {
     const user = await getSessionUser(req);
     if (!user) return json(res, { error: 'Sign in first.' }, 401);
@@ -8435,7 +8762,7 @@ async function handleRequest(req, res) {
       checkout = await createWhopCheckout({
         planId: whopPlanId(plan, bi),
         metadata: { userId: user.id, plan, interval: bi, email: user.email },
-        redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+        redirectUrl: postPaymentUrl(appUrl, body.returnPath, '/dashboard/billing?whop=success'),
         affiliateCode,
       });
     } catch (err) {
@@ -8466,6 +8793,10 @@ async function handleRequest(req, res) {
     const reason = whopUnavailableReason();
     if (reason) return json(res, { error: reason }, 503);
     if (!planId) return json(res, { error: 'The clone add-on isn’t available right now.', code: 'addon_unavailable' }, 503);
+    // Pro is unlimited: extra clones would be money for nothing.
+    if (normalizePlan(user.plan) === 'unlimited') {
+      return json(res, { error: 'Your Pro plan already includes unlimited website clones.', code: 'addon_not_needed' }, 400);
+    }
     const body = await readJsonBody(req).catch(() => ({}));
     const appUrl = publicAppUrl(req);
     const linkedCode = cleanWhopAffiliateCode(body.affiliate);
@@ -8507,6 +8838,11 @@ async function handleRequest(req, res) {
     if (isPaidPlan(user.plan) && planRank(user.plan) >= planRank('growth')) {
       return json(res, { error: `You're already on ${getPlanLabel(normalizePlan(user.plan))}.`, code: 'already_on_plan' }, 409);
     }
+    // One exit offer per account: a second first-year discount is never sold.
+    const pastPayments = await getPaymentsByUser(user.id).catch(() => []);
+    if (pastPayments.some((p) => p.status === 'confirmed' && /downsell/i.test(String(p.note || '')))) {
+      return json(res, { error: 'This offer has already been used on your account.', code: 'downsell_used' }, 409);
+    }
     const body = await readJsonBody(req).catch(() => ({}));
     const appUrl = publicAppUrl(req);
     const linkedCode = cleanWhopAffiliateCode(body.affiliate);
@@ -8519,7 +8855,7 @@ async function handleRequest(req, res) {
       checkout = await createWhopCheckout({
         planId,
         metadata: { userId: user.id, plan: 'growth', interval: 'annual', offer: 'downsell', email: user.email },
-        redirectUrl: `${appUrl}/dashboard/billing?whop=success`,
+        redirectUrl: postPaymentUrl(appUrl, body.returnPath, '/dashboard/billing?whop=success'),
         affiliateCode,
       });
     } catch (err) {
@@ -8755,7 +9091,7 @@ async function handleRequest(req, res) {
             if (u) {
               await insertPayment({ id: randomUUID(), userId, userName: u.name, userEmail: u.email, plan, amount: (session.amount_total || 0) / 100, currency: (session.currency || 'usd').toUpperCase(), method: 'stripe', txId: session.payment_intent || session.id, note: '', promoCode: null, discountPercent: 0, interval: bi, status: 'confirmed', submittedAt: new Date().toISOString() });
               sendEmail(u.email, `Payment confirmed — ${plan} plan activated`,
-                renderEmail('payment-confirmed', { SUBJECT: `${plan} plan activated`, NAME: u.name, PLAN: plan, AMOUNT: String((session.amount_total || 0) / 100), INTERVAL: bi, RENEWS_AT: renewsAt.toLocaleDateString() })
+                renderEmail('payment-confirmed', { SUBJECT: `${getPlanLabel(plan)} plan activated`, NAME: u.name, PLAN: getPlanLabel(plan), AMOUNT: String((session.amount_total || 0) / 100), INTERVAL: bi, RENEWS_AT: renewsAt.toLocaleDateString() })
               ).catch(() => {});
               audit(userId, u.name, 'stripe_payment_confirmed', `plan=${plan} amount=${(session.amount_total||0)/100}`, null);
             }

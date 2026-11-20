@@ -5,75 +5,21 @@ import { Reveal, SplitHeading } from "@/components/anim";
 import { Cta } from "./cta";
 import { useSignedIn } from "@/hooks/use-auth";
 import { ArrowGlyph } from "./brand";
-/** Backend plan keys for the pricing cards (Pro is "unlimited" internally). */
-const PLAN_KEY: Record<string, string> = {
-  Starter: "starter",
-  Growth: "growth",
-  Pro: "unlimited",
-};
-
-/** First-year billing is 12 months at 45% off. */
-const ANNUAL_RATE = 0.55;
-
-const PLANS = [
-  {
-    name: "Starter",
-    price: 17.99,
+import { PRICING_PLANS, annualPerMonth, annualTotal, type PlanKey } from "@/lib/pricing";
+/** Card copy around the shared pricing table (lib/pricing.ts holds prices and features). */
+const CARD_COPY: Record<PlanKey, { note: string; blurb: string; action: string }> = {
+  starter: {
     note: "≈ 1 coffee per week",
     blurb: "For testing on real projects before committing.",
     action: "Get started",
-    popular: false,
-    features: [
-      "10 Website Clones / Month",
-      "Unlimited Screens",
-      "Code & ZIP Export",
-      "Visual Builder & Editor",
-      "Access to Templates",
-      "Cancel Anytime",
-    ],
-    excluded: ["Figma Export", "Private Support Access"],
   },
-  {
-    name: "Growth",
-    price: 26.99,
+  growth: { note: "", blurb: "For growing teams shipping faster every week.", action: "Start now" },
+  unlimited: {
     note: "",
-    blurb: "For growing teams shipping faster every week.",
+    blurb: "For high-volume cloning across every project.",
     action: "Start now",
-    popular: true,
-    features: [
-      "30 Website Clones / Month",
-      "Unlimited Screens",
-      "Code & ZIP Export",
-      "Visual Builder & Editor",
-      "Access to Templates",
-      "Figma Export",
-      "API Access",
-      "Private Support Access",
-      "Cancel Anytime",
-    ],
-    excluded: [],
   },
-  {
-    name: "Pro",
-    price: 79.99,
-    note: "",
-    blurb: "For high-volume cloning with priority support.",
-    action: "Start now",
-    popular: false,
-    features: [
-      "Unlimited Website Clones",
-      "Unlimited Screens",
-      "Code & ZIP Export",
-      "Figma Export",
-      "Visual Builder & Editor",
-      "Access to Templates",
-      "API Access",
-      "Private Support Access",
-      "Cancel Anytime",
-    ],
-    excluded: [],
-  },
-];
+};
 
 export function Pricing() {
   const { t: tr, language, locale } = useSiteLanguage();
@@ -154,12 +100,14 @@ export function Pricing() {
             animate={light}
             transition={reduced ? { duration: 0 } : { type: "spring", stiffness: 210, damping: 29 }}
           />
-          {PLANS.map((p, i) => (
+          {PRICING_PLANS.map((p, i) => {
+            const copy = CARD_COPY[p.key];
+            return (
             <article
               ref={(el) => {
                 cards.current[i] = el;
               }}
-              key={p.name}
+              key={p.key}
               className={`price-card ${active === i ? "is-lit" : ""}`}
               onMouseEnter={() => setHovered(i)}
               onFocusCapture={() => setFocused(i)}
@@ -188,50 +136,64 @@ export function Pricing() {
                   <ArrowGlyph />
                 </button>
               </h3>
-              <p className="plan-blurb">{tr(p.blurb)}</p>
+              <p className="plan-blurb">{tr(copy.blurb)}</p>
               <div className="plan-price">
+                {yearly && (
+                  <s className="plan-price-was">
+                    {language === "en" && "$"}
+                    {amount(p.monthly)}
+                  </s>
+                )}
                 <span className="text-5xl">
                   {language === "en" && "$"}
-                  {amount(yearly ? p.price * ANNUAL_RATE : p.price)}
+                  {amount(yearly ? annualPerMonth(p.monthly) : p.monthly)}
                 </span>
                 <span>{language === "fr" ? "$US /mois" : "/mo"}</span>
               </div>
               <p className="billing-note">
                 {yearly
                   ? language === "fr"
-                    ? `${amount(p.price * 12 * ANNUAL_RATE)} $US la première année`
-                    : `$${(p.price * 12 * ANNUAL_RATE).toFixed(2)} billed first year`
-                  : tr(p.note || "Billed monthly. Cancel anytime.")}
+                    ? `${amount(annualTotal(p.monthly))} $US facturés par an`
+                    : `${annualTotal(p.monthly).toFixed(2)} billed yearly`
+                  : tr(copy.note || "Billed monthly. Cancel anytime.")}
               </p>
               <Cta
                 size="md"
                 className="plan-cta"
                 variant={active === i ? "solid" : "ghost"}
-                href={`${signedIn ? "/checkout" : language === "fr" ? "/fr/register" : "/register"}?plan=${PLAN_KEY[p.name]}${yearly ? "&interval=annual" : ""}`}
+                href={`${signedIn ? "/checkout" : language === "fr" ? "/fr/register" : "/register"}?plan=${p.key}${yearly ? "&interval=annual" : ""}`}
               >
-                {tr(p.action)}
+                {tr(copy.action)}
                 <ArrowGlyph />
               </Cta>
               <ul>
-                {p.features.map((f) => (
-                  <li key={f}>
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <path d="m3 8 3 3 7-7" stroke="currentColor" strokeWidth="1.3" />
-                    </svg>
-                    {tr(f)}
-                  </li>
-                ))}
-                {p.excluded.map((f) => (
-                  <li key={f} className="plan-feature-excluded">
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.3" />
-                    </svg>
-                    {tr(f)}
-                  </li>
-                ))}
+                {p.features.map((f) =>
+                  f.included ? (
+                    <li key={f.label}>
+                      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="m3 8 3 3 7-7" stroke="currentColor" strokeWidth="1.3" />
+                      </svg>
+                      {tr(f.label)}
+                    </li>
+                  ) : (
+                    <li key={f.label} className="plan-feature-excluded">
+                      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path
+                          d="M4.5 4.5l7 7M11.5 4.5l-7 7"
+                          stroke="currentColor"
+                          strokeWidth="2.4"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                      <span className="sr-only">{tr("Not included:")} </span>
+                      {tr(f.label)}
+                    </li>
+                  ),
+                )}
               </ul>
             </article>
-          ))}
+            );
+          })}
         </div>
         <div className="pricing-bottomnote">
           <span>{tr("$2,000+ average dev cost for one site.")}</span>

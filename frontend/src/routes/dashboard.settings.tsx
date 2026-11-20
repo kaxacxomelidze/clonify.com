@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Bell, Boxes, CreditCard, Github, Users } from "lucide-react";
+import { Bell, Boxes, CreditCard, Github } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError, updateProfile } from "@/lib/api";
 import { toast } from "sonner";
@@ -68,13 +68,6 @@ function SettingsPage() {
           >
             <CreditCard size={16} />
             Billing
-          </Link>
-          <Link
-            to="/dashboard/team"
-            className="flex min-h-11 items-center gap-3 rounded-full px-4 py-3 text-sm text-muted-foreground hover:bg-accent"
-          >
-            <Users size={16} />
-            Members
           </Link>
           <Link
             to="/dashboard/integrations"

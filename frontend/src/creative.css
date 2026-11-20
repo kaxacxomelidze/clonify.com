@@ -564,12 +564,6 @@ a:hover .brand-lockup > svg {
   margin: 23px auto 0;
   max-width: 340px;
 }
-.orbit-price {
-  display: inline-block;
-  font: var(--site-text-label) var(--font-mono);
-  letter-spacing: 0.1em;
-  margin-top: 25px;
-}
 .orbit-pill-field {
   position: absolute;
   inset: 0;
@@ -861,7 +855,14 @@ a:hover .brand-lockup > svg {
   gap: 4px;
   margin-top: 26px;
 }
-.plan-price > span:first-child {
+.plan-price-was {
+  align-self: center;
+  margin-right: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--site-text-small);
+  font-variant-numeric: tabular-nums;
+}
+.plan-price > span:first-of-type {
   font-family: var(--font-display);
   font-size: clamp(40px, 3.8vw, 56px);
   font-weight: 400;
@@ -919,13 +920,12 @@ a:hover .brand-lockup > svg {
   margin-top: 2px;
   color: var(--foreground);
 }
+/* Not included in the plan: a clear red ❌, the label stays readable. */
 .price-card li.plan-feature-excluded {
-  opacity: 0.45;
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
+  color: var(--muted-foreground);
 }
 .price-card li.plan-feature-excluded svg {
-  color: var(--muted-foreground);
+  color: var(--destructive);
 }
 .pricing-bottomnote {
   display: flex;
@@ -1399,7 +1399,7 @@ a:hover .brand-lockup > svg {
   .plan-topline {
     min-height: 23px;
   }
-  .plan-price > span:first-child {
+  .plan-price > span:first-of-type {
     font-size: 50px;
   }
   .plan-blurb {
@@ -1513,11 +1513,12 @@ a:hover .brand-lockup > svg {
   grid-template-columns: 1.03fr 1fr;
   align-items: center;
   gap: 10px;
-  min-height: 712px;
-  padding-block: 65px 70px;
+  /* Fits the viewport so the URL CTA is visible on the first screen of a laptop browser. */
+  min-height: min(712px, calc(100svh - 104px));
+  padding-block: 28px 48px;
 }
 .hero-heading {
-  font-size: clamp(60px, 6.8vw, 104px);
+  font-size: clamp(52px, 5.8vw, 88px);
   line-height: 0.96;
   font-weight: 500;
   letter-spacing: -0.065em;
@@ -1544,7 +1545,7 @@ a:hover .brand-lockup > svg {
 }
 .hero-description {
   max-width: 365px;
-  margin-top: 30px;
+  margin-top: 22px;
   color: var(--muted-foreground);
   font-size: var(--site-text-lead);
   line-height: 1.85;
@@ -1554,7 +1555,7 @@ a:hover .brand-lockup > svg {
   flex-direction: column;
   align-items: flex-start;
   gap: 16px;
-  margin-top: 29px;
+  margin-top: 22px;
 }
 .hero-url-cta {
   width: 100%;
@@ -2395,11 +2396,11 @@ section[id] {
     width: calc(100% - 64px);
   }
   .hero-composition {
-    min-height: 650px;
+    min-height: min(650px, calc(100svh - 104px));
     gap: 30px;
   }
   .hero-heading {
-    font-size: 7vw;
+    font-size: 6.4vw;
   }
   .hero-actions {
     gap: 15px;
@@ -2436,10 +2437,11 @@ section[id] {
   .hero-composition {
     grid-template-columns: 1fr;
     gap: 32px;
-    padding-block: 36px 38px;
+    min-height: 0;
+    padding-block: 24px 32px;
   }
   .hero-heading {
-    font-size: clamp(56px, 13.5vw, 88px);
+    font-size: clamp(44px, 11.5vw, 72px);
     line-height: 0.97;
   }
   .hero-outline-type {

@@ -28,15 +28,10 @@ import { Route as DashboardActivityRouteImport } from './routes/dashboard.activi
 import { Route as DashboardAffiliatesRouteImport } from './routes/dashboard.affiliates'
 import { Route as DashboardAnalyticsRouteImport } from './routes/dashboard.analytics'
 import { Route as DashboardBillingRouteImport } from './routes/dashboard.billing'
-import { Route as DashboardCalendarRouteImport } from './routes/dashboard.calendar'
-import { Route as DashboardDocumentsRouteImport } from './routes/dashboard.documents'
 import { Route as DashboardEditorRouteImport } from './routes/dashboard.editor'
 import { Route as DashboardIntegrationsRouteImport } from './routes/dashboard.integrations'
-import { Route as DashboardLibraryRouteImport } from './routes/dashboard.library'
 import { Route as DashboardOverviewRouteImport } from './routes/dashboard.overview'
 import { Route as DashboardSettingsRouteImport } from './routes/dashboard.settings'
-import { Route as DashboardTasksRouteImport } from './routes/dashboard.tasks'
-import { Route as DashboardTeamRouteImport } from './routes/dashboard.team'
 import { Route as FrIndexRouteImport } from './routes/fr.index'
 import { Route as FrLoginRouteImport } from './routes/fr.login'
 import { Route as FrRegisterRouteImport } from './routes/fr.register'
@@ -136,16 +131,6 @@ const DashboardBillingRoute = DashboardBillingRouteImport.update({
   path: '/billing',
   getParentRoute: () => DashboardRoute,
 } as any)
-const DashboardCalendarRoute = DashboardCalendarRouteImport.update({
-  id: '/calendar',
-  path: '/calendar',
-  getParentRoute: () => DashboardRoute,
-} as any)
-const DashboardDocumentsRoute = DashboardDocumentsRouteImport.update({
-  id: '/documents',
-  path: '/documents',
-  getParentRoute: () => DashboardRoute,
-} as any)
 const DashboardEditorRoute = DashboardEditorRouteImport.update({
   id: '/editor',
   path: '/editor',
@@ -156,11 +141,6 @@ const DashboardIntegrationsRoute = DashboardIntegrationsRouteImport.update({
   path: '/integrations',
   getParentRoute: () => DashboardRoute,
 } as any)
-const DashboardLibraryRoute = DashboardLibraryRouteImport.update({
-  id: '/library',
-  path: '/library',
-  getParentRoute: () => DashboardRoute,
-} as any)
 const DashboardOverviewRoute = DashboardOverviewRouteImport.update({
   id: '/overview',
   path: '/overview',
@@ -169,16 +149,6 @@ const DashboardOverviewRoute = DashboardOverviewRouteImport.update({
 const DashboardSettingsRoute = DashboardSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
-  getParentRoute: () => DashboardRoute,
-} as any)
-const DashboardTasksRoute = DashboardTasksRouteImport.update({
-  id: '/tasks',
-  path: '/tasks',
-  getParentRoute: () => DashboardRoute,
-} as any)
-const DashboardTeamRoute = DashboardTeamRouteImport.update({
-  id: '/team',
-  path: '/team',
   getParentRoute: () => DashboardRoute,
 } as any)
 const FrIndexRoute = FrIndexRouteImport.update({
@@ -216,15 +186,10 @@ export interface FileRoutesByFullPath {
   '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
-  '/dashboard/calendar': typeof DashboardCalendarRoute
-  '/dashboard/documents': typeof DashboardDocumentsRoute
   '/dashboard/editor': typeof DashboardEditorRoute
   '/dashboard/integrations': typeof DashboardIntegrationsRoute
-  '/dashboard/library': typeof DashboardLibraryRoute
   '/dashboard/overview': typeof DashboardOverviewRoute
   '/dashboard/settings': typeof DashboardSettingsRoute
-  '/dashboard/tasks': typeof DashboardTasksRoute
-  '/dashboard/team': typeof DashboardTeamRoute
   '/fr/login': typeof FrLoginRoute
   '/fr/register': typeof FrRegisterRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -247,15 +212,10 @@ export interface FileRoutesByTo {
   '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
-  '/dashboard/calendar': typeof DashboardCalendarRoute
-  '/dashboard/documents': typeof DashboardDocumentsRoute
   '/dashboard/editor': typeof DashboardEditorRoute
   '/dashboard/integrations': typeof DashboardIntegrationsRoute
-  '/dashboard/library': typeof DashboardLibraryRoute
   '/dashboard/overview': typeof DashboardOverviewRoute
   '/dashboard/settings': typeof DashboardSettingsRoute
-  '/dashboard/tasks': typeof DashboardTasksRoute
-  '/dashboard/team': typeof DashboardTeamRoute
   '/fr/login': typeof FrLoginRoute
   '/fr/register': typeof FrRegisterRoute
   '/dashboard': typeof DashboardIndexRoute
@@ -281,15 +241,10 @@ export interface FileRoutesById {
   '/dashboard/affiliates': typeof DashboardAffiliatesRoute
   '/dashboard/analytics': typeof DashboardAnalyticsRoute
   '/dashboard/billing': typeof DashboardBillingRoute
-  '/dashboard/calendar': typeof DashboardCalendarRoute
-  '/dashboard/documents': typeof DashboardDocumentsRoute
   '/dashboard/editor': typeof DashboardEditorRoute
   '/dashboard/integrations': typeof DashboardIntegrationsRoute
-  '/dashboard/library': typeof DashboardLibraryRoute
   '/dashboard/overview': typeof DashboardOverviewRoute
   '/dashboard/settings': typeof DashboardSettingsRoute
-  '/dashboard/tasks': typeof DashboardTasksRoute
-  '/dashboard/team': typeof DashboardTeamRoute
   '/fr/login': typeof FrLoginRoute
   '/fr/register': typeof FrRegisterRoute
   '/dashboard/': typeof DashboardIndexRoute
@@ -316,15 +271,10 @@ export interface FileRouteTypes {
     | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
-    | '/dashboard/calendar'
-    | '/dashboard/documents'
     | '/dashboard/editor'
     | '/dashboard/integrations'
-    | '/dashboard/library'
     | '/dashboard/overview'
     | '/dashboard/settings'
-    | '/dashboard/tasks'
-    | '/dashboard/team'
     | '/fr/login'
     | '/fr/register'
     | '/dashboard/'
@@ -347,15 +297,10 @@ export interface FileRouteTypes {
     | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
-    | '/dashboard/calendar'
-    | '/dashboard/documents'
     | '/dashboard/editor'
     | '/dashboard/integrations'
-    | '/dashboard/library'
     | '/dashboard/overview'
     | '/dashboard/settings'
-    | '/dashboard/tasks'
-    | '/dashboard/team'
     | '/fr/login'
     | '/fr/register'
     | '/dashboard'
@@ -380,15 +325,10 @@ export interface FileRouteTypes {
     | '/dashboard/affiliates'
     | '/dashboard/analytics'
     | '/dashboard/billing'
-    | '/dashboard/calendar'
-    | '/dashboard/documents'
     | '/dashboard/editor'
     | '/dashboard/integrations'
-    | '/dashboard/library'
     | '/dashboard/overview'
     | '/dashboard/settings'
-    | '/dashboard/tasks'
-    | '/dashboard/team'
     | '/fr/login'
     | '/fr/register'
     | '/dashboard/'
@@ -547,20 +487,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardBillingRouteImport
       parentRoute: typeof DashboardRoute
     }
-    '/dashboard/calendar': {
-      id: '/dashboard/calendar'
-      path: '/calendar'
-      fullPath: '/dashboard/calendar'
-      preLoaderRoute: typeof DashboardCalendarRouteImport
-      parentRoute: typeof DashboardRoute
-    }
-    '/dashboard/documents': {
-      id: '/dashboard/documents'
-      path: '/documents'
-      fullPath: '/dashboard/documents'
-      preLoaderRoute: typeof DashboardDocumentsRouteImport
-      parentRoute: typeof DashboardRoute
-    }
     '/dashboard/editor': {
       id: '/dashboard/editor'
       path: '/editor'
@@ -575,13 +501,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardIntegrationsRouteImport
       parentRoute: typeof DashboardRoute
     }
-    '/dashboard/library': {
-      id: '/dashboard/library'
-      path: '/library'
-      fullPath: '/dashboard/library'
-      preLoaderRoute: typeof DashboardLibraryRouteImport
-      parentRoute: typeof DashboardRoute
-    }
     '/dashboard/overview': {
       id: '/dashboard/overview'
       path: '/overview'
@@ -594,20 +513,6 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/dashboard/settings'
       preLoaderRoute: typeof DashboardSettingsRouteImport
-      parentRoute: typeof DashboardRoute
-    }
-    '/dashboard/tasks': {
-      id: '/dashboard/tasks'
-      path: '/tasks'
-      fullPath: '/dashboard/tasks'
-      preLoaderRoute: typeof DashboardTasksRouteImport
-      parentRoute: typeof DashboardRoute
-    }
-    '/dashboard/team': {
-      id: '/dashboard/team'
-      path: '/team'
-      fullPath: '/dashboard/team'
-      preLoaderRoute: typeof DashboardTeamRouteImport
       parentRoute: typeof DashboardRoute
     }
     '/fr/': {
@@ -639,15 +544,10 @@ interface DashboardRouteChildren {
   DashboardAffiliatesRoute: typeof DashboardAffiliatesRoute
   DashboardAnalyticsRoute: typeof DashboardAnalyticsRoute
   DashboardBillingRoute: typeof DashboardBillingRoute
-  DashboardCalendarRoute: typeof DashboardCalendarRoute
-  DashboardDocumentsRoute: typeof DashboardDocumentsRoute
   DashboardEditorRoute: typeof DashboardEditorRoute
   DashboardIntegrationsRoute: typeof DashboardIntegrationsRoute
-  DashboardLibraryRoute: typeof DashboardLibraryRoute
   DashboardOverviewRoute: typeof DashboardOverviewRoute
   DashboardSettingsRoute: typeof DashboardSettingsRoute
-  DashboardTasksRoute: typeof DashboardTasksRoute
-  DashboardTeamRoute: typeof DashboardTeamRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
 }
 
@@ -656,15 +556,10 @@ const DashboardRouteChildren: DashboardRouteChildren = {
   DashboardAffiliatesRoute: DashboardAffiliatesRoute,
   DashboardAnalyticsRoute: DashboardAnalyticsRoute,
   DashboardBillingRoute: DashboardBillingRoute,
-  DashboardCalendarRoute: DashboardCalendarRoute,
-  DashboardDocumentsRoute: DashboardDocumentsRoute,
   DashboardEditorRoute: DashboardEditorRoute,
   DashboardIntegrationsRoute: DashboardIntegrationsRoute,
-  DashboardLibraryRoute: DashboardLibraryRoute,
   DashboardOverviewRoute: DashboardOverviewRoute,
   DashboardSettingsRoute: DashboardSettingsRoute,
-  DashboardTasksRoute: DashboardTasksRoute,
-  DashboardTeamRoute: DashboardTeamRoute,
   DashboardIndexRoute: DashboardIndexRoute,
 }
 

@@ -44,18 +44,15 @@ export const frenchCopy: Record<string, string> = {
   "You need Clonyfy.": "Passez à Clonyfy.",
   "We are not building a website builder. We are building a website production accelerator that integrates into existing workflows and reduces site creation from days to minutes.":
     "Clonyfy accélère la création de vos sites et s’intègre à votre façon de travailler. Partez d’une base concrète et passez de l’idée au résultat en quelques minutes au lieu de plusieurs jours.",
-  "GET YOURS FOR JUST $19.99 ↗": "DÈS 19,99 $US PAR MOIS ↗",
   "Clonyfy in numbers": "Clonyfy en chiffres",
   "A LITTLE PROOF. A LOT OF POSSIBILITY.": "DES RÉSULTATS QUI PARLENT D’EUX-MÊMES.",
   "Websites cloned with Clonyfy": "Sites clonés avec Clonyfy",
   "Avg. clone time": "Temps moyen",
   "Accuracy rate": "Fidélité",
   "Active Users": "Utilisateurs actifs",
-  "User Rating": "Note des utilisateurs",
   "2min": "2 min",
   "99.2%": "99,2 %",
   "+9,000": "+9 000",
-  "4.9/5": "4,9/5",
   "02 / A BETTER STARTING POINT": "02 / PARTEZ SUR DE BONNES BASES",
   "Stop doing it": "Simplifiez-vous",
   "the hard way.": "la création.",
@@ -183,8 +180,8 @@ export const frenchCopy: Record<string, string> = {
   "The visual editor lets you modify any page directly in the browser.":
     "L’éditeur visuel vous permet de modifier chaque page directement dans le navigateur.",
   "Figma file included.": "Fichier Figma inclus.",
-  "Every clone generates a ready-to-share Figma file.":
-    "Chaque site cloné génère un fichier Figma prêt à être partagé.",
+  "Every Growth and Pro clone exports to a ready-to-share Figma file.":
+    "Avec Growth et Pro, chaque site cloné s’exporte en fichier Figma prêt à partager.",
   "Deploy in 1 click.": "Publiez en un clic.",
   "Next.js 14, Dockerfile included. Vercel, Netlify, Railway, your own VPS — ready to ship in 2 minutes.":
     "Next.js 14 et Dockerfile inclus. Vercel, Netlify, Railway ou votre propre VPS : prêt à publier en deux minutes.",
@@ -208,7 +205,6 @@ export const frenchCopy: Record<string, string> = {
   "everywhere.": "Partout dans le monde.",
   "9,000+ developers and designers trust Clonyfy for rapid prototyping and production deployments.":
     "Plus de 9 000 développeurs et designers font confiance à Clonyfy pour créer leurs prototypes et mettre leurs sites en ligne plus rapidement.",
-  "4.9 / 5 USER RATING": "4,9 / 5 — NOTE DES UTILISATEURS",
   "Previous testimonial": "Témoignage précédent",
   "Next testimonial": "Témoignage suivant",
   "Clonyfy saved us 3 weeks of work. We cloned a competitor's pricing page, tweaked it to match our brand, and shipped the same day. Insane ROI.":
@@ -244,6 +240,7 @@ export const frenchCopy: Record<string, string> = {
   "45% less with yearly billing.": "Économisez 45 % avec l’abonnement annuel.",
   "/ YOUR NEXT CHAPTER": "/ VOTRE PROCHAINE ÉTAPE",
   "Most popular": "Le plus choisi",
+  "Not included:": "Non inclus :",
   Starter: "Starter",
   Growth: "Growth",
   Pro: "Pro",
@@ -321,6 +318,9 @@ export const frenchCopy: Record<string, string> = {
   "We sent a 6-digit code to": "Nous avons envoyé un code à 6 chiffres à",
   "Enter it to finish creating your account.":
     "Saisissez-le pour finaliser la création de votre compte.",
+  "Enter it to log in. It keeps bots out of your account.":
+    "Saisissez-le pour vous connecter. Il protège votre compte des robots.",
+  "Use a different account": "Utiliser un autre compte",
   "A new code is on its way.": "Un nouveau code arrive.",
   "Couldn't resend right now. Try again shortly.":
     "Impossible de renvoyer pour l’instant. Réessayez bientôt.",

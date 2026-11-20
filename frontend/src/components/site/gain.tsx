@@ -13,7 +13,7 @@ const GAINS = [
   },
   {
     head: "Figma file included.",
-    body: "Every clone generates a ready-to-share Figma file.",
+    body: "Every Growth and Pro clone exports to a ready-to-share Figma file.",
   },
   {
     head: "Deploy in 1 click.",

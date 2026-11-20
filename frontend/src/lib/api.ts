@@ -315,13 +315,20 @@ function getAnonId(): string {
   }
 }
 
+/**
+ * Funnel events sent from the browser (the client's list): landing_view → signup_view →
+ * onboarding_started → onboarding_completed → paywall_viewed → purchase_view →
+ * checkout_started. signup_completed, purchase_completed (confirmed by Whop) and churn are
+ * recorded by the backend itself. The backend stores every event and relays it to Mixpanel.
+ */
 export type FunnelEvent =
   | "landing_view"
   | "signup_view"
-  | "onboarding"
-  | "paywall_view"
+  | "onboarding_started"
+  | "onboarding_completed"
+  | "paywall_viewed"
   | "purchase_view"
-  | "churn";
+  | "checkout_started";
 
 const trackedOnce = new Set<string>();
 
@@ -335,10 +342,6 @@ export function track(event: FunnelEvent, props?: Record<string, unknown>, once 
       if (trackedOnce.has(event)) return;
       trackedOnce.add(event);
     }
-    mixpanelTrack(event, {
-      ...(props || {}),
-      path: typeof location !== "undefined" ? location.pathname : undefined,
-    });
     void apiFetch("/api/track", {
       method: "POST",
       body: {
@@ -387,6 +390,13 @@ export type AdminStats = {
   starterUsers: number;
   growthUsers: number;
   unlimitedUsers: number;
+  annualSubscribers?: number;
+  cancellationsScheduled?: number;
+  addonSales?: number;
+  downsellSales?: number;
+  purchases30d?: number;
+  churn30d?: number;
+  subscriptionsEnded30d?: number;
 };
 export type FunnelRow = { name: string; total: number; uniques: number };
 
@@ -408,10 +418,73 @@ export async function fetchAdminStats() {
 }
 
 export async function fetchAdminFunnel(days = 30) {
-  return apiFetch<{ days: number; since: string; funnel: FunnelRow[] }>(
+  return apiFetch<{ days: number; since: string; funnel: FunnelRow[]; retention?: FunnelRow[] }>(
     `/api/admin/analytics/funnel?days=${days}`,
     { auth: false, headers: { "X-Admin-Token": getAdminToken() } },
   );
+}
+
+export type AdminUserRow = {
+  id: string;
+  name: string;
+  email: string;
+  plan: string;
+  planLabel: string;
+  planRenewsAt: string | null;
+  billingInterval: string;
+  blocked: boolean;
+  createdAt: string;
+  cloneCount: number;
+  lastCloneAt: string | null;
+};
+export type AdminPaymentRow = {
+  id: string;
+  userName: string;
+  userEmail: string;
+  plan: string;
+  interval: string;
+  amount: number;
+  currency: string;
+  method: string;
+  txId: string | null;
+  note: string | null;
+  status: string;
+  submittedAt: string;
+  processedAt: string | null;
+};
+export type AdminCloneRow = {
+  id: string;
+  userName: string;
+  url: string;
+  status: string;
+  pages: number;
+  assets: number;
+  startedAt: string;
+  completedAt: string | null;
+};
+export type AdminErrorRow = {
+  id: string;
+  userName: string;
+  url: string;
+  errorSummary: string;
+  failedAt: string;
+};
+
+/** Admin lists (users, payments, clones, errors): one page plus the total. */
+export async function fetchAdminList<T>(
+  kind: "users" | "payments" | "clones" | "errors",
+  params: Record<string, string | number> = {},
+) {
+  const qs = new URLSearchParams(
+    Object.entries(params)
+      .filter(([, v]) => v !== "" && v !== undefined)
+      .map(([k, v]) => [k, String(v)]),
+  ).toString();
+  const data = await apiFetch<{ users?: T[]; items?: T[]; total: number; page: number; pageSize: number }>(
+    `/api/admin/${kind}${qs ? `?${qs}` : ""}`,
+    { auth: false, headers: { "X-Admin-Token": getAdminToken() } },
+  );
+  return { rows: (data.users || data.items || []) as T[], total: data.total, page: data.page, pageSize: data.pageSize };
 }
 
 /** Cloudflare Turnstile config for the auth forms; sitekey is "" when CAPTCHA is off. */
@@ -429,12 +502,34 @@ export async function loginRequest(
   turnstileToken = "",
 ) {
   await ensureApiAwake({ attempts: 10, timeoutMs: 15_000 }).catch(() => {});
-  return apiFetch<AuthSession>("/api/auth/login", {
+  return apiFetch<LoginResult>("/api/auth/login", {
     method: "POST",
     auth: false,
     body: { email, password, remember, turnstileToken },
     timeoutMs: 120_000,
     retries: 3,
+  });
+}
+
+/** Login returns a session, or { needsCode, challenge } when a login code was emailed. */
+export type LoginResult = AuthSession | { needsCode: true; email: string; challenge: string };
+
+/** The 6-digit login code (anti-bot) → session. */
+export async function loginVerifyRequest(challenge: string, code: string) {
+  return apiFetch<AuthSession>("/api/auth/login/verify", {
+    method: "POST",
+    auth: false,
+    body: { challenge, code },
+    timeoutMs: 60_000,
+  });
+}
+
+/** A new login code for the same attempt (the server allows one every 60 seconds). */
+export async function loginResendRequest(challenge: string) {
+  return apiFetch<{ ok: boolean }>("/api/auth/login/resend", {
+    method: "POST",
+    auth: false,
+    body: { challenge },
   });
 }
 
@@ -636,10 +731,18 @@ export async function fetchBillingHistory() {
   return apiFetch<{ payments: Array<Record<string, unknown>> }>("/api/user/billing");
 }
 
-export async function startWhopCheckout(plan: string, interval: "monthly" | "annual" = "monthly") {
+/**
+ * Starts a Whop checkout. `returnPath` (an in-app path such as the user's clone in the
+ * onboarding) is where Whop sends the buyer back to after paying.
+ */
+export async function startWhopCheckout(
+  plan: string,
+  interval: "monthly" | "annual" = "monthly",
+  returnPath?: string,
+) {
   return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/checkout", {
     method: "POST",
-    body: { plan, interval, affiliate: getAffiliateCode() },
+    body: { plan, interval, affiliate: getAffiliateCode(), ...(returnPath ? { returnPath } : {}) },
   });
 }
 
@@ -656,10 +759,10 @@ export async function startWhopAddon() {
 }
 
 /** Exit-intent downsell: Growth, first year 50% off then renews at the standard annual price. */
-export async function startWhopDownsell() {
+export async function startWhopDownsell(returnPath?: string) {
   return apiFetch<{ url: string; checkoutId?: string }>("/api/payments/whop/downsell", {
     method: "POST",
-    body: { affiliate: getAffiliateCode() },
+    body: { affiliate: getAffiliateCode(), ...(returnPath ? { returnPath } : {}) },
   });
 }
 
@@ -973,51 +1076,31 @@ export type FigmaScene = {
   [key: string]: unknown;
 };
 
+export type PublicConfig = {
+  figma_community_plugin_url?: string;
+  google_oauth_enabled?: boolean;
+  github_oauth_enabled?: boolean;
+  affiliate_commission?: string;
+  email_enabled?: boolean;
+  mixpanel_token?: string;
+  /** The hard paywall's exit offer (Growth, 50% off the first year) can be bought. */
+  downsell_enabled?: boolean;
+};
+
 export async function fetchPublicConfig() {
-  return apiFetch<{
-    figma_community_plugin_url?: string;
-    google_oauth_enabled?: boolean;
-    github_oauth_enabled?: boolean;
-    affiliate_commission?: string;
-    email_enabled?: boolean;
-    mixpanel_token?: string;
-  }>("/api/public-config", { auth: false });
+  return apiFetch<PublicConfig>("/api/public-config", { auth: false });
 }
 
-let mpTokenPromise: Promise<string> | null = null;
-function getMixpanelToken(): Promise<string> {
-  if (!mpTokenPromise) {
-    mpTokenPromise = fetchPublicConfig()
-      .then((c) => c?.mixpanel_token || "")
-      .catch(() => "");
+let publicConfigPromise: Promise<PublicConfig> | null = null;
+/** The public config, fetched once per page load (never rejects). */
+export function getPublicConfig(): Promise<PublicConfig> {
+  if (!publicConfigPromise) {
+    publicConfigPromise = fetchPublicConfig().catch(() => {
+      publicConfigPromise = null; // retry on the next call
+      return {} as PublicConfig;
+    });
   }
-  return mpTokenPromise;
-}
-
-/** Sends one event to Mixpanel's HTTP API (no SDK). No-op when no token is configured. */
-function mixpanelTrack(event: string, props: Record<string, unknown>) {
-  void getMixpanelToken().then((token) => {
-    if (!token || typeof fetch === "undefined") return;
-    try {
-      const payload = {
-        event,
-        properties: {
-          token,
-          distinct_id: getAnonId(),
-          time: Math.floor(Date.now() / 1000),
-          ...props,
-        },
-      };
-      const data = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
-      void fetch(`https://api.mixpanel.com/track?ip=1&data=${encodeURIComponent(data)}`, {
-        method: "POST",
-        mode: "no-cors",
-        keepalive: true,
-      }).catch(() => {});
-    } catch {
-      /* analytics must never break the app */
-    }
-  });
+  return publicConfigPromise;
 }
 
 /** Resolve Scene Graph for Figma Desktop plugin (clipboard import). */
