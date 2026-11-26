@@ -221,6 +221,13 @@
   padding: 20px;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* No grey scrollbar line down the sidebar (client feedback). The History list still
+     scrolls with the wheel, trackpad, touch and keyboard; the cut-off item at the bottom
+     shows there is more. */
+  scrollbar-width: none;
+}
+.dashboard-sidebar-body::-webkit-scrollbar {
+  display: none;
 }
 .dashboard-sidebar nav {
   flex-shrink: 0;

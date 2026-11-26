@@ -1823,6 +1823,33 @@ function animationRuntime() {
       return Math.max(0, Math.min(1, (vh - rect.top) / Math.max(1, vh + rect.height)));
     }
 
+    // One-shot changes ("once" tracks). Keyframe positions come from coarse scroll steps:
+    // for a small element they are often just 0 (below the viewport) and 1 (above it), so
+    // latching at the last keyframe kept the start state for the whole time it was on
+    // screen. Reveals now latch once the element is a quarter of the way in.
+    var ONCE_LATCH = 0.25;
+    // A one-shot change that ENDS hidden is an element swapped out during capture by the
+    // site's own timer (Stripe's payment card: "Order summary" → "Thank you" screens stacked
+    // on each other) — not a scroll effect. Show the end state at once, or both overlap.
+    var HIDDEN_STYLE = /(?:^|;)\s*(?:opacity\s*:\s*0(?:\.0+)?\s*(?:;|$|!)|visibility\s*:\s*hidden|display\s*:\s*none)/i;
+    function onceHides(track) {
+      if (track.n !== 'style') return false;
+      var last = track.k[track.k.length - 1][1];
+      var first = track.k[0][1];
+      return typeof last === 'string' && HIDDEN_STYLE.test(last)
+        && !(typeof first === 'string' && HIDDEN_STYLE.test(first));
+    }
+
+    // The capture's rescue stylesheet forces any inline "opacity: 0" back to visible
+    // (`[style*="opacity: 0"] { opacity: 1 !important }`) so content stuck mid-entrance
+    // shows. For elements this replay drives, a hidden step is real (a fade-out, the
+    // inactive screen of a stacked card) — mark it !important inline so it wins.
+    function enforceHidden(v) {
+      return v
+        .replace(/(opacity\s*:\s*0(?:\.0+)?)\s*(?=;|$)/gi, '$1 !important')
+        .replace(/(visibility\s*:\s*hidden)\s*(?=;|$)/gi, '$1 !important');
+    }
+
     var queued = false;
     function apply() {
       queued = false;
@@ -1839,11 +1866,12 @@ function animationRuntime() {
         var v;
         if (track.once) {
           var end = track.k[track.k.length - 1];
-          if (!track.latched && p >= end[0]) track.latched = true;
+          if (!track.latched && (onceHides(track) || p >= Math.min(end[0], ONCE_LATCH))) track.latched = true;
           v = track.latched ? end[1] : track.k[0][1];
         } else {
           v = valueAt(track, p);
         }
+        if (track.n === 'style' && typeof v === 'string') v = enforceHidden(v);
         var target = track.el;
         if (track.r >= 0) {
           var owner = regionByIndex[track.r];

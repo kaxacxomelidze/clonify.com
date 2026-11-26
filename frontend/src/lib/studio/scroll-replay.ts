@@ -41,6 +41,37 @@ type Timeline = {
 };
 
 type Track = TrackData & { src: TrackData; el: Element | null; latched: boolean; lerp: boolean };
+
+/**
+ * One-shot ("once") changes, same rules as the preview runtime. Keyframe positions come from
+ * coarse scroll steps — often just 0 and 1 for a small element — so latching at the last one
+ * kept the start state while the element was on screen. Reveals latch a quarter of the way
+ * in; a change that ENDS hidden is an element the site's timer swapped out during capture
+ * (Stripe's payment card screens), so its end state applies at once instead of overlapping.
+ */
+const ONCE_LATCH = 0.25;
+const HIDDEN_STYLE =
+  /(?:^|;)\s*(?:opacity\s*:\s*0(?:\.0+)?\s*(?:;|$|!)|visibility\s*:\s*hidden|display\s*:\s*none)/i;
+/**
+ * The capture's rescue stylesheet forces inline "opacity: 0" back to visible (for content
+ * stuck mid-entrance). For elements this replay drives a hidden step is real (a fade-out,
+ * a stacked card's inactive screen), so it is marked !important inline to win.
+ */
+function enforceHidden(v: string): string {
+  return v
+    .replace(/(opacity\s*:\s*0(?:\.0+)?)\s*(?=;|$)/gi, "$1 !important")
+    .replace(/(visibility\s*:\s*hidden)\s*(?=;|$)/gi, "$1 !important");
+}
+function onceHides(t: TrackData): boolean {
+  if (t.n !== "style") return false;
+  const last = t.k[t.k.length - 1]?.[1];
+  const first = t.k[0]?.[1];
+  return (
+    typeof last === "string" &&
+    HIDDEN_STYLE.test(last) &&
+    !(typeof first === "string" && HIDDEN_STYLE.test(first))
+  );
+}
 type Region = {
   data: RegionData;
   index: number;
@@ -284,9 +315,10 @@ export function startScrollReplay(
       let v: string | null;
       if (t.once) {
         const end = t.k[t.k.length - 1]!;
-        if (!t.latched && p >= end[0]) t.latched = true;
+        if (!t.latched && (onceHides(t) || p >= Math.min(end[0], ONCE_LATCH))) t.latched = true;
         v = t.latched ? end[1] : t.k[0]![1];
       } else v = valueAt(t, p);
+      if (t.n === "style" && typeof v === "string") v = enforceHidden(v);
       const target = targetOf(t);
       if (!target || target.getAttribute(t.n) === v) continue;
       try {

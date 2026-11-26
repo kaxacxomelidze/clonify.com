@@ -36,7 +36,7 @@ export function Navbar() {
       <div
         className={cn(
           "mx-auto flex max-w-7xl items-center justify-between px-5 transition-all duration-700 [transition-timing-function:cubic-bezier(0.16,1,0.3,1)]",
-          scrolled ? "mt-3 rounded-full py-2.5 glass md:px-6" : "mt-0 py-5",
+          scrolled ? "mt-3 rounded-full py-2.5 glass-nav md:px-6" : "mt-0 py-5",
         )}
         style={scrolled ? { maxWidth: "72rem" } : undefined}
       >
@@ -106,7 +106,7 @@ export function Navbar() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -12 }}
             transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-            className="mx-4 mt-2 overflow-hidden rounded-3xl glass p-5 lg:hidden"
+            className="mx-4 mt-2 overflow-hidden rounded-3xl glass-nav p-5 lg:hidden"
           >
             <div className="flex flex-col gap-1">
               {LINKS.map((l, i) => (

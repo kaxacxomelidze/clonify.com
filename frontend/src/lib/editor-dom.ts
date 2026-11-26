@@ -491,11 +491,30 @@ function isRendered(el: Element) {
  * are unwrapped until a container with several rendered children is reached;
  * <main> is expanded one level so its sections appear individually.
  */
+/**
+ * Children that take part in layout. A `display: contents` wrapper (React fragments,
+ * Radix slots — lovable.dev wraps its whole page in one) has no box of its own, so it
+ * measured 0×0 and everything inside it was skipped ("0 sections"). Its children stand
+ * in for it instead.
+ */
+function layoutChildren(parent: Element, depth = 0): Element[] {
+  const view = parent.ownerDocument.defaultView;
+  const out: Element[] = [];
+  for (const child of Array.from(parent.children)) {
+    if (depth < 6 && view && view.getComputedStyle(child).display === "contents") {
+      out.push(...layoutChildren(child, depth + 1));
+    } else {
+      out.push(child);
+    }
+  }
+  return out;
+}
+
 export function listSections(doc: Document): PageSection[] {
   const body = doc.body;
   if (!body) return [];
   const rendered = (parent: Element) =>
-    Array.from(parent.children).filter(
+    layoutChildren(parent).filter(
       (c) =>
         isSelectable(c) && !c.matches("script,style,link,meta,noscript,template") && isRendered(c),
     ) as HTMLElement[];
@@ -503,6 +522,11 @@ export function listSections(doc: Document): PageSection[] {
   // Unwrap framework wrappers (#__next > div > …). A wrapper is followed even when
   // small siblings sit next to it (an inserted icon, a cookie banner, a portal):
   // it only has to hold nearly all of the page's height.
+  // The site header/footer can sit beside the wrapper being unwrapped (a fixed header next
+  // to the page body): keep them, in page order, around the sections found inside.
+  const LANDMARK = /^(HEADER|NAV|FOOTER)$/;
+  const keepBefore: HTMLElement[] = [];
+  const keepAfter: HTMLElement[] = [];
   let root: Element = body;
   for (let i = 0; i < 8; i++) {
     const kids = rendered(root);
@@ -510,14 +534,26 @@ export function listSections(doc: Document): PageSection[] {
     const total = heights.reduce((a, b) => a + b, 0) || 1;
     const idx = heights.findIndex((h) => h / total >= 0.85);
     const only = kids.length === 1 ? kids[0] : idx >= 0 ? kids[idx] : undefined;
-    if (!only || /^(HEADER|NAV|FOOTER)$/.test(only.tagName)) break;
+    if (!only || LANDMARK.test(only.tagName)) break;
     if (kids.length > 1 && only.children.length < 2) break;
+    const at = kids.indexOf(only);
+    kids.forEach((k, n) => {
+      if (k !== only && LANDMARK.test(k.tagName)) (n < at ? keepBefore : keepAfter).push(k);
+    });
     root = only;
   }
 
+  // <main> lists its sections individually — through single-child wrappers inside it.
+  const sectionsOf = (main: Element) => {
+    let inner = rendered(main);
+    for (let i = 0; i < 4 && inner.length === 1 && inner[0]; i++) inner = rendered(inner[0]);
+    return inner;
+  };
+
   const out: PageSection[] = [];
-  for (const el of rendered(root)) {
-    const children = el.tagName === "MAIN" ? rendered(el) : [];
+  const top = [...keepBefore, ...rendered(root), ...keepAfter.reverse()];
+  for (const el of top) {
+    const children = el.tagName === "MAIN" ? sectionsOf(el) : [];
     if (children.length > 1) {
       for (const child of children) {
         out.push({
