@@ -74,14 +74,15 @@ function Sidebar({
         ))}
       </nav>
       <section>
-        <h2 className="eyebrow mb-3">History</h2>
+        {/* Text lines up with the nav icons above (px-4), boxes with the nav pills. */}
+        <h2 className="eyebrow mb-3 px-4">History</h2>
         <CaptureSearch value={query} onChange={setQuery} label="Filter clones" />
         <ul className="mt-3 space-y-1">
           {list.map((job) => (
             <li key={job.id}>
               <button
                 onClick={() => onSelect(job)}
-                className="flex w-full flex-col gap-1 rounded-2xl px-3 py-3 text-left hover:bg-accent/60"
+                className="flex w-full flex-col gap-1 rounded-2xl px-4 py-3 text-left hover:bg-accent/60"
               >
                 <span className="block w-full truncate text-sm">{job.domain}</span>
                 <CaptureStatus status={job.status} />
@@ -89,7 +90,7 @@ function Sidebar({
             </li>
           ))}
           {!list.length && (
-            <li className="px-3 py-4 text-xs text-muted-foreground">No clones match.</li>
+            <li className="px-4 py-4 text-xs text-muted-foreground">No clones match.</li>
           )}
         </ul>
       </section>

@@ -161,6 +161,14 @@
   border: 1px solid var(--hairline);
 }
 
+/* The landing header: denser glass so it stays dark and readable when it passes over the
+   light "What you actually gain" section (62% let the white through and greyed it out). */
+@utility glass-nav {
+  background-color: color-mix(in oklab, var(--background) 90%, transparent);
+  backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid var(--hairline);
+}
+
 @utility eyebrow {
   font-family: var(--font-mono);
   font-size: 0.7rem;
