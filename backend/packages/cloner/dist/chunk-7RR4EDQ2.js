@@ -1247,6 +1247,24 @@ function normalizeAllMotionStacksInDocument() {
         return text.length >= 2 && text.length <= 180;
       });
       if (phraseRoots.length < 2) return;
+      {
+        const shown = phraseRoots.filter((el) => el.getClientRects().length > 0);
+        if (shown.length < 2) return;
+        const rects = shown.map((el) => el.getBoundingClientRect());
+        let stacked = rects.some((r) => r.width < 2 || r.height < 2);
+        const abs = shown.map((el) => {
+          const a = el.querySelector('[class*="absolute"],.absolute');
+          return a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+        });
+        for (let i = 0; i < shown.length && !stacked; i++) {
+          for (let j = i + 1; j < shown.length && !stacked; j++) {
+            const ai = abs[i];
+            const aj = abs[j];
+            if (rectsOverlapHeavily(rects[i], rects[j]) || ai && aj && rectsOverlapHeavily(ai, aj)) stacked = true;
+          }
+        }
+        if (!stacked) return;
+      }
       let active = phraseRoots.find((el) => {
         const live = el.querySelector('[class*="opacity-100"],.opacity-100');
         const dead = el.querySelector('[class*="opacity-0"],.opacity-0,[class*="translate-y-100"],[class*="translate-y-full"]');
@@ -1501,12 +1519,14 @@ async function setupRecorder(page, maxTriggers, maxAddHtml) {
       '[class*="tabs"] button',
       '[class*="Tabs"] button'
     ].join(", ");
+    const COMMERCE_ACTION = /\badd[\s_-]*to[\s_-]*(?:cart|bag|basket)\b|\bbuy[\s_-]*(?:it[\s_-]*)?now\b|\bcheck[\s_-]*out\b|\bsubscribe\b|\bpre-?order\b|\bproduct-form__submit\b/i;
     const picked = [];
     const consider = (el) => {
       if (!el || picked.includes(el)) return;
       for (const s of picked) if (s.contains(el) || el.contains(s)) return;
       if (!visible(el)) return;
       if (el.type === "submit" && el.closest("form")) return;
+      if (COMMERCE_ACTION.test(`${el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("name") || ""} ${typeof el.className === "string" ? el.className : ""}`) || el.closest('form[action*="/cart"], [data-add-to-cart], [data-product-form]')) return;
       if (realHref(el) && !el.hasAttribute("aria-expanded") && !el.hasAttribute("aria-haspopup") && !el.hasAttribute("aria-controls") && !el.hasAttribute("data-toggle") && !el.hasAttribute("data-bs-toggle")) return;
       picked.push(el);
     };
@@ -1946,6 +1966,51 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
       const restX = Math.round(viewport.width / 2);
       const restY = Math.max(1, viewport.height - 4);
       let blockedNavUrl = null;
+      const ctx = page.context();
+      const cookieSnapshot = await ctx.cookies().catch(() => null);
+      const storageSnapshot = await page.evaluate(() => {
+        const dump = (s) => {
+          const o = {};
+          for (let i = 0; i < s.length; i++) {
+            const k = s.key(i);
+            if (k != null) o[k] = s.getItem(k) ?? "";
+          }
+          return o;
+        };
+        try {
+          return { l: dump(localStorage), s: dump(sessionStorage) };
+        } catch {
+          return null;
+        }
+      }).catch(() => null);
+      const rewindSession = async () => {
+        if (cookieSnapshot) {
+          const had = new Set(cookieSnapshot.map((c) => `${c.name}|${c.domain}|${c.path}`));
+          const now = await ctx.cookies().catch(() => []);
+          for (const c of now) {
+            if (had.has(`${c.name}|${c.domain}|${c.path}`)) continue;
+            await ctx.clearCookies({ name: c.name, domain: c.domain, path: c.path }).catch(() => {
+            });
+          }
+        }
+        let sameOrigin = false;
+        try {
+          sameOrigin = new URL(page.url()).origin === origin;
+        } catch {
+        }
+        if (storageSnapshot && sameOrigin) {
+          await page.evaluate((st) => {
+            try {
+              localStorage.clear();
+              for (const [k, v] of Object.entries(st.l)) localStorage.setItem(k, v);
+              sessionStorage.clear();
+              for (const [k, v] of Object.entries(st.s)) sessionStorage.setItem(k, v);
+            } catch {
+            }
+          }, storageSnapshot).catch(() => {
+          });
+        }
+      };
       const startPath = (() => {
         try {
           const u = new URL(startUrl);
@@ -1973,7 +2038,7 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
             return;
           }
         }
-        await route.continue();
+        await route.fallback();
       };
       await page.route("**/*", blockNavRoute);
       const CTA_LABELS = [
@@ -1989,9 +2054,21 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
         "Try",
         "Commencer"
       ];
+      const docToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const stampDoc = () => page.evaluate((t) => {
+        window.__clonyfyRecDoc = t;
+      }, docToken).catch(() => {
+      });
+      await stampDoc();
+      const pageIntact = async () => {
+        if (!sameCapturePage(page.url())) return false;
+        return page.evaluate(({ t, n }) => window.__clonyfyRecDoc === t && document.querySelectorAll("[data-clonyfy-ix]").length >= n, { t: docToken, n: setup.count }).catch(() => false);
+      };
       const healCapturePage = async () => {
+        logger.debug(`  [INTERACTIONS] page changed (${page.url()}) \u2014 reloading ${startUrl}`);
         await teardownRecorder(page, []).catch(() => {
         });
+        await rewindSession();
         await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 2e4 });
         await page.waitForLoadState("networkidle", { timeout: 8e3 }).catch(() => {
         });
@@ -2000,6 +2077,7 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
         if (!again || !again.count) return false;
         setup.clickable = again.clickable;
         setup.count = again.count;
+        await stampDoc();
         return true;
       };
       const probeNavCtas = async () => {
@@ -2028,7 +2106,7 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
           hrefByIndex.set(key, pendingNav);
           hrefTextByIndex.set(key, name);
           logger.debug(`  [INTERACTIONS] CTA "${name}" -> ${pendingNav}`);
-          if (blockedNavUrl || page.url() !== startUrl) {
+          if ((blockedNavUrl || page.url() !== startUrl) && !await pageIntact()) {
             if (!await healCapturePage()) return;
           }
         }
@@ -2093,6 +2171,18 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
             if (label) hrefTextByIndex.set(i, label);
           }
           if (pendingNav && (blockedNavUrl || leftPage)) {
+            if (await pageIntact()) {
+              logger.debug(`  [INTERACTIONS] blocked navigation to ${pendingNav} \u2014 page intact, no reload`);
+              await page.mouse.move(restX, restY).catch(() => {
+              });
+              await page.keyboard.press("Escape").catch(() => {
+              });
+              if (ops.length) await page.evaluate((o) => window.__clonyfyIx?.revert?.(o), ops).catch(() => {
+              });
+              await page.evaluate(() => window.__clonyfyIx?.baseline?.()).catch(() => {
+              });
+              continue;
+            }
             if (!await healCapturePage()) break;
             await page.evaluate(() => window.__clonyfyIx?.start?.());
             await page.waitForTimeout(200);
@@ -2120,9 +2210,11 @@ async function recordNavInteractions(page, pageUrl, budgetMs = DEFAULT_TIME_BUDG
       }
       hrefEntries = [...hrefByIndex.entries()];
       hrefLabels = [...hrefTextByIndex.entries()];
-      if (hrefEntries.length) {
+      if (hrefEntries.length && !await pageIntact()) {
+        logger.debug(`  [INTERACTIONS] page changed (${page.url()}) \u2014 reloading ${startUrl} before baking links`);
         await teardownRecorder(page, []).catch(() => {
         });
+        await rewindSession();
         try {
           await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 2e4 });
           await page.waitForLoadState("networkidle", { timeout: 8e3 }).catch(() => {
@@ -10886,21 +10978,34 @@ async function revealNavDropdownLinks(page) {
       'nav button, header button, [role="navigation"] button, [aria-haspopup="true"], [aria-expanded="false"], [data-menu], [class*="dropdown"] button, [class*="nav-item"] button, [class*="Nav"] button, header a[href="#"], nav a[href="#"]'
     );
     const count = Math.min(await triggers.count(), maxTriggers);
-    for (let i = 0; i < count; i++) {
-      try {
-        const el = triggers.nth(i);
-        if (!await el.isVisible({ timeout: 200 }).catch(() => false)) continue;
-        await el.hover({ timeout: hoverTimeout });
-        await page.waitForTimeout(pauseMs);
-        const expanded = await el.getAttribute("aria-expanded").catch(() => null);
-        if (expanded === "false") {
-          await el.click({ timeout: hoverTimeout, force: true }).catch(() => {
-          });
+    await withNavigationBlocked(page, async () => {
+      for (let i = 0; i < count; i++) {
+        try {
+          const el = triggers.nth(i);
+          if (!await el.isVisible({ timeout: 200 }).catch(() => false)) continue;
+          await el.hover({ timeout: hoverTimeout });
           await page.waitForTimeout(pauseMs);
+          const expanded = await el.getAttribute("aria-expanded").catch(() => null);
+          if (expanded === "false" && await el.evaluate(isSafeClickTarget).catch(() => false)) {
+            await el.click({ timeout: hoverTimeout, force: true }).catch(() => {
+            });
+            await page.waitForTimeout(pauseMs);
+            if (await el.getAttribute("aria-expanded").catch(() => null) === "true") {
+              await el.click({ timeout: hoverTimeout, force: true }).catch(() => {
+              });
+              await page.waitForTimeout(pauseMs);
+            }
+          }
+        } catch {
         }
-      } catch {
       }
-    }
+    });
+    const vp = page.viewportSize();
+    if (vp) await page.mouse.move(vp.width - 2, Math.round(vp.height * 0.6)).catch(() => {
+    });
+    await page.keyboard.press("Escape").catch(() => {
+    });
+    await page.waitForTimeout(IS_FAST_CLONE ? 250 : 400);
   } catch (err) {
     logger.debug(`  [NAV REVEAL WARN] ${err.message}`);
   }
@@ -11066,14 +11171,146 @@ async function restoreRequestedUrl(page, pageUrl, reason) {
   }
   if (pathnamesMatch(wanted, current)) return true;
   logger.warn(`  [ROUTE DRIFT] ${reason}: expected ${wanted}, got ${current || "(unknown)"} \u2014 restoring ${pageUrl}`);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT });
+      await page.waitForLoadState("load", { timeout: IS_FAST ? 8e3 : 15e3 }).catch(() => {
+      });
+      await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 4e3 : 1e4 }).catch(() => {
+      });
+      return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+    } catch (err) {
+      logger.warn(`  [ROUTE DRIFT] restore attempt ${attempt} failed: ${err.message}`);
+    }
+  }
+  return false;
+}
+async function probeFixedHeaderOffsets(page) {
+  const desktop = page.viewportSize();
+  if (!desktop || desktop.width < 700) return null;
   try {
-    await page.goto(pageUrl, { waitUntil: "load", timeout: NAVIGATION_TIMEOUT });
-    await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 4e3 : 1e4 }).catch(() => {
+    await page.evaluate(() => {
+      const set = /* @__PURE__ */ new Set([document.documentElement, document.body]);
+      document.querySelectorAll('body > *, body > * > *, body > * > * > *, main, [role="main"]').forEach((el) => set.add(el));
+      document.querySelectorAll('main, [role="main"]').forEach((m) => {
+        for (let p = m.parentElement; p; p = p.parentElement) set.add(p);
+      });
+      window.__clonyfyOffsetProbe = [...set].filter((el) => !/^(SCRIPT|STYLE|LINK|META|NOSCRIPT|TEMPLATE)$/.test(el.tagName)).map((el) => [el, el.getAttribute("style")]);
     });
-    return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+    await page.setViewportSize({ width: 390, height: Math.max(700, desktop.height) });
+    await page.waitForTimeout(IS_FAST ? 600 : 1e3);
+    return await page.evaluate(() => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let bar = 0;
+      for (const el of Array.from(document.body.querySelectorAll("*"))) {
+        const cs = window.getComputedStyle(el);
+        if (cs.position !== "fixed" || cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (Math.abs(r.top) > 1 || r.width < vw * 0.9 || r.height < 20 || r.height > vh * 0.5) continue;
+        bar = Math.max(bar, r.bottom);
+      }
+      if (bar <= 0) return [];
+      const selectorFor = (el) => {
+        if (el === document.documentElement) return "html";
+        if (el === document.body) return "body";
+        const unique = (id) => document.querySelectorAll(`#${CSS.escape(id)}`).length === 1;
+        const parts = [];
+        for (let cur = el; cur && cur !== document.body; cur = cur.parentElement) {
+          if (cur.id && unique(cur.id)) {
+            parts.unshift(`#${CSS.escape(cur.id)}`);
+            return parts.join(" > ");
+          }
+          let n = 1;
+          for (let s = cur.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === cur.tagName) n++;
+          parts.unshift(`${cur.tagName.toLowerCase()}:nth-of-type(${n})`);
+        }
+        return ["body", ...parts].join(" > ");
+      };
+      const before = window.__clonyfyOffsetProbe || [];
+      const scratch = document.createElement("div");
+      const rules = [];
+      for (const [el, was] of before) {
+        if (!el.isConnected || el.getAttribute("style") === was) continue;
+        scratch.setAttribute("style", was || "");
+        for (const prop of ["padding-top", "margin-top"]) {
+          const now = el.style.getPropertyValue(prop).trim();
+          const m = /^(\d+(?:\.\d+)?)px$/.exec(now);
+          if (!m || scratch.style.getPropertyValue(prop).trim() === now) continue;
+          const px = parseFloat(m[1]);
+          const top = el.getBoundingClientRect().top + window.scrollY;
+          if (Math.abs(px - bar) <= 3 || Math.abs(px - (bar - top)) <= 3) rules.push({ target: selectorFor(el), prop });
+        }
+      }
+      return rules.filter((r) => {
+        try {
+          return document.querySelectorAll(r.target).length === 1;
+        } catch {
+          return false;
+        }
+      });
+    });
   } catch (err) {
-    logger.warn(`  [ROUTE DRIFT] restore failed: ${err.message}`);
-    return false;
+    logger.debug(`  [FIXED OFFSET PROBE WARN] ${err.message}`);
+    return null;
+  } finally {
+    await page.setViewportSize(desktop).catch(() => {
+    });
+  }
+}
+function injectFixedHeaderOffsets(html, rules) {
+  const json = JSON.stringify({ rules }).replace(/</g, "\\u003c");
+  const tag = `<script type="application/json" id="__clonyfy_fixed_offsets__" data-clonyfy-fixed-offsets>${json}</script>`;
+  const idx = html.toLowerCase().lastIndexOf("</body>");
+  return idx === -1 ? html + tag : html.slice(0, idx) + tag + html.slice(idx);
+}
+function isSafeClickTarget(el) {
+  const realLink = (a) => {
+    if (!a) return false;
+    const href = (a.getAttribute("href") || "").trim();
+    return !!href && !href.startsWith("#") && !/^javascript:/i.test(href);
+  };
+  if (realLink(el.closest("a[href]"))) return false;
+  if (Array.from(el.querySelectorAll("a[href]")).some(realLink)) return false;
+  const control = el.closest("button, input");
+  if (control) {
+    const type = (control.getAttribute("type") || "").toLowerCase();
+    if (type === "submit" || type === "image") return false;
+    if (!type && control.tagName === "BUTTON" && control.form) return false;
+  }
+  const label = `${el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("name") || ""}`;
+  if (/\badd[\s_-]*to[\s_-]*(?:cart|bag|basket)\b|\bbuy[\s_-]*(?:it[\s_-]*)?now\b|\bcheck[\s_-]*out\b|\bpre-?order\b/i.test(label)) return false;
+  if (el.closest('form[action*="/cart"], [data-add-to-cart], [data-product-form]')) return false;
+  return true;
+}
+async function withNavigationBlocked(page, fn) {
+  const startUrl = page.url();
+  const samePage = (url) => {
+    try {
+      const a = new URL(url);
+      const b = new URL(startUrl);
+      return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search;
+    } catch {
+      return url === startUrl;
+    }
+  };
+  const handler = async (route) => {
+    const req = route.request();
+    if (req.isNavigationRequest() && req.frame() === page.mainFrame() && !samePage(req.url()) && !req.url().startsWith("about:")) {
+      logger.debug(`  [NAV BLOCKED] ${req.url()}`);
+      await route.abort("aborted").catch(() => {
+      });
+      return;
+    }
+    await route.fallback().catch(() => {
+    });
+  };
+  await page.route("**/*", handler);
+  try {
+    return await fn();
+  } finally {
+    await page.unroute("**/*", handler).catch(() => {
+    });
   }
 }
 var USER_AGENT2 = CLONYFY_USER_AGENT;
@@ -11163,27 +11400,69 @@ function preferLargestSrcsetCandidate(url) {
     return url;
   }
 }
+var START_TAG_RE = /<[a-zA-Z][\w:-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
+var REVEAL_TOKEN_RE = /^(?:opacity-0|invisible|translate-y-(?:\d+|full)|delay-\d+)$/;
+function stripRevealClasses(html) {
+  return String(html || "").replace(START_TAG_RE, (tag) => {
+    if (/\sdata-clonyfy-ui-hidden\b/i.test(tag)) return tag;
+    return tag.replace(/\bclass=(["'])([^"']*)\1/gi, (_m, q, cls) => {
+      const next = String(cls).split(/\s+/).filter((t) => t && !REVEAL_TOKEN_RE.test(t)).join(" ");
+      return `class=${q}${next}${q}`;
+    });
+  });
+}
+async function markHiddenUiLayers({ carouselSkip, settleMs }) {
+  if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
+  const UI_HINT = /(?:^|[\s_-])(?:drop-?down|mega-?menu|sub-?menu|fly-?out|pop-?over|pop-?up|modal|drawer|backdrop|overlay|tooltip|off-?canvas|lightbox|dialog|search-results?)(?=[\s_-]|$)/i;
+  const UI_ROLES = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="menu"],[role="listbox"],[role="tooltip"],dialog';
+  const CHROME = 'header,nav,[role="banner"],[role="navigation"]';
+  const ANIMATED = "[data-clonyfy-sr],[data-clonyfy-anim],[data-aos],[data-framer-appear-id]";
+  const TRACKED = "[data-clonyfy-st],[data-clonyfy-sa]";
+  const w = window;
+  const closedState = w.__clonyfyUiHidden = w.__clonyfyUiHidden || [];
+  const collapsed = /* @__PURE__ */ new Set();
+  const check = (el) => {
+    if (el.closest("[data-clonyfy-ui-hidden]") || el.closest(ANIMATED) || el.matches(TRACKED) || el.closest(carouselSkip)) return;
+    const cs = window.getComputedStyle(el);
+    if (cs.display === "none") return;
+    const parent = el.parentElement || el.getRootNode().host || null;
+    const parentHidden = !!parent && window.getComputedStyle(parent).visibility === "hidden";
+    const ownHidden = cs.visibility === "hidden" && !parentHidden || parseFloat(cs.opacity) <= 0.01;
+    if (!ownHidden) return;
+    const hint = `${typeof el.className === "string" ? el.className : ""} ${el.id || ""}`;
+    const isLayer = el.matches(UI_ROLES) || !!el.id && collapsed.has(el.id) || cs.position === "fixed" || cs.position === "absolute" && (UI_HINT.test(hint) || !!el.closest(CHROME));
+    if (!isLayer) return;
+    el.setAttribute("data-clonyfy-ui-hidden", "1");
+    closedState.push([el, el.getAttribute("class"), el.getAttribute("style")]);
+  };
+  const visit = (root) => {
+    root.querySelectorAll('[aria-expanded="false"][aria-controls]').forEach((t) => {
+      for (const id of String(t.getAttribute("aria-controls") || "").split(/\s+/)) if (id) collapsed.add(id);
+    });
+    root.querySelectorAll(root === document ? "body *" : "*").forEach((node) => {
+      check(node);
+      if (node.shadowRoot) visit(node.shadowRoot);
+    });
+  };
+  visit(document);
+  return closedState.length;
+}
 function bakeStaticMediaVisibility(html) {
   let out = String(html || "");
   if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
-  out = out.replace(
-    /\bclass=(["'])([^"']*)\1/gi,
-    (_m, q, cls) => {
-      const next = String(cls).replace(/\bopacity-0\b/g, "").replace(/\binvisible\b/g, "").replace(/\btranslate-y-(?:\d+|full)\b/g, "").replace(/\bdelay-\d+\b/g, "").replace(/\s+/g, " ").trim();
-      return `class=${q}${next}${q}`;
-    }
-  );
+  out = stripRevealClasses(out);
+  const UI = ":not([data-clonyfy-ui-hidden]):not([data-clonyfy-ui-hidden] *)";
   const bakeCss = `<style id="clonyfy-static-media-bake">
 html,body,#__next,#root{opacity:1!important;visibility:visible!important}
 html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
 [data-clonyfy-stack-hidden],[data-clonyfy-stack-hidden] *{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important}
-.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
-.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
-[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
-[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+.opacity-0${UI},[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI},[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI},[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{visibility:visible!important}
 [data-aos]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[data-framer-appear-id]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important;transform:none!important}
-img,picture,video,source{opacity:1!important;visibility:visible!important}
+img${UI},picture${UI},video${UI},source${UI}{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
 .hero-section__background,.hero-wave-animation,.hero-wave-animation__layout,.hero-wave-animation__contents{z-index:1!important;pointer-events:none!important}
 .hero-section__title--background,.hero-section__title--foreground,.hero-section__actions{position:relative!important;z-index:3!important}
@@ -11683,8 +11962,14 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       return;
     }
     if ((resourceType === "xhr" || resourceType === "fetch") && contentType.includes("text/html") && status >= 400) {
-      logger.debug(`  [XHR STUB] ${url} -> HTTP ${status} text/html, substituting {}`);
-      await route.fulfill({ status: 200, contentType: "application/json; charset=utf-8", body: "{}" });
+      let shopifyCart = false;
+      try {
+        shopifyCart = /^\/cart(?:\.js|\/(?:add|change|update|clear)\.js)$/.test(new URL(url).pathname);
+      } catch {
+      }
+      const body2 = shopifyCart ? JSON.stringify({ token: "", note: null, attributes: {}, item_count: 0, items: [], total_price: 0, original_total_price: 0, total_discount: 0, total_weight: 0, items_subtotal_price: 0, cart_level_discount_applications: [], requires_shipping: false, currency: "" }) : "{}";
+      logger.debug(`  [XHR STUB] ${url} -> HTTP ${status} text/html, substituting ${shopifyCart ? "an empty Shopify cart" : "{}"}`);
+      await route.fulfill({ status: 200, contentType: "application/json; charset=utf-8", body: body2 });
       return;
     }
     if (isAsset && status >= 200 && status < 300) {
@@ -12099,69 +12384,81 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }
     }
     try {
-      const interactiveSelectors = [
-        '[role="tab"]',
-        "[data-toggle]",
-        "[data-tab]",
-        "[data-panel]",
-        "details > summary",
-        ".tab, .tabs__item, .tab-link, .nav-tab",
-        "[aria-controls]"
-      ];
-      const carouselSelectors = [
-        'button[aria-label*="next" i]',
-        'button[name="next"]',
-        '[class*="slideshow"] button[class*="next"]',
-        '[class*="carousel"] [class*="next"]',
-        "[data-slider-next]",
-        ".slider-button--next"
-      ];
-      const clickTargets = await page.evaluate((selectors) => {
-        const MAX = 10;
-        const seen = /* @__PURE__ */ new Set();
-        const results = [];
-        for (const sel of selectors) {
-          if (results.length >= MAX) break;
-          const els = [...document.querySelectorAll(sel)].slice(0, 4);
-          els.forEach((el, idx) => {
-            if (el.closest('a[href]:not([href^="#"]):not([href=""])')) return;
-            if (el.tagName === "A") {
-              const href = el.getAttribute("href") || "";
-              if (href && !href.startsWith("#") && !href.toLowerCase().startsWith("javascript:")) return;
+      await withNavigationBlocked(page, async () => {
+        const interactiveSelectors = [
+          '[role="tab"]',
+          "[data-toggle]",
+          "[data-tab]",
+          "[data-panel]",
+          "details > summary",
+          ".tab, .tabs__item, .tab-link, .nav-tab",
+          "[aria-controls]"
+        ];
+        const carouselSelectors = [
+          'button[aria-label*="next" i]',
+          'button[name="next"]',
+          '[class*="slideshow"] button[class*="next"]',
+          '[class*="carousel"] [class*="next"]',
+          "[data-slider-next]",
+          ".slider-button--next"
+        ];
+        const clickTargets = await page.evaluate((selectors) => {
+          const MAX = 10;
+          const seen = /* @__PURE__ */ new Set();
+          const results = [];
+          for (const sel of selectors) {
+            if (results.length >= MAX) break;
+            const els = [...document.querySelectorAll(sel)].slice(0, 4);
+            els.forEach((el, idx) => {
+              if (el.closest('a[href]:not([href^="#"]):not([href=""])')) return;
+              if (el.tagName === "A") {
+                const href = el.getAttribute("href") || "";
+                if (href && !href.startsWith("#") && !href.toLowerCase().startsWith("javascript:")) return;
+              }
+              const key = sel + "__" + idx;
+              if (seen.has(key)) return;
+              seen.add(key);
+              results.push({ selector: sel, idx, text: el.textContent?.trim().slice(0, 30) ?? "" });
+            });
+          }
+          return results.slice(0, MAX);
+        }, interactiveSelectors);
+        const carouselButtons = [];
+        for (const sel of carouselSelectors) {
+          const all = page.locator(sel);
+          const n = Math.min(await all.count().catch(() => 0), 6);
+          for (let k = 0; k < n; k++) {
+            if (await all.nth(k).evaluate(isSafeClickTarget).catch(() => false)) {
+              carouselButtons.push(all.nth(k));
+              break;
             }
-            const key = sel + "__" + idx;
-            if (seen.has(key)) return;
-            seen.add(key);
-            results.push({ selector: sel, idx, text: el.textContent?.trim().slice(0, 30) ?? "" });
+          }
+        }
+        const carouselClicks = IS_FAST ? 3 : 8;
+        for (let i = 0; i < carouselClicks; i++) {
+          for (const btn of carouselButtons) {
+            try {
+              await btn.click({ timeout: 1500, force: true, noWaitAfter: true });
+              await page.waitForTimeout(IS_FAST ? 200 : 400);
+            } catch {
+            }
+          }
+        }
+        if (clickTargets.length > 0) {
+          logger.debug(`  [INTERACT] Clicking ${clickTargets.length} interactive element(s) to surface API calls`);
+          for (const target of clickTargets) {
+            try {
+              const el = await page.locator(`${target.selector}`).nth(target.idx);
+              if (!await el.evaluate(isSafeClickTarget).catch(() => false)) continue;
+              await el.click({ timeout: 2e3, force: true, noWaitAfter: true });
+              await page.waitForTimeout(300);
+            } catch {
+            }
+          }
+          await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 6e3 }).catch(() => {
           });
         }
-        return results.slice(0, MAX);
-      }, interactiveSelectors);
-      const carouselClicks = IS_FAST ? 3 : 8;
-      for (let i = 0; i < carouselClicks; i++) {
-        for (const sel of carouselSelectors) {
-          try {
-            const btn = page.locator(sel).first();
-            if (await btn.count() === 0) continue;
-            await btn.click({ timeout: 1500, force: true, noWaitAfter: true });
-            await page.waitForTimeout(IS_FAST ? 200 : 400);
-          } catch {
-          }
-        }
-      }
-      if (clickTargets.length > 0) {
-        logger.debug(`  [INTERACT] Clicking ${clickTargets.length} interactive element(s) to surface API calls`);
-        for (const target of clickTargets) {
-          try {
-            const el = await page.locator(`${target.selector}`).nth(target.idx);
-            await el.click({ timeout: 2e3, force: true, noWaitAfter: true });
-            await page.waitForTimeout(300);
-          } catch {
-          }
-        }
-        await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 6e3 }).catch(() => {
-        });
-      }
+      });
     } catch {
     }
     if (!await restoreRequestedUrl(page, pageUrl, "after interaction pass")) {
@@ -12628,9 +12925,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${deepErr.message} \u2014 continuing with base snapshot`);
       }
     }
-    await page.evaluate(async ({ fast, carouselSkip }) => {
-      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-      await delay(fast ? 500 : 1500);
+    await page.evaluate(markHiddenUiLayers, { carouselSkip: CAROUSEL_SKIP_SELECTOR, settleMs: fastScroll ? 500 : 1500 }).catch((err) => logger.debug(`  [UI LAYER MARK WARN] ${err.message}`));
+    await page.evaluate(async ({ carouselSkip }) => {
       const isZeroOpacity = (value) => {
         if (!value) return false;
         const n = parseFloat(value);
@@ -12700,6 +12996,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       const isInactiveLayer = (el) => {
         if (el.getAttribute("aria-hidden") === "true") return true;
         if (el.closest('[aria-hidden="true"]')) return true;
+        if (el.closest("[data-clonyfy-ui-hidden]")) return true;
         if (isInteractionReveal(el)) return true;
         return false;
       };
@@ -12949,6 +13246,31 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       Promise.allSettled([...pendingNativeSaves]),
       new Promise((resolve4) => setTimeout(resolve4, 2e4))
     ]);
+    const challenge = await page.evaluate(() => {
+      if (/^\s*(Just a moment|Attention Required|Access denied)\b/i.test(document.title || "")) return document.title.trim();
+      if (document.querySelector('#challenge-form, #challenge-running, script[src*="/cdn-cgi/challenge-platform/"]')) return "challenge";
+      return "";
+    }).catch(() => "");
+    if (challenge) {
+      const vendor = /cloudflare|cdn-cgi|Just a moment|Attention Required/i.test(`${challenge} ${await page.content().catch(() => "")}`.slice(0, 2e5)) ? "Cloudflare" : "bot protection";
+      throw new BotProtectionError(vendor, 403);
+    }
+    const uiMarked = await page.evaluate(() => !!window.__clonyfyUiHidden).catch(() => true);
+    if (!uiMarked) {
+      await page.evaluate(markHiddenUiLayers, { carouselSkip: CAROUSEL_SKIP_SELECTOR, settleMs: 0 }).catch((err) => logger.debug(`  [UI LAYER MARK WARN] ${err.message}`));
+    }
+    await page.evaluate(() => {
+      const list = window.__clonyfyUiHidden;
+      for (const [el, cls, style] of list || []) {
+        if (!el.isConnected) continue;
+        if (cls == null) el.removeAttribute("class");
+        else el.setAttribute("class", cls);
+        if (style == null) el.removeAttribute("style");
+        else el.setAttribute("style", style);
+        el.setAttribute("data-clonyfy-ui-hidden", "1");
+      }
+    }).catch(() => {
+    });
     await page.evaluate(() => {
       const rulesOf = (sheet) => {
         try {
@@ -13128,6 +13450,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     });
     const links = linkData.links.map((link) => normalizePageUrl(link, pageUrl)).filter((link) => !!link && new URL(link).origin === origin);
     const navLinks = linkData.navLinks.map((link) => normalizePageUrl(link, pageUrl)).filter((link) => !!link && new URL(link).origin === origin);
+    const fixedOffsetRules = await probeFixedHeaderOffsets(page);
+    if (fixedOffsetRules?.length) finalHtml = injectFixedHeaderOffsets(finalHtml, fixedOffsetRules);
     const seenPaths = /* @__PURE__ */ new Set();
     const assets = Array.from(assetMap.entries()).filter(([, localPath]) => {
       if (seenPaths.has(localPath)) return false;
@@ -16383,4 +16707,4 @@ export {
   finishClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-CJEV6NZQ.js.map
+//# sourceMappingURL=chunk-7RR4EDQ2.js.map

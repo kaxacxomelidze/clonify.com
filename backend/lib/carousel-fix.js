@@ -166,6 +166,30 @@ function rectsOverlapHeavily(a, b) {
   return inter / Math.min(areaA, areaB) >= 0.45;
 }
 
+/**
+ * A text rotator stacks its phrases in one spot. Side-by-side groups that merely contain
+ * an absolute element (a header's Shop / Search / Cart icon groups with a cart badge)
+ * are layout, not alternatives — hiding all but one removed nuts.com's header icons.
+ */
+function phraseRootsStack(roots) {
+  const shown = roots.filter((el) => el.getClientRects().length > 0);
+  if (shown.length < 2) return false;
+  const rects = shown.map((el) => el.getBoundingClientRect());
+  // `.relative > div > span.absolute`: the phrase wrappers collapse to zero height.
+  if (rects.some((r) => r.width < 2 || r.height < 2)) return true;
+  const abs = shown.map((el) => {
+    const a = el.querySelector('[class*="absolute"],.absolute');
+    return a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+  });
+  for (let i = 0; i < shown.length; i++) {
+    for (let j = i + 1; j < shown.length; j++) {
+      if (rectsOverlapHeavily(rects[i], rects[j])) return true;
+      if (abs[i] && abs[j] && rectsOverlapHeavily(abs[i], abs[j])) return true;
+    }
+  }
+  return false;
+}
+
 function looksLikeTextLayer(el) {
   const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
   if (text.length < 2 || text.length > 180) return false;
@@ -358,6 +382,7 @@ export function normalizeStackedTextRotatorsInDocument() {
       return text.length >= 2 && text.length <= 180;
     });
     if (phraseRoots.length < 2) return;
+    if (!phraseRootsStack(phraseRoots)) return;
     let active = phraseRoots.find((el) => {
       const live = el.querySelector('[class*="opacity-100"],.opacity-100');
       const dead = el.querySelector('[class*="opacity-0"],.opacity-0,[class*="translate-y-100"]');
@@ -457,6 +482,24 @@ function browserCarouselFixRuntime() {
     var aa = Math.max(1, a.width * a.height);
     var bb = Math.max(1, b.width * b.height);
     return inter / Math.min(aa, bb) >= 0.45;
+  }
+  // Same as phraseRootsStack: only phrases stacked in one spot form a rotator.
+  function stacks(roots) {
+    var shown = roots.filter(function (el) { return el.getClientRects().length > 0; });
+    if (shown.length < 2) return false;
+    var rects = shown.map(function (el) { return el.getBoundingClientRect(); });
+    if (rects.some(function (r) { return r.width < 2 || r.height < 2; })) return true;
+    var abs = shown.map(function (el) {
+      var a = el.querySelector('[class*="absolute"],.absolute');
+      return a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+    });
+    for (var i = 0; i < shown.length; i++) {
+      for (var j = i + 1; j < shown.length; j++) {
+        if (overlap(rects[i], rects[j])) return true;
+        if (abs[i] && abs[j] && overlap(abs[i], abs[j])) return true;
+      }
+    }
+    return false;
   }
   function textLayer(el) {
     var t = (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -670,6 +713,7 @@ function browserCarouselFixRuntime() {
         return child.querySelector && child.querySelector('[class*="absolute"],.absolute') && textLayer(child);
       });
       if (phraseRoots.length < 2) return;
+      if (!stacks(phraseRoots)) return;
       var active = phraseRoots.find(function (el) {
         return el.querySelector('[class*="opacity-100"],.opacity-100') && !el.querySelector('[class*="opacity-0"],.opacity-0');
       }) || phraseRoots[0];

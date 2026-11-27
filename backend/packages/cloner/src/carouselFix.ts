@@ -180,6 +180,26 @@ export function normalizeAllMotionStacksInDocument(): void {
         return text.length >= 2 && text.length <= 180;
       }) as Element[];
       if (phraseRoots.length < 2) return;
+      // A rotator stacks its phrases in one spot. Side-by-side groups that merely hold an
+      // absolute element (a header's Search / Cart icons with a cart badge) are layout.
+      {
+        const shown = phraseRoots.filter((el) => el.getClientRects().length > 0);
+        if (shown.length < 2) return;
+        const rects = shown.map((el) => el.getBoundingClientRect());
+        let stacked = rects.some((r) => r.width < 2 || r.height < 2);
+        const abs = shown.map((el) => {
+          const a = el.querySelector('[class*="absolute"],.absolute');
+          return a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+        });
+        for (let i = 0; i < shown.length && !stacked; i++) {
+          for (let j = i + 1; j < shown.length && !stacked; j++) {
+            const ai = abs[i];
+            const aj = abs[j];
+            if (rectsOverlapHeavily(rects[i], rects[j]) || (ai && aj && rectsOverlapHeavily(ai, aj))) stacked = true;
+          }
+        }
+        if (!stacked) return;
+      }
 
       let active = phraseRoots.find((el) => {
         const live = el.querySelector('[class*="opacity-100"],.opacity-100');

@@ -57,6 +57,9 @@ const HIDDEN_STYLE =
  * stuck mid-entrance). For elements this replay drives a hidden step is real (a fade-out,
  * a stacked card's inactive screen), so it is marked !important inline to win.
  */
+const HIDDEN_CLASS = /(?:^|\s)(?:opacity-0|invisible)(?=\s|$)/;
+/** Exempts an element from the rescue stylesheet's "force visible" rules. */
+const UI_HIDDEN = "data-clonyfy-ui-hidden";
 function enforceHidden(v: string): string {
   return v
     .replace(/(opacity\s*:\s*0(?:\.0+)?)\s*(?=;|$)/gi, "$1 !important")
@@ -315,12 +318,28 @@ export function startScrollReplay(
       let v: string | null;
       if (t.once) {
         const end = t.k[t.k.length - 1]!;
-        if (!t.latched && (onceHides(t) || p >= Math.min(end[0], ONCE_LATCH))) t.latched = true;
-        v = t.latched ? end[1] : t.k[0]![1];
+        const reached = onceHides(t) || p >= Math.min(end[0], ONCE_LATCH);
+        // Before the canvas has loaded, images without a size make sections short and the
+        // progress overshoots (nuts.com: the sticky-header padding latched at the top of
+        // the page, leaving a 151px gap). Show the state, but only latch on final layout.
+        if (reached && !t.latched && (onceHides(t) || doc.readyState === "complete")) t.latched = true;
+        v = t.latched || reached ? end[1] : t.k[0]![1];
       } else v = valueAt(t, p);
       if (t.n === "style" && typeof v === "string") v = enforceHidden(v);
       const target = targetOf(t);
-      if (!target || target.getAttribute(t.n) === v) continue;
+      if (!target) continue;
+      // Same for class steps: `opacity-0` / `invisible` recorded here is real (nuts.com's
+      // sticky-header menu button before scrolling), so exempt it from the rescue CSS.
+      if (t.n === "class") {
+        const hide = typeof v === "string" && HIDDEN_CLASS.test(v);
+        if (hide !== (target.getAttribute(UI_HIDDEN) === "1")) {
+          if (typeof t.r === "number") {
+            if (hide) target.setAttribute(UI_HIDDEN, "1");
+            else target.removeAttribute(UI_HIDDEN);
+          } else setAttr(target, UI_HIDDEN, hide ? "1" : null);
+        }
+      }
+      if (target.getAttribute(t.n) === v) continue;
       try {
         // Inside a step panel the snapshot itself is the saved state — no record needed.
         if (typeof t.r === "number") {
@@ -337,6 +356,7 @@ export function startScrollReplay(
   };
   win.addEventListener("scroll", schedule, { passive: true });
   win.addEventListener("resize", schedule);
+  win.addEventListener("load", schedule);
   apply();
 
   /* ------------------------------------------------------------- API */
@@ -510,6 +530,7 @@ export function startScrollReplay(
       if (queued) cancelAnimationFrame(queued);
       win.removeEventListener("scroll", schedule);
       win.removeEventListener("resize", schedule);
+      win.removeEventListener("load", schedule);
     },
   };
 }

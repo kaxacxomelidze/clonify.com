@@ -33,7 +33,7 @@ import {
 import { gitAvailable, pushCloneWithGit } from './lib/gitPush.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
-import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
+import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml, restoreUiLayerClasses, stripTrackingNoscript } from './lib/cloneServePatches.js';
 import { buildPreviewNavigationScript, buildInteractionRuntimeScript, buildAnimationRuntimeScript, buildLiveBridgeScript } from './lib/clonePreviewRuntime.js';
 import { getThemeModel, buildThemeEngineModule, stripThemeArtifacts, applyThemeScriptToHtml } from './lib/themeModels.js';
 import { ensureLocalSchema, claimWebhookEvent, releaseWebhookEvent, purgeCloneArtifacts, insertTrackEvent, getFunnelCounts } from './local-supabase-compat.js';
@@ -3625,10 +3625,24 @@ function figmaAssetReader(outDir) {
   return (relPath) => readCloneAssetForFigmaExport(outDir, relPath);
 }
 
-async function prepareHtmlForFigmaExport(html, outDir) {
+/**
+ * Clones captured before hidden menus and backdrops were marked: put their original
+ * hiding classes back from the page's server markup (see restoreUiLayerClasses).
+ */
+async function withRestoredUiLayers(outDir, filename, html) {
+  const text = String(html || '');
+  if (!filename || text.includes('data-clonyfy-ui-hidden')) return text;
+  const serverFile = String(filename).replace(/.html$/i, '.server.html');
+  if (serverFile === filename) return text;
+  const server = await readCloneFile(outDir, join('captured-pages', serverFile)).catch(() => null);
+  if (!server?.length) return text;
+  try { return restoreUiLayerClasses(text, server.toString('utf8')); } catch { return text; }
+}
+
+async function prepareHtmlForFigmaExport(html, outDir, filename = '') {
   // Do not inject scroll-reveal — it sets opacity:0 on layers and the Figma
   // exporter skips them, producing an empty scene.
-  let out = await rewritePreviewAssetUrls(String(html), outDir, {
+  let out = await rewritePreviewAssetUrls(await withRestoredUiLayers(outDir, filename, html), outDir, {
     injectPreviewNav: false,
     injectScrollReveal: false,
     injectInteractions: false,
@@ -3750,7 +3764,8 @@ async function loadSharedPreviewHtml(share, shareId, requestedRoute) {
   try { data = await readCloneFile(share.out_dir, join('captured-pages', resolved.filename)); }
   catch { return { error: 'Invalid page path', status: 400 }; }
   if (!data) return { error: 'Page file missing', status: 404 };
-  const html = await prepareHtmlForSharePreview(data.toString('utf8'), share.out_dir, shareId, {
+  const pageHtml = await withRestoredUiLayers(share.out_dir, resolved.filename, data.toString('utf8'));
+  const html = await prepareHtmlForSharePreview(pageHtml, share.out_dir, shareId, {
     routes: Object.keys(map),
     defaultRoute: resolved.route,
   });
@@ -5669,7 +5684,7 @@ async function handleRequest(req, res) {
     if (editorMode) data = await ensureMotionTimeline(outDir, resolved.filename, resolved.route, data);
     let html = data.toString('utf8');
     if (editorMode) {
-      html = neutralizeCloneScripts(html);
+      html = stripTrackingNoscript(neutralizeCloneScripts(await withRestoredUiLayers(outDir, resolved.filename, html)));
       const apiBase = apiPublicUrl(req).replace(/\/$/, '');
       html = await rewritePreviewAssetUrls(html, outDir, {
         injectPreviewNav: false,
@@ -5716,6 +5731,7 @@ async function handleRequest(req, res) {
         const secure = String(req.headers['x-forwarded-proto'] || '').includes('https') ? '; Secure' : '';
         res.setHeader('Set-Cookie', `${PREVIEW_COOKIE}=${encodeURIComponent(cookieVal)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=21600${secure}`);
       } else {
+        html = await withRestoredUiLayers(outDir, resolved.filename, html);
         html = await rewritePreviewAssetUrls(html, outDir, { routes: Object.keys(map), includeBase: false });
       }
     }
@@ -7039,7 +7055,7 @@ async function handleRequest(req, res) {
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
       if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
       const runExport = async () => {
-        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
+        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir, filename);
         return htmlToFigmaScene(html, {
           viewportWidth,
           title: route,
@@ -7091,7 +7107,7 @@ async function handleRequest(req, res) {
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
       if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
       const runExport = async () => {
-        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
+        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir, filename);
         return htmlToFigmaSvg(html, {
           viewportWidth,
           title: route,
