@@ -1486,8 +1486,10 @@ export function VisualEditor({
   };
 
   // The iframe's load event can fire before React attaches onLoad (fast srcdoc
-  // loads), which left the editor disconnected. Attach to any loaded document
-  // that hasn't been initialised yet.
+  // loads), which left the editor disconnected. Attach to any parsed document that
+  // hasn't been initialised yet — without waiting for every image, font and third-party
+  // frame: one slow request (a tag manager's noscript iframe) kept a fully shown page
+  // uneditable for ~30s.
   const onFrameLoadRef = useRef(onFrameLoad);
   onFrameLoadRef.current = onFrameLoad;
   useEffect(() => {
@@ -1495,7 +1497,8 @@ export function VisualEditor({
     const timer = window.setInterval(() => {
       const d = iframeRef.current?.contentDocument;
       if (
-        d?.readyState === "complete" &&
+        d &&
+        d.readyState !== "loading" &&
         d.body?.childElementCount &&
         !initializedDocsRef.current.has(d)
       ) {

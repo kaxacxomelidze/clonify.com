@@ -1844,6 +1844,7 @@ function animationRuntime() {
     // (`[style*="opacity: 0"] { opacity: 1 !important }`) so content stuck mid-entrance
     // shows. For elements this replay drives, a hidden step is real (a fade-out, the
     // inactive screen of a stacked card) — mark it !important inline so it wins.
+    var HIDDEN_CLASS = /(?:^|\s)(?:opacity-0|invisible)(?=\s|$)/;
     function enforceHidden(v) {
       return v
         .replace(/(opacity\s*:\s*0(?:\.0+)?)\s*(?=;|$)/gi, '$1 !important')
@@ -1866,8 +1867,12 @@ function animationRuntime() {
         var v;
         if (track.once) {
           var end = track.k[track.k.length - 1];
-          if (!track.latched && (onceHides(track) || p >= Math.min(end[0], ONCE_LATCH))) track.latched = true;
-          v = track.latched ? end[1] : track.k[0][1];
+          var reached = onceHides(track) || p >= Math.min(end[0], ONCE_LATCH);
+          // Before the page has loaded, images without a size make sections short and the
+          // progress overshoots (nuts.com: the sticky-header padding latched at the top of
+          // the page, leaving a 151px gap). Show the state, but only latch on final layout.
+          if (reached && !track.latched && (onceHides(track) || document.readyState === 'complete')) track.latched = true;
+          v = (track.latched || reached) ? end[1] : track.k[0][1];
         } else {
           v = valueAt(track, p);
         }
@@ -1876,6 +1881,12 @@ function animationRuntime() {
         if (track.r >= 0) {
           var owner = regionByIndex[track.r];
           target = owner ? resolvePath(owner.el, track.p) : null;
+        }
+        // Same for class steps: `opacity-0` / `invisible` recorded here is real (nuts.com's
+        // sticky-header menu button before scrolling), so exempt it from the rescue CSS.
+        if (target && track.n === 'class') {
+          if (typeof v === 'string' && HIDDEN_CLASS.test(v)) target.setAttribute('data-clonyfy-ui-hidden', '1');
+          else if (target.getAttribute('data-clonyfy-ui-hidden') === '1') target.removeAttribute('data-clonyfy-ui-hidden');
         }
         if (!target || target.getAttribute(track.n) === v) continue;
         try {
@@ -1891,6 +1902,7 @@ function animationRuntime() {
     }
     window.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
+    window.addEventListener('load', schedule);
     apply();
   }
 
@@ -1972,6 +1984,99 @@ function animationRuntime() {
     }
   }
 
+  /**
+   * Sites keep their header fixed on small screens and push the content below it with a
+   * line of JS (nuts.com: `main.style.paddingTop = <header height>` under its lg
+   * breakpoint). The capture runs at desktop width, so that padding is missing and on a
+   * phone or tablet the first section slid under the header. Pad the element the site
+   * pads, by however much the fixed bar covers it, whenever a bar is fixed at the top.
+   * Which element: recorded by the capture (__clonyfy_fixed_offsets__), or — for older
+   * clones — the scroll timeline's step that pads an element once the header turns fixed.
+   */
+  function installFixedHeaderOffset() {
+    if (window.__clonyfyLiveScripts || document.getElementById('__clonyfy_fixed_offset_css__') || !document.body) return;
+    var targets = [];
+    function add(el, prop) {
+      if (!el || !/^(padding|margin)-top$/.test(prop)) return;
+      for (var i = 0; i < targets.length; i++) if (targets[i].el === el && targets[i].prop === prop) return;
+      targets.push({ el: el, prop: prop });
+    }
+    function readJson(id) {
+      var node = document.getElementById(id);
+      if (!node) return null;
+      try { return JSON.parse(node.textContent || ''); } catch (e) { return null; }
+    }
+    var recorded = readJson('__clonyfy_fixed_offsets__');
+    var rules = (recorded && recorded.rules) || [];
+    for (var r = 0; r < rules.length; r++) {
+      try { add(document.querySelector(rules[r].target), rules[r].prop); } catch (e) { /* bad selector */ }
+    }
+    var timeline = readJson('__clonyfy_scroll_timeline__');
+    var tracks = (timeline && timeline.tracks) || [];
+    var PAD = /(?:^|;)\s*(padding|margin)-top\s*:\s*[1-9]\d*(?:\.\d+)?px/i;
+    for (var t = 0; t < tracks.length; t++) {
+      var tr = tracks[t];
+      if (tr.n !== 'style' || !tr.k || !tr.k.length || tr.r >= 0) continue;
+      var last = tr.k[tr.k.length - 1][1];
+      var first = tr.k[0][1];
+      var m = typeof last === 'string' ? PAD.exec(last) : null;
+      if (!m || (typeof first === 'string' && PAD.test(first))) continue;
+      add(document.querySelector('[data-clonyfy-st="' + tr.id + '"]'), m[1].toLowerCase() + '-top');
+    }
+    if (!targets.length) return;
+
+    var style = document.createElement('style');
+    style.id = '__clonyfy_fixed_offset_css__';
+    (document.head || document.documentElement).appendChild(style);
+    for (var i = 0; i < targets.length; i++) targets[i].el.setAttribute('data-clonyfy-offset', String(i));
+
+    // Bottom edge of the bars fixed at the top of the viewport (header, promo strip).
+    function fixedBarBottom() {
+      var vw = window.innerWidth;
+      var vh = window.innerHeight;
+      var bottom = 0;
+      var all = document.body.getElementsByTagName('*');
+      for (var j = 0; j < all.length; j++) {
+        var el = all[j];
+        var cs = getComputedStyle(el);
+        if (cs.position !== 'fixed' || cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+        if (el.closest('[data-clonyfy-ui],[data-clonyfy-ui-hidden],[data-clonyfy-ui-off]')) continue;
+        var b = el.getBoundingClientRect();
+        if (Math.abs(b.top) > 1 || b.width < vw * 0.9 || b.height < 20 || b.height > vh * 0.5) continue;
+        if (b.bottom > bottom) bottom = b.bottom;
+      }
+      return bottom;
+    }
+    var stale = true;
+    function update() {
+      // Decide at the top of the page, where the header is in its resting state (on a
+      // desktop the scroll replay makes it fixed further down and pads the page itself).
+      if (window.scrollY > 5) { stale = true; return; }
+      stale = false;
+      // Measure each target's own top edge: a hair of padding stops a child's top margin
+      // from collapsing through it (which would make it look lower than it is).
+      var probe = '';
+      for (var q = 0; q < targets.length; q++) probe += '[data-clonyfy-offset="' + q + '"]{padding-top:0.02px!important}';
+      style.textContent = probe;
+      var bar = fixedBarBottom();
+      var css = '';
+      if (bar > 0) {
+        for (var k = 0; k < targets.length; k++) {
+          var top = targets[k].el.getBoundingClientRect().top;
+          var cover = Math.round(bar - top);
+          if (cover > 0) css += '[data-clonyfy-offset="' + k + '"]{' + targets[k].prop + ':' + cover + 'px!important}';
+        }
+      }
+      style.textContent = css;
+    }
+    update();
+    window.addEventListener('resize', function () { stale = true; update(); });
+    window.addEventListener('scroll', function () { if (stale && window.scrollY <= 5) update(); }, { passive: true });
+    window.addEventListener('load', update);
+    setTimeout(update, 700);
+    setTimeout(update, 2000);
+  }
+
   function run() {
     try {
       injectCss();
@@ -1981,6 +2086,7 @@ function animationRuntime() {
       playCanvasFrames();
       installScrollTimeline();
     } catch (e) { /* ignore */ }
+    try { installFixedHeaderOffset(); } catch (e) { /* ignore */ }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, { once: true });

@@ -3,7 +3,7 @@ import { CLONYFY_USER_AGENT } from './userAgent.js';
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, extname, basename } from 'path';
 import mime from 'mime-types';
-import type { BrowserContext, Page } from 'playwright-core';
+import type { BrowserContext, Page, Route } from 'playwright-core';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
 import { logger } from './logger.js';
 import { isPublicUrl, safeFetch } from './ssrfGuard.js';
@@ -47,6 +47,9 @@ async function revealNavDropdownLinks(page: Page): Promise<void> {
       'nav button, header button, [role="navigation"] button, [aria-haspopup="true"], [aria-expanded="false"], [data-menu], [class*="dropdown"] button, [class*="nav-item"] button, [class*="Nav"] button, header a[href="#"], nav a[href="#"]',
     );
     const count = Math.min(await triggers.count(), maxTriggers);
+    // `[aria-expanded="false"]` also matches a search form's submit button (nuts.com's
+    // "Search" → /search): never click what navigates, and abort any navigation anyway.
+    await withNavigationBlocked(page, async () => {
     for (let i = 0; i < count; i++) {
       try {
         const el = triggers.nth(i);
@@ -55,14 +58,26 @@ async function revealNavDropdownLinks(page: Page): Promise<void> {
         await page.waitForTimeout(pauseMs);
         // Some menus need a click (not only hover) to mount links.
         const expanded = await el.getAttribute('aria-expanded').catch(() => null);
-        if (expanded === 'false') {
+        if (expanded === 'false' && await el.evaluate(isSafeClickTarget).catch(() => false)) {
           await el.click({ timeout: hoverTimeout, force: true }).catch(() => {});
           await page.waitForTimeout(pauseMs);
+          // The links are mounted now; close the menu again so the snapshot shows the
+          // page at rest (an open menu brings its full-screen backdrop with it).
+          if (await el.getAttribute('aria-expanded').catch(() => null) === 'true') {
+            await el.click({ timeout: hoverTimeout, force: true }).catch(() => {});
+            await page.waitForTimeout(pauseMs);
+          }
         }
       } catch {
         // Ignore individual hover failures.
       }
     }
+    });
+    // Leave no hover menu open: park the pointer on the page edge and close popups.
+    const vp = page.viewportSize();
+    if (vp) await page.mouse.move(vp.width - 2, Math.round(vp.height * 0.6)).catch(() => {});
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(IS_FAST_CLONE ? 250 : 400);
   } catch (err) {
     logger.debug(`  [NAV REVEAL WARN] ${(err as Error).message}`);
   }
@@ -200,13 +215,162 @@ async function restoreRequestedUrl(page: Page, pageUrl: string, reason: string):
   try { current = pathnameOfUrl(page.url()); } catch { current = ''; }
   if (pathnamesMatch(wanted, current)) return true;
   logger.warn(`  [ROUTE DRIFT] ${reason}: expected ${wanted}, got ${current || '(unknown)'} — restoring ${pageUrl}`);
+  // Wait for the document, not for every tracker: a slow third-party frame can hold the
+  // load event past the timeout (nuts.com), which used to drop the whole page capture
+  // to the plain-HTML fallback. One retry covers a transient network stall.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
+      await page.waitForLoadState('load', { timeout: IS_FAST ? 8_000 : 15_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 10_000 }).catch(() => {});
+      return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+    } catch (err) {
+      logger.warn(`  [ROUTE DRIFT] restore attempt ${attempt} failed: ${(err as Error).message}`);
+    }
+  }
+  return false;
+}
+
+type FixedOffsetRule = { target: string; prop: 'padding-top' | 'margin-top' };
+
+/**
+ * Sites keep their header fixed on small screens and push the content below it with a
+ * line of JS (nuts.com: `main.style.paddingTop = <header height>` under its lg
+ * breakpoint). The capture runs at desktop width, where that never happens, so on a
+ * phone or tablet the clone's first section slid under the header. Look at the page
+ * once at phone width and note which element the site pads for the fixed bar; the
+ * preview then pads it by the bar's live height at any width where a bar is fixed.
+ */
+export async function probeFixedHeaderOffsets(page: Page): Promise<FixedOffsetRule[] | null> {
+  const desktop = page.viewportSize();
+  if (!desktop || desktop.width < 700) return null;
   try {
-    await page.goto(pageUrl, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT });
-    await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 4_000 : 10_000 }).catch(() => {});
-    return pathnamesMatch(wanted, pathnameOfUrl(page.url()));
+    await page.evaluate(() => {
+      // Page-structure elements a site would pad: html/body, top-level wrappers, main.
+      const set = new Set<Element>([document.documentElement, document.body]);
+      document.querySelectorAll('body > *, body > * > *, body > * > * > *, main, [role="main"]').forEach((el) => set.add(el));
+      document.querySelectorAll('main, [role="main"]').forEach((m) => {
+        for (let p = m.parentElement; p; p = p.parentElement) set.add(p);
+      });
+      (window as unknown as { __clonyfyOffsetProbe?: Array<[Element, string | null]> }).__clonyfyOffsetProbe = [...set]
+        .filter((el) => !/^(SCRIPT|STYLE|LINK|META|NOSCRIPT|TEMPLATE)$/.test(el.tagName))
+        .map((el) => [el, el.getAttribute('style')]);
+    });
+    await page.setViewportSize({ width: 390, height: Math.max(700, desktop.height) });
+    await page.waitForTimeout(IS_FAST ? 600 : 1000);
+    return await page.evaluate((): FixedOffsetRule[] => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let bar = 0;
+      for (const el of Array.from(document.body.querySelectorAll('*'))) {
+        const cs = window.getComputedStyle(el);
+        if (cs.position !== 'fixed' || cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (Math.abs(r.top) > 1 || r.width < vw * 0.9 || r.height < 20 || r.height > vh * 0.5) continue;
+        bar = Math.max(bar, r.bottom);
+      }
+      if (bar <= 0) return [];
+      const selectorFor = (el: Element): string => {
+        if (el === document.documentElement) return 'html';
+        if (el === document.body) return 'body';
+        const unique = (id: string) => document.querySelectorAll(`#${CSS.escape(id)}`).length === 1;
+        const parts: string[] = [];
+        for (let cur: Element | null = el; cur && cur !== document.body; cur = cur.parentElement) {
+          if (cur.id && unique(cur.id)) { parts.unshift(`#${CSS.escape(cur.id)}`); return parts.join(' > '); }
+          let n = 1;
+          for (let s = cur.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === cur.tagName) n++;
+          parts.unshift(`${cur.tagName.toLowerCase()}:nth-of-type(${n})`);
+        }
+        return ['body', ...parts].join(' > ');
+      };
+      const before = (window as unknown as { __clonyfyOffsetProbe?: Array<[Element, string | null]> }).__clonyfyOffsetProbe || [];
+      const scratch = document.createElement('div');
+      const rules: FixedOffsetRule[] = [];
+      for (const [el, was] of before) {
+        if (!el.isConnected || el.getAttribute('style') === was) continue;
+        scratch.setAttribute('style', was || '');
+        for (const prop of ['padding-top', 'margin-top'] as const) {
+          const now = (el as HTMLElement).style.getPropertyValue(prop).trim();
+          const m = /^(\d+(?:\.\d+)?)px$/.exec(now);
+          if (!m || scratch.style.getPropertyValue(prop).trim() === now) continue;
+          const px = parseFloat(m[1]);
+          const top = el.getBoundingClientRect().top + window.scrollY;
+          // The site set exactly what clears the fixed bar.
+          if (Math.abs(px - bar) <= 3 || Math.abs(px - (bar - top)) <= 3) rules.push({ target: selectorFor(el), prop });
+        }
+      }
+      return rules.filter((r) => { try { return document.querySelectorAll(r.target).length === 1; } catch { return false; } });
+    });
   } catch (err) {
-    logger.warn(`  [ROUTE DRIFT] restore failed: ${(err as Error).message}`);
-    return false;
+    logger.debug(`  [FIXED OFFSET PROBE WARN] ${(err as Error).message}`);
+    return null;
+  } finally {
+    await page.setViewportSize(desktop).catch(() => {});
+  }
+}
+
+/** Store the probe's rules in the page (read by the preview runtime). */
+function injectFixedHeaderOffsets(html: string, rules: FixedOffsetRule[]): string {
+  const json = JSON.stringify({ rules }).replace(/</g, '\\u003c');
+  const tag = `<script type="application/json" id="__clonyfy_fixed_offsets__" data-clonyfy-fixed-offsets>${json}</script>`;
+  const idx = html.toLowerCase().lastIndexOf('</body>');
+  return idx === -1 ? html + tag : html.slice(0, idx) + tag + html.slice(idx);
+}
+
+/**
+ * In-page check (self-contained): clicking `el` must not leave the page. Real links,
+ * elements inside or wrapping one (carousel slides are product cards), and form submit
+ * buttons (a header search form's "Search") all navigate.
+ */
+function isSafeClickTarget(el: Element): boolean {
+  const realLink = (a: Element | null) => {
+    if (!a) return false;
+    const href = (a.getAttribute('href') || '').trim();
+    return !!href && !href.startsWith('#') && !/^javascript:/i.test(href);
+  };
+  if (realLink(el.closest('a[href]'))) return false;
+  if (Array.from(el.querySelectorAll('a[href]')).some(realLink)) return false;
+  const control = el.closest('button, input') as HTMLButtonElement | HTMLInputElement | null;
+  if (control) {
+    const type = (control.getAttribute('type') || '').toLowerCase();
+    if (type === 'submit' || type === 'image') return false;
+    if (!type && control.tagName === 'BUTTON' && (control as HTMLButtonElement).form) return false;
+  }
+  // Store actions change the shop's state (a real cart), not the page.
+  const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('name') || ''}`;
+  if (/\badd[\s_-]*to[\s_-]*(?:cart|bag|basket)\b|\bbuy[\s_-]*(?:it[\s_-]*)?now\b|\bcheck[\s_-]*out\b|\bpre-?order\b/i.test(label)) return false;
+  if (el.closest('form[action*="/cart"], [data-add-to-cart], [data-product-form]')) return false;
+  return true;
+}
+
+/**
+ * Run `fn` with main-frame navigations away from this page aborted, so a stray click
+ * cannot swap the page being captured. Every other request still goes through the
+ * capture's own handler (private-address block, local assets, script stubs).
+ */
+async function withNavigationBlocked<T>(page: Page, fn: () => Promise<T>): Promise<T> {
+  const startUrl = page.url();
+  const samePage = (url: string) => {
+    try {
+      const a = new URL(url);
+      const b = new URL(startUrl);
+      return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search;
+    } catch { return url === startUrl; }
+  };
+  const handler = async (route: Route) => {
+    const req = route.request();
+    if (req.isNavigationRequest() && req.frame() === page.mainFrame() && !samePage(req.url()) && !req.url().startsWith('about:')) {
+      logger.debug(`  [NAV BLOCKED] ${req.url()}`);
+      await route.abort('aborted').catch(() => {});
+      return;
+    }
+    await route.fallback().catch(() => {});
+  };
+  await page.route('**/*', handler);
+  try {
+    return await fn();
+  } finally {
+    await page.unroute('**/*', handler).catch(() => {});
   }
 }
 
@@ -329,6 +493,85 @@ function preferLargestSrcsetCandidate(url: string): string {
   }
 }
 
+// One start tag; quoted values may hold `>` (Tailwind `[&>svg]:size-4`).
+const START_TAG_RE = /<[a-zA-Z][\w:-]*(?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
+// Whole class tokens only: `lg:invisible` or `[&.is-open]:translate-y-0` are deliberate states.
+const REVEAL_TOKEN_RE = /^(?:opacity-0|invisible|translate-y-(?:\d+|full)|delay-\d+)$/;
+
+/**
+ * Remove "hidden until JS" utility classes (scroll-reveal starts) from every tag except
+ * interface layers capture marked `data-clonyfy-ui-hidden` — those stay hidden until
+ * the visitor opens them, exactly as on the live site.
+ */
+export function stripRevealClasses(html: string): string {
+  return String(html || '').replace(START_TAG_RE, (tag) => {
+    if (/\sdata-clonyfy-ui-hidden\b/i.test(tag)) return tag;
+    return tag.replace(/\bclass=(["'])([^"']*)\1/gi, (_m, q, cls) => {
+      const next = String(cls).split(/\s+/).filter((t) => t && !REVEAL_TOKEN_RE.test(t)).join(' ');
+      return `class=${q}${next}${q}`;
+    });
+  });
+}
+
+/**
+ * Interface layers the site keeps hidden until the visitor opens them: menu and
+ * search backdrops, dropdown panels, drawers, modals, tooltips. When this runs the page
+ * is at rest (scrolled to the top, menus closed), so hidden now means hidden on the live
+ * site too. Forcing them visible stacks translucent backdrops over the whole page
+ * (nuts.com: grey screen with the Help dropdown stuck open). Mark them so every
+ * reveal pass — here, the Save As bake and the preview patch — keeps their original
+ * classes and state. Only layers hidden by their own style count: a child of a
+ * not-yet-revealed section inherits `visibility:hidden` and must still be revealed.
+ *
+ * Runs in the page (self-contained). Called before the visibility pass and again right
+ * before serialization when the nav recorder reloaded the page and the marks were lost.
+ */
+async function markHiddenUiLayers({ carouselSkip, settleMs }: { carouselSkip: string; settleMs: number }): Promise<number> {
+  if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
+  const UI_HINT = /(?:^|[\s_-])(?:drop-?down|mega-?menu|sub-?menu|fly-?out|pop-?over|pop-?up|modal|drawer|backdrop|overlay|tooltip|off-?canvas|lightbox|dialog|search-results?)(?=[\s_-]|$)/i;
+  const UI_ROLES = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="menu"],[role="listbox"],[role="tooltip"],dialog';
+  const CHROME = 'header,nav,[role="banner"],[role="navigation"]';
+  // Elements a recorded animation drives (and regions swapped from snapshots) keep
+  // their own replay. A menu that merely sits in a timeline section (nuts.com's
+  // whole header is one) is still a menu.
+  const ANIMATED = '[data-clonyfy-sr],[data-clonyfy-anim],[data-aos],[data-framer-appear-id]';
+  const TRACKED = '[data-clonyfy-st],[data-clonyfy-sa]';
+  // Closed state of each marked layer, re-applied right before serialization.
+  const w = window as unknown as { __clonyfyUiHidden?: Array<[Element, string | null, string | null]> };
+  const closedState = (w.__clonyfyUiHidden = w.__clonyfyUiHidden || []);
+  const collapsed = new Set<string>();
+  const check = (el: HTMLElement) => {
+    if (el.closest('[data-clonyfy-ui-hidden]') || el.closest(ANIMATED) || el.matches(TRACKED) || el.closest(carouselSkip)) return;
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none') return;
+    const parent = el.parentElement || ((el.getRootNode() as ShadowRoot).host as Element | undefined) || null;
+    const parentHidden = !!parent && window.getComputedStyle(parent).visibility === 'hidden';
+    const ownHidden = (cs.visibility === 'hidden' && !parentHidden) || parseFloat(cs.opacity) <= 0.01;
+    if (!ownHidden) return;
+    const hint = `${typeof el.className === 'string' ? el.className : ''} ${el.id || ''}`;
+    const isLayer = el.matches(UI_ROLES)
+      || (!!el.id && collapsed.has(el.id))
+      || cs.position === 'fixed'
+      || (cs.position === 'absolute' && (UI_HINT.test(hint) || !!el.closest(CHROME)));
+    if (!isLayer) return;
+    el.setAttribute('data-clonyfy-ui-hidden', '1');
+    closedState.push([el, el.getAttribute('class'), el.getAttribute('style')]);
+  };
+  // Widgets render their modals inside shadow roots (Shopify's Shop sign-in / lead
+  // capture popup and its backdrop); those are serialized too, so look inside.
+  const visit = (root: Document | ShadowRoot) => {
+    root.querySelectorAll('[aria-expanded="false"][aria-controls]').forEach((t) => {
+      for (const id of String(t.getAttribute('aria-controls') || '').split(/\s+/)) if (id) collapsed.add(id);
+    });
+    root.querySelectorAll(root === document ? 'body *' : '*').forEach((node) => {
+      check(node as HTMLElement);
+      if ((node as Element).shadowRoot) visit((node as Element).shadowRoot as ShadowRoot);
+    });
+  };
+  visit(document);
+  return closedState.length;
+}
+
 /**
  * Save As–level bake: keep text and media visible without site JS.
  * Mirrors browser "Webpage, Complete" — freeze what was painted, don't re-hide it.
@@ -340,31 +583,22 @@ export function bakeStaticMediaVisibility(html: string): string {
   // Prefer eager loading so preview does not wait for IO that never fires.
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
 
-  // Strip common "hidden until JS" utility classes from the static snapshot.
-  out = out.replace(
-    /\bclass=(["'])([^"']*)\1/gi,
-    (_m, q, cls) => {
-      const next = String(cls)
-        .replace(/\bopacity-0\b/g, '')
-        .replace(/\binvisible\b/g, '')
-        .replace(/\btranslate-y-(?:\d+|full)\b/g, '')
-        .replace(/\bdelay-\d+\b/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return `class=${q}${next}${q}`;
-    },
-  );
+  // Strip common "hidden until JS" utility classes from the static snapshot — except on
+  // interface layers capture marked as hidden by design (menus, backdrops, modals).
+  out = stripRevealClasses(out);
 
+  // `UI` = not inside an interface layer that stays hidden until opened.
+  const UI = ':not([data-clonyfy-ui-hidden]):not([data-clonyfy-ui-hidden] *)';
   const bakeCss = `<style id="clonyfy-static-media-bake">
 html,body,#__next,#root{opacity:1!important;visibility:visible!important}
 html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
 [data-clonyfy-stack-hidden],[data-clonyfy-stack-hidden] *{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important}
-.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
-.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
-[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important}
-[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){visibility:visible!important}
+.opacity-0${UI},[class*="opacity-0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI},[style*="opacity: 0"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI},[style*="visibility: hidden"]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden])${UI}{visibility:visible!important}
 [data-aos]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]),[data-framer-appear-id]:not([aria-hidden="true"]):not([data-clonyfy-stack-hidden]){opacity:1!important;visibility:visible!important;transform:none!important}
-img,picture,video,source{opacity:1!important;visibility:visible!important}
+img${UI},picture${UI},video${UI},source${UI}{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
 .hero-section__background,.hero-wave-animation,.hero-wave-animation__layout,.hero-wave-animation__contents{z-index:1!important;pointer-events:none!important}
 .hero-section__title--background,.hero-section__title--foreground,.hero-section__actions{position:relative!important;z-index:3!important}
@@ -1001,8 +1235,15 @@ export async function capturePage(
     // XHR/fetch returning text/html with 4xx/5xx is always an error page (not the intended data).
     // Stub as {} so the site's JS doesn't crash trying to eval/parse HTML.
     if ((resourceType === 'xhr' || resourceType === 'fetch') && contentType.includes('text/html') && status >= 400) {
-      logger.debug(`  [XHR STUB] ${url} -> HTTP ${status} text/html, substituting {}`);
-      await route.fulfill({ status: 200, contentType: 'application/json; charset=utf-8', body: '{}' });
+      // Shopify's cart API: a bare {} makes themes print `cart.item_count` as "undefined"
+      // in the header badge (nuts.com under rate limiting). Answer with an empty cart.
+      let shopifyCart = false;
+      try { shopifyCart = /^\/cart(?:\.js|\/(?:add|change|update|clear)\.js)$/.test(new URL(url).pathname); } catch { /* ignore */ }
+      const body = shopifyCart
+        ? JSON.stringify({ token: '', note: null, attributes: {}, item_count: 0, items: [], total_price: 0, original_total_price: 0, total_discount: 0, total_weight: 0, items_subtotal_price: 0, cart_level_discount_applications: [], requires_shipping: false, currency: '' })
+        : '{}';
+      logger.debug(`  [XHR STUB] ${url} -> HTTP ${status} text/html, substituting ${shopifyCart ? 'an empty Shopify cart' : '{}'}`);
+      await route.fulfill({ status: 200, contentType: 'application/json; charset=utf-8', body });
       return;
     }
 
@@ -1469,7 +1710,11 @@ export async function capturePage(
 
   // -- Interaction pass: click tabs/accordions/carousels to surface content ----
   // Never follow real links here — that would freeze the wrong page under this route.
+  // Broad carousel selectors match slides too (Swiper's `swiper-slide-next` is a product
+  // card on nuts.com), and `[aria-controls]` matches form submit buttons: each click is
+  // checked, and navigations are aborted for the whole pass.
   try {
+    await withNavigationBlocked(page, async () => {
     const interactiveSelectors = [
       '[role="tab"]',
       '[data-toggle]',
@@ -1510,12 +1755,22 @@ export async function capturePage(
       return results.slice(0, MAX);
     }, interactiveSelectors);
 
+    // The first match per selector that is a real control (not a slide, link or submit).
+    const carouselButtons: Array<ReturnType<Page['locator']>> = [];
+    for (const sel of carouselSelectors) {
+      const all = page.locator(sel);
+      const n = Math.min(await all.count().catch(() => 0), 6);
+      for (let k = 0; k < n; k++) {
+        if (await all.nth(k).evaluate(isSafeClickTarget).catch(() => false)) {
+          carouselButtons.push(all.nth(k));
+          break;
+        }
+      }
+    }
     const carouselClicks = IS_FAST ? 3 : 8;
     for (let i = 0; i < carouselClicks; i++) {
-      for (const sel of carouselSelectors) {
+      for (const btn of carouselButtons) {
         try {
-          const btn = page.locator(sel).first();
-          if (await btn.count() === 0) continue;
           await btn.click({ timeout: 1500, force: true, noWaitAfter: true });
           await page.waitForTimeout(IS_FAST ? 200 : 400);
         } catch { /* best-effort */ }
@@ -1527,12 +1782,14 @@ export async function capturePage(
       for (const target of clickTargets) {
         try {
           const el = await page.locator(`${target.selector}`).nth(target.idx);
+          if (!(await el.evaluate(isSafeClickTarget).catch(() => false))) continue;
           await el.click({ timeout: 2000, force: true, noWaitAfter: true });
           await page.waitForTimeout(300);
         } catch { /* click may fail on hidden/stale element */ }
       }
       await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 6_000 }).catch(() => {});
     }
+    });
   } catch { /* interaction pass is best-effort */ }
 
   if (!(await restoreRequestedUrl(page, pageUrl, 'after interaction pass'))) {
@@ -2041,9 +2298,9 @@ export async function capturePage(
     }
   }
 
-  await page.evaluate(async ({ fast, carouselSkip }: { fast: boolean; carouselSkip: string }) => {
-    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    await delay(fast ? 500 : 1500);
+  await page.evaluate(markHiddenUiLayers, { carouselSkip: CAROUSEL_SKIP_SELECTOR, settleMs: fastScroll ? 500 : 1500 })
+    .catch((err) => logger.debug(`  [UI LAYER MARK WARN] ${(err as Error).message}`));
+  await page.evaluate(async ({ carouselSkip }: { fast: boolean; carouselSkip: string }) => {
 
     const isZeroOpacity = (value: string | null | undefined): boolean => {
       if (!value) return false;
@@ -2111,6 +2368,7 @@ export async function capturePage(
     const isInactiveLayer = (el: HTMLElement): boolean => {
       if (el.getAttribute('aria-hidden') === 'true') return true;
       if (el.closest('[aria-hidden="true"]')) return true;
+      if (el.closest('[data-clonyfy-ui-hidden]')) return true;
       if (isInteractionReveal(el)) return true;
       return false;
     };
@@ -2404,6 +2662,38 @@ export async function capturePage(
     Promise.allSettled([...pendingNativeSaves]),
     new Promise((resolve) => setTimeout(resolve, 20_000)),
   ]);
+  // The nav recorder hovers every menu trigger; hover menus driven by the site's own
+  // timers can be left open afterwards (nuts.com Help dropdown + its backdrop). Save
+  // every interface layer in the closed state it had at rest.
+  // (Before shadow roots are copied into templates below, so their marks are kept.)
+  // The recorder reloads the page when a CTA click navigated: the marks are gone then, so
+  // mark the freshly loaded page (menus closed after a load) instead.
+  // A reload during the capture (route restore, recorder) can land on a bot check
+  // instead of the site. Never save that as the page — fail it like a blocked first load.
+  const challenge = await page.evaluate(() => {
+    if (/^\s*(Just a moment|Attention Required|Access denied)\b/i.test(document.title || '')) return document.title.trim();
+    if (document.querySelector('#challenge-form, #challenge-running, script[src*="/cdn-cgi/challenge-platform/"]')) return 'challenge';
+    return '';
+  }).catch(() => '');
+  if (challenge) {
+    const vendor = /cloudflare|cdn-cgi|Just a moment|Attention Required/i.test(`${challenge} ${await page.content().catch(() => '')}`.slice(0, 200_000)) ? 'Cloudflare' : 'bot protection';
+    throw new BotProtectionError(vendor, 403);
+  }
+  const uiMarked = await page.evaluate(() => !!(window as unknown as { __clonyfyUiHidden?: unknown }).__clonyfyUiHidden).catch(() => true);
+  if (!uiMarked) {
+    await page.evaluate(markHiddenUiLayers, { carouselSkip: CAROUSEL_SKIP_SELECTOR, settleMs: 0 })
+      .catch((err) => logger.debug(`  [UI LAYER MARK WARN] ${(err as Error).message}`));
+  }
+  await page.evaluate(() => {
+    const list = (window as unknown as { __clonyfyUiHidden?: Array<[Element, string | null, string | null]> }).__clonyfyUiHidden;
+    for (const [el, cls, style] of list || []) {
+      if (!el.isConnected) continue;
+      if (cls == null) el.removeAttribute('class'); else el.setAttribute('class', cls);
+      if (style == null) el.removeAttribute('style'); else el.setAttribute('style', style);
+      el.setAttribute('data-clonyfy-ui-hidden', '1');
+    }
+  }).catch(() => {});
+
   // CSS-in-JS libraries (styled-components, emotion…) insert rules straight into the
   // browser's style engine; their <style> tags stay empty in the HTML, so the snapshot
   // lost every style (zillow.com rendered as a bare list). Write the live rules into the
@@ -2617,6 +2907,11 @@ export async function capturePage(
   const navLinks = linkData.navLinks
     .map((link) => normalizePageUrl(link, pageUrl))
     .filter((link): link is string => !!link && new URL(link).origin === origin);
+
+  // Last look at the live page: how the site keeps content below a header that is fixed
+  // on small screens. Runs after the snapshot was taken, so it cannot change it.
+  const fixedOffsetRules = await probeFixedHeaderOffsets(page);
+  if (fixedOffsetRules?.length) finalHtml = injectFixedHeaderOffsets(finalHtml, fixedOffsetRules);
 
   const seenPaths = new Set<string>();
   const assets: AssetEntry[] = Array.from(assetMap.entries())

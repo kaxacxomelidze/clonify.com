@@ -132,12 +132,17 @@ async function setupRecorder(page: Page, maxTriggers: number, maxAddHtml: number
       '[class*="Tabs"] button',
     ].join(', ');
 
+    const COMMERCE_ACTION = /\badd[\s_-]*to[\s_-]*(?:cart|bag|basket)\b|\bbuy[\s_-]*(?:it[\s_-]*)?now\b|\bcheck[\s_-]*out\b|\bsubscribe\b|\bpre-?order\b|\bproduct-form__submit\b/i;
     const picked: Element[] = [];
     const consider = (el: Element | null) => {
       if (!el || picked.includes(el)) return;
       for (const s of picked) if (s.contains(el) || el.contains(s)) return;
       if (!visible(el)) return;
       if ((el as HTMLButtonElement).type === 'submit' && el.closest('form')) return;
+      // Store actions change the shop's state, not the page's: clicking them put real
+      // items in the cart (nuts.com product cards) and the badge count into the clone.
+      if (COMMERCE_ACTION.test(`${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('name') || ''} ${typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className : ''}`)
+        || el.closest('form[action*="/cart"], [data-add-to-cart], [data-product-form]')) return;
       // Skip plain navigation links — the nav runtime handles those.
       if (realHref(el) && !el.hasAttribute('aria-expanded') && !el.hasAttribute('aria-haspopup')
         && !el.hasAttribute('aria-controls') && !el.hasAttribute('data-toggle')
@@ -574,6 +579,47 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
       const restX = Math.round(viewport.width / 2);
       const restY = Math.max(1, viewport.height - 4);
       let blockedNavUrl: string | null = null;
+      // The probes click Sign in / cart / menu triggers, and sites keep what those did in
+      // cookies and storage (nuts.com: Shop's sign-in popup with a page-dimming backdrop,
+      // items in the cart). Rewind the session before each reload so the page saved after
+      // it is the first visit again, not the state left by our clicks.
+      const ctx = page.context();
+      const cookieSnapshot = await ctx.cookies().catch(() => null);
+      const storageSnapshot = await page.evaluate(() => {
+        const dump = (s: Storage) => {
+          const o: Record<string, string> = {};
+          for (let i = 0; i < s.length; i++) {
+            const k = s.key(i);
+            if (k != null) o[k] = s.getItem(k) ?? '';
+          }
+          return o;
+        };
+        try { return { l: dump(localStorage), s: dump(sessionStorage) }; } catch { return null; }
+      }).catch(() => null);
+      const rewindSession = async () => {
+        // Only drop cookies our clicks created (cart, sign-in state). Cookies the site set
+        // on load stay exactly as they are — bot protection would challenge a reset.
+        if (cookieSnapshot) {
+          const had = new Set(cookieSnapshot.map((c) => `${c.name}|${c.domain}|${c.path}`));
+          const now = await ctx.cookies().catch(() => []);
+          for (const c of now) {
+            if (had.has(`${c.name}|${c.domain}|${c.path}`)) continue;
+            await ctx.clearCookies({ name: c.name, domain: c.domain, path: c.path }).catch(() => {});
+          }
+        }
+        let sameOrigin = false;
+        try { sameOrigin = new URL(page.url()).origin === origin; } catch { /* ignore */ }
+        if (storageSnapshot && sameOrigin) {
+          await page.evaluate((st: { l: Record<string, string>; s: Record<string, string> }) => {
+            try {
+              localStorage.clear();
+              for (const [k, v] of Object.entries(st.l)) localStorage.setItem(k, v);
+              sessionStorage.clear();
+              for (const [k, v] of Object.entries(st.s)) sessionStorage.setItem(k, v);
+            } catch { /* storage blocked */ }
+          }, storageSnapshot).catch(() => {});
+        }
+      };
       const startPath = (() => {
         try {
           const u = new URL(startUrl);
@@ -599,7 +645,9 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
             return;
           }
         }
-        await route.continue();
+        // Hand everything else to the capture's own handler (private-address block,
+        // local /_assets, script stubs) — `continue()` would send it straight out.
+        await route.fallback();
       };
       await page.route('**/*', blockNavRoute);
 
@@ -608,8 +656,24 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
         'Se connecter', "S'inscrire", 'Essayer', 'Try', 'Commencer',
       ];
 
+      // A blocked navigation leaves this very document in place. Reloading anyway threw
+      // away everything the capture had prepared on it, and could land on a bot check
+      // (nuts.com: Cloudflare "Just a moment…"). Only reload when the page really changed:
+      // another URL, another document, or an SPA that tore its header down.
+      const docToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const stampDoc = () => page.evaluate((t: string) => { (window as any).__clonyfyRecDoc = t; }, docToken).catch(() => {});
+      await stampDoc();
+      const pageIntact = async () => {
+        if (!sameCapturePage(page.url())) return false;
+        return page.evaluate(({ t, n }: { t: string; n: number }) => (
+          (window as any).__clonyfyRecDoc === t && document.querySelectorAll('[data-clonyfy-ix]').length >= n
+        ), { t: docToken, n: setup.count }).catch(() => false);
+      };
+
       const healCapturePage = async () => {
+        logger.debug(`  [INTERACTIONS] page changed (${page.url()}) — reloading ${startUrl}`);
         await teardownRecorder(page, []).catch(() => {});
+        await rewindSession();
         await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
         await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
         await page.waitForTimeout(400);
@@ -617,6 +681,7 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
         if (!again || !again.count) return false;
         setup.clickable = again.clickable;
         setup.count = again.count;
+        await stampDoc();
         return true;
       };
 
@@ -645,7 +710,7 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
           hrefByIndex.set(key, pendingNav);
           hrefTextByIndex.set(key, name);
           logger.debug(`  [INTERACTIONS] CTA "${name}" -> ${pendingNav}`);
-          if (blockedNavUrl || page.url() !== startUrl) {
+          if ((blockedNavUrl || page.url() !== startUrl) && !(await pageIntact())) {
             if (!(await healCapturePage())) return;
           }
         }
@@ -721,6 +786,16 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
           }
 
           if (pendingNav && (blockedNavUrl || leftPage)) {
+            if (await pageIntact()) {
+              // Navigation blocked, document untouched: undo what the click changed instead
+              // of reloading. The trigger is recorded as a link (data-href), not as ops.
+              logger.debug(`  [INTERACTIONS] blocked navigation to ${pendingNav} — page intact, no reload`);
+              await page.mouse.move(restX, restY).catch(() => {});
+              await page.keyboard.press('Escape').catch(() => {});
+              if (ops.length) await page.evaluate((o: any[]) => (window as any).__clonyfyIx?.revert?.(o), ops).catch(() => {});
+              await page.evaluate(() => (window as any).__clonyfyIx?.baseline?.()).catch(() => {});
+              continue;
+            }
             if (!(await healCapturePage())) break;
             await page.evaluate(() => (window as any).__clonyfyIx?.start?.());
             await page.waitForTimeout(200);
@@ -747,9 +822,12 @@ export async function recordNavInteractions(page: Page, pageUrl: string, budgetM
 
       hrefEntries = [...hrefByIndex.entries()];
       hrefLabels = [...hrefTextByIndex.entries()];
-      // Heal once more so bake runs on a clean DOM with header CTAs present.
-      if (hrefEntries.length) {
+      // Heal once more so bake runs on a clean DOM with header CTAs present — only when
+      // the page was actually replaced or torn down.
+      if (hrefEntries.length && !(await pageIntact())) {
+        logger.debug(`  [INTERACTIONS] page changed (${page.url()}) — reloading ${startUrl} before baking links`);
         await teardownRecorder(page, []).catch(() => {});
+        await rewindSession();
         try {
           await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
           await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
